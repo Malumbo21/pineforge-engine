@@ -2883,25 +2883,26 @@ void BacktestEngine::apply_filled_order_to_state(
         // 100%, direction-appropriate margin == 100, placed TRUE-FLAT and still
         // FLAT at THIS fill, carrying zero actual opening commission, is
         // silently DROPPED (no trade row) when its frozen-qty cost at the
-        // SLIPPED FILL price exceeds the sizing-equity snapshot by more than one
-        // lot of slack:
+        // SLIPPED FILL price exceeds the sizing-equity snapshot at all —
+        // exact TV affordability, NO one-lot amnesty:
         //
         //   |frozen_default_qty| * slipped_fill * pv * fx * margin/100
         //     >  sizing_equity
-        //        + qty_step_ * slipped_fill * pv * fx * margin/100
         //        + max(1e-9, |sizing_equity|*1e-12)
         //
-        // This is the third, mutually-disjoint branch of the frozen-100%
-        // all-in true-flat family. It runs BEFORE the KI-54 flat admit below —
+        // This is a mutually-disjoint branch of the frozen-100% all-in
+        // true-flat family. It runs BEFORE the KI-54 flat admit below —
         // which prices flat opens at the SIZING notional (undeclinable by the
         // floor invariant) and would let this fill through:
-        //   - above-lot gap, ZERO opening fee    -> REJECT here       (this rule)
-        //   - above-lot gap, NONZERO opening fee -> fill, KI-61 entry-bar trim
-        //   - within one lot of slack            -> fill, held (KI-61-exempt)
+        //   - positive gap, ZERO opening fee    -> REJECT here       (this rule)
+        //   - positive gap, NONZERO opening fee -> fill, KI-61 entry-bar trim
         // Evidence: cntvxiao TV 0/556 positive-shortfall gap admissions across
         // BOTH sides (70 short / 62 long); rejected shorts open at a
         // FAVORABLE price, so the reproducing discriminator is NOTIONAL over-
-        // equity, not adverse gap sign. All provenance rides on the
+        // equity, not adverse gap sign. ycelestine77: 33/33 true-flat
+        // sub-lot-shortfall rejects on open-uptick fill bars (+0.01..+0.32),
+        // TV re-admits at the next gate-true close; cntvxiao census 0/556 TV
+        // positive-shortfall admissions. All provenance rides on the
         // direction-neutral opening_affordability_exemption_candidate flag (set
         // at placement, engine_strategy_commands.cpp): it already encodes
         // created-true-flat, percent_of_equity==100, direction-appropriate
@@ -2936,14 +2937,9 @@ void BacktestEngine::apply_filled_order_to_state(
                                             * slipped_fill * syminfo_.pointvalue
                                             * sizing_fx
                                             * (margin_pct / 100.0);
-                const double one_lot_slack = qty_step_ * slipped_fill
-                                             * syminfo_.pointvalue
-                                             * sizing_fx
-                                             * (margin_pct / 100.0);
                 const double float_guard =
                     std::max(1e-9, std::abs(order.sizing_equity) * 1e-12);
-                if (gap_notional
-                    > order.sizing_equity + one_lot_slack + float_guard) {
+                if (gap_notional > order.sizing_equity + float_guard) {
                     decline_and_cancel();
                     return;
                 }
