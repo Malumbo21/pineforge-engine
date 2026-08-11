@@ -171,7 +171,33 @@ static int64_t utc_bucket_open_ms(int64_t bar_ms, int period_sec) {
     return q * period_ms;
 }
 
+static int64_t calendar_week_open_local_ms_tz(int64_t bar_ms, const std::string& tz);
+
 static int64_t calendar_week_open_local_ms(int64_t bar_ms, const std::string& tz) {
+    // UTC needs no tzset: the Monday-00:00 week floor is exact integer
+    // arithmetic on the epoch day number (1970-01-01 = day 0 was a THURSDAY,
+    // tm_wday 4; the slow path opens weeks on Monday via (tm_wday + 6) % 7).
+    // Avoiding ScopedTimezone(UTC) here keeps the process TZ from flipping to
+    // UTC every bar (which would re-slow the strategy's hour()/minute() zone)
+    // — see KI-35: time("W") under UTC alternating with hour(time, tz) defeats
+    // the single-slot g_active_tz cache and pays a tzset->notifyd round trip
+    // per bar.
+    {
+        const std::string t = normalize_timezone_for_posix(tz);
+        if (t.empty() || t == "UTC" || t == "Etc/UTC") {
+            time_t secs = static_cast<time_t>(bar_ms / 1000);
+            int64_t days = static_cast<int64_t>(secs) / 86400;
+            if (secs % 86400 != 0 && secs < 0)
+                --days;  // floor toward -inf (pre-1970 bars)
+            int wday = static_cast<int>(((days + 4) % 7 + 7) % 7);  // 0=Sun, == tm_wday
+            int days_from_mon = (wday + 6) % 7;
+            return (days - days_from_mon) * 86400000LL;
+        }
+    }
+    return calendar_week_open_local_ms_tz(bar_ms, tz);
+}
+
+static int64_t calendar_week_open_local_ms_tz(int64_t bar_ms, const std::string& tz) {
     pine_tz::ScopedTimezone guard(tz);
     time_t secs = static_cast<time_t>(bar_ms / 1000);
     struct tm local_tm {};
@@ -186,7 +212,30 @@ static int64_t calendar_week_open_local_ms(int64_t bar_ms, const std::string& tz
     return static_cast<int64_t>(wk0) * 1000;
 }
 
+static int64_t calendar_month_open_local_ms_tz(int64_t bar_ms, const std::string& tz);
+
 static int64_t calendar_month_open_local_ms(int64_t bar_ms, const std::string& tz) {
+    // UTC needs no tzset: gmtime_r yields the day-of-month, and every UTC day
+    // is exactly 86400 s, so the month open is the day floor minus
+    // (tm_mday - 1) days. Avoiding ScopedTimezone(UTC) here keeps the process
+    // TZ from flipping to UTC every bar (which would re-slow the strategy's
+    // hour()/minute() zone) — see KI-35.
+    {
+        const std::string t = normalize_timezone_for_posix(tz);
+        if (t.empty() || t == "UTC" || t == "Etc/UTC") {
+            time_t secs = static_cast<time_t>(bar_ms / 1000);
+            int64_t days = static_cast<int64_t>(secs) / 86400;
+            if (secs % 86400 != 0 && secs < 0)
+                --days;  // floor toward -inf (pre-1970 bars)
+            struct tm g {};
+            gmtime_r(&secs, &g);
+            return (days - (g.tm_mday - 1)) * 86400000LL;
+        }
+    }
+    return calendar_month_open_local_ms_tz(bar_ms, tz);
+}
+
+static int64_t calendar_month_open_local_ms_tz(int64_t bar_ms, const std::string& tz) {
     pine_tz::ScopedTimezone guard(tz);
     time_t secs = static_cast<time_t>(bar_ms / 1000);
     struct tm local_tm {};
@@ -379,10 +428,8 @@ bool passes_session_filter(const std::string& session,
     std::unordered_set<int> day_filter;
     parse_day_filter(session, windows, &day_filter);
 
-    pine_tz::ScopedTimezone guard(tz);
-    time_t secs = static_cast<time_t>(bar_ms / 1000);
     struct tm local_tm {};
-    localtime_r(&secs, &local_tm);
+    decompose_ms_local(bar_ms, tz, local_tm);  // gmtime_r for UTC (no TZ flip)
 
     int tv_dow = local_tm.tm_wday + 1;  // 1=Sunday
     if (!day_filter.empty() && day_filter.count(tv_dow) == 0)
@@ -423,10 +470,8 @@ bool pine_session_ispremarket(const std::string& session,
 
     int pre_open_min = 4 * 60;
 
-    pine_tz::ScopedTimezone guard(tz);
-    time_t secs = static_cast<time_t>(bar_ms / 1000);
     struct tm local_tm {};
-    localtime_r(&secs, &local_tm);
+    decompose_ms_local(bar_ms, tz, local_tm);  // gmtime_r for UTC (no TZ flip)
 
     int tv_dow = local_tm.tm_wday + 1;
     if (!day_filter.empty() && day_filter.count(tv_dow) == 0)
@@ -458,10 +503,8 @@ bool pine_session_ispostmarket(const std::string& session,
 
     int post_close_min = 20 * 60;
 
-    pine_tz::ScopedTimezone guard(tz);
-    time_t secs = static_cast<time_t>(bar_ms / 1000);
     struct tm local_tm {};
-    localtime_r(&secs, &local_tm);
+    decompose_ms_local(bar_ms, tz, local_tm);  // gmtime_r for UTC (no TZ flip)
 
     int tv_dow = local_tm.tm_wday + 1;
     if (!day_filter.empty() && day_filter.count(tv_dow) == 0)
