@@ -93,6 +93,7 @@ set(TEST_SOURCES
     test_close_all_coqueued_entry
     test_same_bar_add_exit_coverage
     test_declined_reversal_close_leg
+    test_bracket_lifecycle_declined_reversal
     test_dual_entry_placement_sizing
     test_default_flat_market_gross_admission
     test_live_position_market_gross_admission
@@ -107,6 +108,7 @@ set(TEST_SOURCES
     test_drawing
     test_margin_call
     test_margin_call_intrabar_chronology
+    test_margin_call_1x_long_entry_fill
     test_percent_equity_open_entry_fee
     test_streaming
     test_calc_on_order_fills

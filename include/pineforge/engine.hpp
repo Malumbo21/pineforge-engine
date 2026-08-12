@@ -551,6 +551,14 @@ struct PendingOrder {
     // flag is never set, so the fix is inert. See suppress_declined_reversal_
     // close_legs (engine_fills.cpp).
     bool suppress_as_declined_reversal_close = false;
+    // finding-311 (bracket lifecycle on declined reversal): a standing exit
+    // bracket of the live position goes DORMANT when an in-position opposite
+    // entry is declined at its fill re-check (the tradeless reversal). A
+    // dormant bracket never matches a fill. It revives with ORIGINAL prices
+    // when a margin-call partial re-registers the surviving position's exits,
+    // or is replaced wholesale by a fresh same-(id,from_entry) strategy.exit
+    // call (which arms the NEW call's prices, the ordinary re-issue path).
+    bool dormant_bracket = false;
     // Qty this deferred close debited from id_unclosed_qty_[<bare id>] in
     // compute_close_target_qty's default-FIFO branch at strategy.close CALL
     // time. On the false->true suppression transition it is re-credited to that
@@ -1324,6 +1332,17 @@ protected:
     // then fills the reduced remainder.
     bool margin_call_slice_before_priced_exit(const Bar& bar,
                                               double exit_fill_price);
+    // finding-325 (1x-long entry-fill affordability chronology): TV runs the
+    // 1x-long (margin_long=100) opening-affordability check AT THE ENTRY
+    // FILL, chronologically before the same bar's intrabar exits. When a
+    // priced exit of a just-opened 1x long is about to fill on the entry's
+    // own bar and the floor-sized opening cost exceeds post-close equity,
+    // the one-shot opening event books its trim FIRST — the ordinary
+    // floor-before-4x quantity (including the sub-lot one-contract
+    // fallback), filled at the RAW matched entry base, tagged "Margin call"
+    // — and the exit then closes the reduced remainder. Consumes the
+    // pending opening event; returns true when a slice was booked.
+    bool margin_call_1x_long_opening_slice_before_priced_exit(const Bar& bar);
     // A timestamped FX rollover is a broker-open event, not an end-of-bar
     // adverse-price check.  Cell A1 supports carried 1x full-margin long and
     // short in ordinary historical dispatch; leveraged shapes stay fail-closed.
@@ -2437,6 +2456,15 @@ private:
     // side (see PendingOrder::suppress_as_declined_reversal_close), re-crediting
     // each flagged close's consumed id-ledger exactly once.
     void suppress_declined_reversal_close_legs(const PendingOrder& declined_entry);
+    // finding-311: mark the live position's standing strategy.exit brackets
+    // dormant when an in-position reversal entry is declined at fill.
+    void mark_position_brackets_dormant_on_declined_reversal();
+    // finding-311: a margin-call partial re-registers the surviving
+    // position's exit brackets (revive with original prices). When the
+    // margin-call event price makes a revived bracket marketable, the whole
+    // remaining position closes at that price through the bracket's id.
+    void revive_position_brackets_after_margin_call_partial(
+        double margin_call_event_price);
     // Per-OrderType fill kernels. Called only after risk + intraday
     // gates pass; each updates the engine's position/trade state and
     // any per-type out-parameters the post-fill bookkeeping needs.
