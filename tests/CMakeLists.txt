@@ -62,6 +62,7 @@ set(TEST_SOURCES
     test_market_structure_fills
     test_handle_reuse_reset
     test_calendar_aggregation_wm
+    test_calendar_wm_open_utc_fastpath
     test_adversarial_ohlcv
     test_report_trace
     test_path_resolve_extra

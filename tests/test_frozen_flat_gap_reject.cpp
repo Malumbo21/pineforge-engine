@@ -1,7 +1,7 @@
 /*
  * test_frozen_flat_gap_reject.cpp — TradingView's fill-time REJECTION of a
  * frozen 100%-of-equity true-flat MARKET entry whose gapped fill price pushes
- * the frozen-quantity notional more than one lot past the sizing equity.
+ * the frozen-quantity notional past the sizing equity at all.
  *
  * Rule (design-cntvxiao-gap-reject, PANEL-CLEARED): a pending MARKET entry
  * created by high-level strategy.entry with omitted qty (frozen default sizing,
@@ -12,18 +12,18 @@
  *
  *   |frozen_default_qty| * slipped_fill * pv * fx * margin/100
  *     >  sizing_equity
- *        + qty_step_ * slipped_fill * pv * fx * margin/100
  *        + max(1e-9, |sizing_equity| * 1e-12)
  *
- * Direction-symmetric (long AND short). Within-one-lot (sub-lot) shortfalls
- * still FILL; commissioned or pct<100 or gap-DOWN entries are untouched (they
- * keep the KI-61 fill-then-trim / hold path). See the gate in
+ * Direction-symmetric (long AND short). ANY positive shortfall rejects — there
+ * is NO one-lot amnesty; commissioned or pct<100 or gap-DOWN entries are
+ * untouched (they keep the KI-61 fill-then-trim / hold path). See the gate in
  * engine_fills.cpp apply_filled_order_to_state for the evidence trail.
  *
  * RED-4  SHORT true-flat zero-comm above-lot gap  -> rejected (FLAT, no rows).
  * RED-6  rejected SHORT emits NO rows AT ALL, incl. the entry-bar margin-call
  *        trim rows the pre-fix engine produced.
- * GREEN-A within-one-lot gap-up (qty_step>0) STILL FILLS.
+ * RED-5  sub-lot positive-shortfall gap-up (qty_step>0) -> rejected (FLAT,
+ *        no rows).
  * GREEN-B strategy.exit bracket bound to a flat-dropped entry id is inert
  *        (no phantom exit fill, no crash).
  * GREEN-C commissioned twin: fills then takes the KI-61 4-lot Margin-call trim.
@@ -162,24 +162,26 @@ void test_rejected_short_emits_no_margin_call_rows() {
     CHECK_NEAR(eng.position_size(), 0.0, 1e-9);
 }
 
-// GREEN-A (was RED-5). Within-one-lot gap-up STILL FILLS. qty_step 1 leaves a
-// real lot of slack: frozen 100 @ close 100; fill 100.5 -> notional 10050, a
-// shortfall of 50 over equity 10000, but one lot is qty_step*fill = 100.5, so
-// the shortfall is inside the slack. The entry must be admitted (and held; the
-// zero-comm true-flat all-in fill is KI-61-exempt from the affordability trim).
-void test_within_one_lot_gap_up_fills() {
-    std::printf("-- GREEN-A: within-one-lot gap-up fills --\n");
+// RED-5. Sub-lot positive shortfall REJECTS. qty_step 1: frozen 100 @ close
+// 100; fill 100.5 -> notional 10050, a shortfall of 50 over equity 10000 —
+// positive but under one lot (qty_step*fill = 100.5). TV re-checks the frozen
+// margin against the sizing-equity snapshot at fill and cancels on ANY
+// positive shortfall — no one-lot amnesty. Evidence: ycelestine77 33/33
+// true-flat sub-lot-shortfall rejects on open-uptick fill bars (+0.01..+0.32);
+// cntvxiao census 0/556 TV positive-shortfall admissions.
+void test_sub_lot_positive_shortfall_rejected() {
+    std::printf("-- RED-5: sub-lot positive shortfall rejects --\n");
     Probe eng(/*pct=*/100.0, /*capital=*/10000.0, /*qty_step=*/1.0,
               /*commission_pct=*/0.0, /*enable_mc=*/true);
     eng.script = "L..";
     std::vector<Bar> bars = {
         mk_bar(1000, 100,   100,   100,   100),     // frozen floor(100)=100
-        mk_bar(2000, 100.5, 101,   100.5, 100.5),   // shortfall 50 < lot 100.5
+        mk_bar(2000, 100.5, 101,   100.5, 100.5),   // shortfall 50 > 0 -> DROP
         mk_bar(3000, 100.5, 100.5, 100.5, 100.5),
     };
     eng.run(bars.data(), (int)bars.size());
-    CHECK(eng.position_side_ == PositionSide::LONG);
-    CHECK_NEAR(eng.position_size(), 100.0, 1e-9);
+    CHECK(eng.position_side_ == PositionSide::FLAT);   // pre-fix: LONG
+    CHECK_NEAR(eng.position_size(), 0.0, 1e-9);
     CHECK(eng.trade_count() == 0);
 }
 
@@ -272,7 +274,7 @@ int main() {
     std::printf("--- frozen_flat_gap_reject ---\n");
     test_short_true_flat_above_lot_gap_rejected();
     test_rejected_short_emits_no_margin_call_rows();
-    test_within_one_lot_gap_up_fills();
+    test_sub_lot_positive_shortfall_rejected();
     test_dangling_exit_bracket_is_inert();
     test_commissioned_all_in_gap_fills_then_trims();
     test_pct99_twin_fills();

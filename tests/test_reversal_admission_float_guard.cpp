@@ -40,8 +40,9 @@
  * floored against the PREVIOUS bar's close while the order fills at THIS bar's
  * open: the overshoot is an observable gap, not floor luck.
  *
- * Pins below (A-D are the reversal arm; E-G are the scope controls that must
- * NOT move):
+ * Pins below (A-D are the reversal arm; E and G are the scope controls that
+ * must NOT move; F rides the SEPARATE true-flat gap-reject upstream of KI-54,
+ * which has since dropped its own one-lot slack — design-cntvxiao-gap-reject):
  *   A. Reversal, adverse gap costing LESS than one lot -> DECLINED (the RED:
  *      base admits this).
  *   B. Reversal, zero gap (required == free exactly) -> ADMITTED. The guard is
@@ -52,8 +53,9 @@
  *      ADMITTED (the add arm keeps the widening), and its above-one-lot
  *      sibling is still DECLINED. This pair is what proves the term is still
  *      load-bearing where it was left in place.
- *   F. SCOPE: flat open on the SAME sub-lot adverse gap as pin A -> ADMITTED.
- *      The exact mirror of A on the flat arm.
+ *   F. Flat open on the SAME sub-lot adverse gap as pin A -> DECLINED by the
+ *      true-flat zero-commission gap-reject upstream of KI-54, which no
+ *      longer grants one lot of slack: TV cancels on ANY positive shortfall.
  *   G. SCOPE: qty_step == 0 (no lot quantization) is unchanged by definition —
  *      the one-lot term was already zero there, so base and patched must agree.
  *
@@ -267,17 +269,19 @@ void test_same_dir_add_keeps_one_lot_slack() {
     }
 }
 
-// F. SCOPE CONTROL — the FLAT open on pin A's exact gap is unaffected.
-//    Frozen qty = floor_1(10000/100) = 100, sizing_price 100, and the bar opens
-//    at 100.5 — byte-for-byte the same adverse gap that pin A now declines.
-//    Two separate mechanisms must both keep admitting it:
-//      * the true-flat zero-commission gap-reject above the KI-54 gate, whose
-//        own one-lot slack ($100.5) still covers the $50 gap notional; and
-//      * the KI-54 gate itself, which prices a flat open at the SIZING price
-//        (required 10000 == free 10000, the floor invariant).
-//    So the entry fills, at the gapped open, carrying the frozen quantity.
-void test_flat_open_sub_lot_gap_still_admitted() {
-    std::printf("-- F: flat open on the same sub-lot gap, ADMITTED --\n");
+// F. The FLAT open on pin A's exact gap is DECLINED — by the upstream gate,
+//    not by KI-54. Frozen qty = floor_1(10000/100) = 100, sizing_price 100,
+//    and the bar opens at 100.5 — byte-for-byte the same adverse gap that pin
+//    A declines. The true-flat zero-commission gap-reject above the KI-54 gate
+//    dropped its one-lot slack (design-cntvxiao-gap-reject): TV re-checks the
+//    frozen margin against the sizing-equity snapshot at fill and cancels on
+//    ANY positive shortfall ($50 here). Evidence: ycelestine77 33/33 true-flat
+//    sub-lot-shortfall rejects on open-uptick fill bars (+0.01..+0.32);
+//    cntvxiao census 0/556 TV positive-shortfall admissions. The KI-54 flat
+//    admit (which prices at the SIZING notional, required 10000 == free 10000)
+//    is never reached.
+void test_flat_open_sub_lot_gap_declined() {
+    std::printf("-- F: flat open on the same sub-lot gap, DECLINED --\n");
     Probe eng(QtyType::PERCENT_OF_EQUITY, 100.0, 1, /*step=*/1.0);
     eng.script = "L..";
     std::vector<Bar> bars = {
@@ -286,8 +290,9 @@ void test_flat_open_sub_lot_gap_still_admitted() {
         mk_bar(3000, 100.5, 100.5, 100.5, 100.5),
     };
     eng.run(bars.data(), (int)bars.size());
-    CHECK(eng.position_side_ == PositionSide::LONG);
-    CHECK_NEAR(eng.position_qty_, 100.0, 1e-9);
+    CHECK(eng.position_side_ == PositionSide::FLAT);   // entry dropped
+    CHECK_NEAR(eng.position_qty_, 0.0, 1e-9);
+    CHECK(eng.trade_count() == 0);
 }
 
 // G. SCOPE CONTROL — with qty_step 0 the one-lot term was already identically
@@ -319,7 +324,7 @@ int main() {
     test_reversal_favourable_gap_admitted();
     test_reversal_above_lot_gap_still_declined();
     test_same_dir_add_keeps_one_lot_slack();
-    test_flat_open_sub_lot_gap_still_admitted();
+    test_flat_open_sub_lot_gap_declined();
     test_zero_qty_step_unchanged();
     std::printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed == 0 ? 0 : 1;
