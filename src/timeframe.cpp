@@ -1,4 +1,5 @@
 #include <pineforge/timeframe.hpp>
+#include <pineforge/session_time.hpp>
 #include <cctype>
 #include <ctime>
 #include <algorithm>
@@ -137,10 +138,121 @@ static void decompose_utc(int64_t ms, struct tm& out) {
     gmtime_r(&secs, &out);
 }
 
+// ─── Symbol-clock anchoring ────────────────────────────────────────────────────
+//
+// HTF bucket keys for session symbols run on the exchange clock, not the raw
+// epoch grid: TradingView anchors daily boundaries at symbol-local midnight
+// and intraday buckets offset by the session open (09:30 on equities), which
+// is why a 4h request.security on a stock does not group at 12:00/16:00 UTC.
+// With tz=UTC and no session every helper below reduces to plain epoch
+// arithmetic — bit-identical to the previous behavior the corpus pins.
+
+static int64_t utc_floor_day_ms(int64_t ms) {
+    return (ms / kMsPerDay) * kMsPerDay;
+}
+
+/// Offset (ms) that tz adds to wall-clock time at `ms`. Cached per local day:
+/// the value only changes at DST edges, and calendar_day_open_local_ms keeps
+/// its own UTC integer fast path, so the hot loop never enters ScopedTimezone.
+static int64_t tz_offset_ms(int64_t ms, const std::string& tz) {
+    if (tz.empty() || tz == "UTC" || tz == "Etc/UTC") return 0;
+    // Memoize per UTC DAY, checked BEFORE the slow ScopedTimezone/mktime
+    // path: one miss per symbol-day instead of per call/hour. DST
+    // transitions land on wall-clock hours while session markets are closed
+    // (02:00 local Sunday), so the first bar seen on each UTC date carries
+    // the offset every traded bar of that date uses.
+    thread_local int64_t cache_key = -1, cache_val = 0;
+    const int64_t dayk = utc_floor_day_ms(ms);
+    if (dayk == cache_key) return cache_val;
+    int64_t day_open = calendar_day_open_local_ms(ms, tz);
+    cache_val = day_open - dayk;
+    cache_key = dayk;
+    return cache_val;
+}
+
+/// Minutes from symbol-local midnight to the first session window's open
+/// ("0930-1600..." -> 570). Empty/"24x7" sessions anchor nothing.
+static int session_open_offset_minutes(const std::string& session) {
+    if (session.empty() || session == "24x7") return 0;
+    int digits = 0, value = 0;
+    for (char c : session) {
+        if (c >= '0' && c <= '9') {
+            value = value * 10 + (c - '0');
+            if (++digits >= 4) break;
+        } else if (digits > 0) {
+            break;
+        }
+    }
+    return (value / 100) * 60 + (value % 100);
+}
+
+/// Timestamp moved onto the exchange clock (tz offset only). This is the
+/// clock for CALENDAR periods: TV splits D/W/M at symbol-local midnight.
+/// Subtracting the session open here too would SHIFT each session wholesale
+/// instead of anchoring it — daily grouping became tz-invariant, which is
+/// exactly the bug this split fixes.
+static int64_t calendar_clock_ms(int64_t ts, const std::string& tz) {
+    return ts - tz_offset_ms(ts, tz);
+}
+
+/// Intraday grid clock: exchange-tz seconds since (local-midnight + session
+/// open), so integer division by the bucket width reproduces TV's
+/// session-open-anchored grouping (09:30/13:30 on equities).
+static int64_t intraday_clock_ms(int64_t ts, const std::string& tz,
+                                 const std::string& session) {
+    return calendar_clock_ms(ts, tz)
+               - static_cast<int64_t>(session_open_offset_minutes(session)) * 60000;
+}
+
+/// Minutes from symbol-local midnight to the first session window's CLOSE
+/// ("0930-1600..." -> 960). Returns -1 when the session is none/24x7/wrapped
+/// (end<=start), in which case eager session-close completion is unavailable
+/// and callers fall back to the next-bar-crossing rule.
+static int session_close_offset_minutes(const std::string& session) {
+    if (session.empty() || session == "24x7") return -1;
+    int values[2] = {-1, -1};
+    int idx = 0, digits = 0, value = 0;
+    for (char c : session) {
+        if (c >= '0' && c <= '9') {
+            value = value * 10 + (c - '0');
+            if (++digits == 4) {
+                if (idx < 2) values[idx] = value;
+                ++idx;
+                digits = 0;
+                value = 0;
+                if (idx > 2) break;
+            }
+        } else if (digits > 0) {
+            digits = 0; value = 0;
+        }
+        if (idx >= 2) break;
+    }
+    if (values[0] < 0 || values[1] < 0) return -1;
+    int start = (values[0] / 100) * 60 + (values[0] % 100);
+    int end = (values[1] / 100) * 60 + (values[1] % 100);
+    if (end <= start) return -1;  // wrapped/overnight window: no eager rule
+    return end;
+}
+
+static const std::string& anchor_utc() {
+    static const std::string s = "UTC";
+    return s;
+}
+static const std::string& empty_session() {
+    static const std::string s;
+    return s;
+}
+
 bool crosses_boundary(int64_t prev_ms, int64_t curr_ms, CalendarPeriod period) {
+    return crosses_boundary(prev_ms, curr_ms, period, "UTC", "");
+}
+
+bool crosses_boundary(int64_t prev_ms, int64_t curr_ms, CalendarPeriod period,
+                      const std::string& tz, const std::string& session) {
+    (void)session;  // calendar periods ignore the session: local-midnight split
     struct tm prev_tm, curr_tm;
-    decompose_utc(prev_ms, prev_tm);
-    decompose_utc(curr_ms, curr_tm);
+    decompose_utc(calendar_clock_ms(prev_ms, tz), prev_tm);
+    decompose_utc(calendar_clock_ms(curr_ms, tz), curr_tm);
 
     switch (period) {
         case CalendarPeriod::DAY:
@@ -180,15 +292,21 @@ bool crosses_boundary(int64_t prev_ms, int64_t curr_ms, CalendarPeriod period) {
 // ─── tf_change ────────────────────────────────────────────────────────────────
 
 bool tf_change(int64_t prev_ms, int64_t curr_ms, const std::string& tf) {
+    return tf_change(prev_ms, curr_ms, tf, "UTC", "");
+}
+
+bool tf_change(int64_t prev_ms, int64_t curr_ms, const std::string& tf,
+               const std::string& tz, const std::string& session) {
     if (prev_ms == 0 || curr_ms == 0) return false;
     CalendarPeriod period = calendar_period_for(tf);
     if (period != CalendarPeriod::NONE) {
-        return crosses_boundary(prev_ms, curr_ms, period);
+        return crosses_boundary(prev_ms, curr_ms, period, tz, session);
     }
     int secs = tf_to_seconds(tf);
     if (secs <= 0) return false;
     int64_t bucket_ms = static_cast<int64_t>(secs) * 1000;
-    return (prev_ms / bucket_ms) != (curr_ms / bucket_ms);
+    return (intraday_clock_ms(prev_ms, tz, session) / bucket_ms) !=
+           (intraday_clock_ms(curr_ms, tz, session) / bucket_ms);
 }
 
 // ─── TimeframeAggregator ───────────────────────────────────────────────────────
@@ -225,6 +343,15 @@ TimeframeAggregator::TimeframeAggregator(const std::string& target_tf,
     if (in_s > 0) input_seconds_ = in_s;
 }
 
+TimeframeAggregator::TimeframeAggregator(const std::string& target_tf,
+                                         const std::string& input_tf,
+                                         const std::string& tz,
+                                         const std::string& session)
+    : TimeframeAggregator(target_tf, input_tf) {
+    anchor_tz_ = tz.empty() ? "UTC" : tz;
+    anchor_session_ = session;
+}
+
 void TimeframeAggregator::reset_current(const Bar& bar) {
     current_bar_ = bar;
     sub_bar_count_ = 1;
@@ -258,6 +385,8 @@ struct FeedState {
     bool& current_emitted_complete;
     Bar& last_completed_bar;
     bool& has_completed;
+    const std::string* anchor_tz = nullptr;
+    const std::string* anchor_session = nullptr;
 };
 
 void feed_reset_current(FeedState s, const Bar& bar) {
@@ -295,8 +424,10 @@ AggregatedBar feed_ratio_mode(const Bar& input_bar, FeedState s,
         // - emit completed bars at the LAST sub-bar of the bucket (count hit),
         // - still emit at boundary for sparse/irregular data (partial bucket).
         int64_t bucket_ms = static_cast<int64_t>(target_seconds) * 1000;
-        int64_t curr_bucket = s.current_bar.timestamp / bucket_ms;
-        int64_t next_bucket = input_bar.timestamp / bucket_ms;
+        const std::string& atz = s.anchor_tz ? *s.anchor_tz : anchor_utc();
+        const std::string& asess = s.anchor_session ? *s.anchor_session : empty_session();
+        int64_t curr_bucket = intraday_clock_ms(s.current_bar.timestamp, atz, asess) / bucket_ms;
+        int64_t next_bucket = intraday_clock_ms(input_bar.timestamp, atz, asess) / bucket_ms;
         bool boundary = next_bucket != curr_bucket;
 
         if (boundary) {
@@ -367,8 +498,10 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
 
     // Does the new bar fall in a different calendar period than
     // the current group's first bar?
+    const std::string& atz = s.anchor_tz ? *s.anchor_tz : anchor_utc();
+    const std::string& asess = s.anchor_session ? *s.anchor_session : empty_session();
     if (crosses_boundary(s.current_bar.timestamp, input_bar.timestamp,
-                          cal_period)) {
+                          cal_period, atz, asess)) {
         if (s.current_emitted_complete) {
             feed_reset_current(s, input_bar);
             result.bar = s.current_bar;
@@ -394,14 +527,41 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
     // Same calendar period: merge. TradingView-style: the aggregated period is
     // complete once we have processed a bar such that the *next* bar of input_tf
     // duration would cross the calendar boundary (e.g. last 1m of the session
-    // completes the daily bar). This matches request.security HTF behavior used in
-    // validation; "complete only on the next period's first bar" shifts all HTF
+    // completes the daily bar). This matches request.security HTF behavior used
+    // in validation; "complete only on the next period's first bar" shifts all HTF
     // series and breaks TV parity.
+    //
+    // Session symbols never reach that crossing inside the session (an RTH day
+    // ends at 16:00 local, far from midnight), so on such feeds the rule above
+    // always defers completion to the NEXT session's first bar — exposing the
+    // finished daily bucket a full session after TV does. When the run declares
+    // a same-day session window, complete eagerly on the bar whose close
+    // reaches the session end: that is TV's own bucket-final bar.
     feed_merge_into_current(s, input_bar);
     bool complete = false;
     if (input_seconds > 0) {
+        const std::string& atz = s.anchor_tz ? *s.anchor_tz : anchor_utc();
+        const std::string& asess = s.anchor_session ? *s.anchor_session : empty_session();
         int64_t next_ms = input_bar.timestamp + input_seconds * 1000;
-        complete = crosses_boundary(input_bar.timestamp, next_ms, cal_period);
+        complete = crosses_boundary(input_bar.timestamp, next_ms, cal_period,
+                                    atz, asess);
+        if (!complete && cal_period != CalendarPeriod::NONE) {
+            // Eager session-close completion applies only to the period's
+            // FINAL session: today's session must be the last one in this
+            // day/week/month (same-wall-clock-tomorrow starts a new period).
+            const int end_min = session_close_offset_minutes(asess);
+            if (end_min > 0
+                && crosses_boundary(input_bar.timestamp,
+                                    input_bar.timestamp + kMsPerDay,
+                                    cal_period, atz, asess)) {
+                const int64_t local = calendar_clock_ms(input_bar.timestamp, atz);
+                const int64_t pos_ms = local - (local / kMsPerDay) * kMsPerDay
+                                     + input_seconds * 1000;
+                if (pos_ms >= static_cast<int64_t>(end_min) * 60000) {
+                    complete = true;
+                }
+            }
+        }
     }
     if (complete) {
         s.last_completed_bar = s.current_bar;
@@ -422,7 +582,8 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
 
 AggregatedBar TimeframeAggregator::feed(const Bar& input_bar) {
     FeedState s{current_bar_, sub_bar_count_, current_emitted_complete_,
-                last_completed_bar_, has_completed_};
+                last_completed_bar_, has_completed_,
+                &anchor_tz_, &anchor_session_};
     switch (mode_) {
         case Mode::PASSTHROUGH:
             return feed_passthrough_mode(input_bar, s);
