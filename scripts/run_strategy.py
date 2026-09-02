@@ -665,6 +665,9 @@ class TradeC(ctypes.Structure):
         ("commission", ctypes.c_double),
         ("entry_bar_index", ctypes.c_int32),
         ("exit_bar_index", ctypes.c_int32),
+        # ABI v3: 1 on the range-end close of a position still open after the
+        # final bar (TradingView's deep-backtest accounting; pineforge.h).
+        ("open_at_end", ctypes.c_int32),
     ]
 
 
@@ -767,10 +770,15 @@ class ReportC(ctypes.Structure):
 
 
 # ABI version this harness mirrors (PF_ABI_VERSION in pineforge.h).
-# pf_report_t is CALLER-allocated: running an old .so against the v2
+# pf_report_t is CALLER-allocated: running an old .so against the v3
 # ReportC mirror (or vice versa) silently corrupts memory, so the .so's
-# pf_abi_version() export is asserted before any run.
-EXPECTED_PF_ABI = 2
+# pf_abi_version() export is asserted before any run. v3 appended
+# pf_trade_t::open_at_end (TradeC above); test_run_strategy_range_end.py
+# pins this constant to the header's macro, because the campaign's
+# verifier runs every probe through THIS harness and a stale guard here
+# is a run-error on every slug (the f-1d spark pre-check of 2026-09-02
+# found exactly that: ".so reports 3, harness expects 2" x64).
+EXPECTED_PF_ABI = 3
 
 
 def _check_abi(lib: ctypes.CDLL) -> None:
@@ -1641,6 +1649,13 @@ def _report_to_dict(r: ReportC) -> dict:
             "commission": float(t.commission),
             "entry_bar_index": int(t.entry_bar_index),
             "exit_bar_index": int(t.exit_bar_index),
+            # Range-end close of a position still open after the final bar
+            # (engine_orders.cpp record_range_end_close_trades). Carried
+            # through for JSON consumers; main() writes the row to the CSV as
+            # an ordinary exit when the tape prints it that way (ws-report-v1)
+            # and withholds it when the tape marks it "Open" (browser export;
+            # _tv_tape_marks_open_rows, _withhold_open_at_end_trades).
+            "open_at_end": bool(t.open_at_end),
         })
     trace_names: list[str] = []
     for i in range(r.trace_names_len):
@@ -1713,6 +1728,314 @@ def _filter_trace_to_window(trace: list[dict], window: tuple[int, int] | None) -
     ]
 
 
+def _tv_metrics_path(strategy_dir: Path, meta: dict, tv_path: Path) -> Path:
+    """Where the tape's metrics.json lives: ``tv_metrics_json`` from the
+    probe's inputs.json when set (relative to ``strategy_dir``), else the
+    ``metrics.json`` beside the tape — the scrapper's probe directory, the
+    case runner's ``data/<group>/<slug>/`` copy and ``lab tv``'s export all
+    write the four files (strategy.pine, tv_trades.csv, metrics.json,
+    meta.json) side by side."""
+    name = str(meta.get("tv_metrics_json", "")).strip()
+    if name:
+        return strategy_dir / name
+    return tv_path.parent / "metrics.json"
+
+
+def _tv_metrics_range_end(metrics: dict) -> tuple[int, str] | None:
+    """TradingView's backtest range END from a tape's metrics.json, in ms,
+    with the key it was read from: the ``to`` of the deep-backtest window,
+    as 00:00 UTC of that date.
+
+    Two spellings carry it. The ws-report-v1 exporter records the exact
+    window it sent to TradingView as ``wsProvenance.requestedRange.to`` (ms
+    UTC), and every campaign tape's value is 1777593600000 = 2026-05-01
+    00:00 UTC for ``"to": "2026-05-01"``; the browser export (ETH, AAPL 15,
+    EURUSD) carries only the date. They agree wherever both exist, and the
+    integer is what TradingView actually saw, so it wins. None without a
+    range (a hand-made metrics.json, or none)."""
+    if not isinstance(metrics, dict):
+        return None
+    ws = metrics.get("wsProvenance")
+    if isinstance(ws, dict):
+        requested = ws.get("requestedRange")
+        if isinstance(requested, dict):
+            to_ms = requested.get("to")
+            if isinstance(to_ms, int) and not isinstance(to_ms, bool):
+                return int(to_ms), "metrics.json wsProvenance.requestedRange.to"
+    to_date = str(metrics.get("to", "") or "").strip()
+    if to_date:
+        try:
+            when = datetime.strptime(to_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        return int(when.timestamp() * 1000), "metrics.json to"
+    return None
+
+
+def _tv_metrics_range_end_ms(metrics: dict) -> int | None:
+    """The value half of _tv_metrics_range_end."""
+    found = _tv_metrics_range_end(metrics)
+    return None if found is None else found[0]
+
+
+def _tv_tape_last_row_ms(tv_path: Path, meta: dict) -> int | None:
+    """The latest ``Date and time`` over EVERY row of the tape — entries,
+    exits and the row TV writes for a position still open at the range's
+    end. None without rows. The fallback bound when metrics.json carries
+    no range; see _load_tv_range_end_ms for why it is only a fallback."""
+    tz_offset = _tv_tzinfo(meta)
+    latest: int | None = None
+    with tv_path.open(encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            stamp = str(row.get("Date and time", "")).strip()
+            if not stamp:
+                continue
+            ts = _parse_trade_dt(stamp, tz_offset)
+            latest = ts if latest is None else max(latest, ts)
+    return latest
+
+
+def _tv_tape_marks_open_rows(strategy_dir: Path, meta: dict) -> bool:
+    """True when the tape MARKS a position still open at the range's end:
+    any row whose ``Signal`` is ``open`` (case- and space-insensitive).
+
+    Two exporters write the campaign's tapes, and they print the range-end
+    position differently. The ws-report-v1 exporter (286 of the 305 ETH
+    tapes; no marker in metrics.json beyond ``tapeChannel``) reports it as
+    an ordinary closed trade — exit row on the last bar at its close, EMPTY
+    Signal, counted in closedTrades — which is the shape the engine's
+    ``open_at_end`` row emulates. The browser export (the scrapper's
+    3commas grid-bot tapes among them, 22/22/28 open lots each at
+    2026-05-01 08:00 +8; metrics.json without ``tapeChannel``) writes the
+    same row with Signal "Open". TV nets commission on BOTH legs of that row
+    exactly as it does on a close (3commas-xlm-grid-bot #615: qty 0.0912,
+    entry 2189.13, mark 2261.44 -> 6.3511 = TV's 6.35 = the engine's
+    6.351137), so per-lot P&L is not the difference; the difference is what
+    the grader does with the marker (see _apply_range_end_regime). The
+    marker selects the run's range-end REGIME — a marked tape is measured
+    as the baseline measured it (feed unbounded, open_at_end rows
+    withheld), an unmarked tape is bounded at TV's range end and writes
+    the rows. Read once per run; False without a tape or with a tape of
+    no rows."""
+    tv_name = str(meta.get("tv_trades_csv", "tv_trades.csv"))
+    tv_path = strategy_dir / tv_name
+    if not tv_path.exists():
+        return False
+    with tv_path.open(encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            if str(row.get("Signal") or "").strip().lower() == "open":
+                return True
+    return False
+
+
+def _withhold_open_at_end_trades(trades: list[dict]) -> tuple[list[dict], int]:
+    """Drop the trades flagged ``open_at_end`` (the engine's range-end close
+    of a position still open after the final bar); return the kept trades in
+    their original order and how many were withheld. Applied only when the
+    tape marks its open rows (_tv_tape_marks_open_rows): the marked regime
+    runs the feed unbounded, so the row withheld here is the mark at the
+    FEED's last bar (the ETH chart feed's 2026-05-04 15:00 UTC), which the
+    baseline never wrote either — see _apply_range_end_regime."""
+    kept = [t for t in trades if not t.get("open_at_end")]
+    return kept, len(trades) - len(kept)
+
+
+def _load_tv_range_end(strategy_dir: Path, meta: dict) -> tuple[int, str] | None:
+    """The last bar of TradingView's backtest range, as a feed bound
+    (``ohlcv_end_ms``, inclusive) with where it was read from: every bar
+    whose OPEN timestamp is at or before the range's ``to`` (00:00 UTC of
+    that date) is inside the range.
+
+    Applied to UNMARKED tapes only (_apply_range_end_regime): a tape that
+    marks its open rows is measured with the feed as exported, the way the
+    baseline measured it, until the grader pairs the marks itself.
+
+    The rule is TradingView's own, read off the ws-report-v1 tapes'
+    ``returnedRange.to`` (the open of the last bar TV reported) against the
+    ``requestedRange.to`` = 2026-05-01 00:00 UTC every campaign tape asked
+    for, and off where each lane's open-position row sits:
+
+      BINANCE:BTCUSDT / CME_MINI:ES1! / NQ1! / OANDA:XAUUSD 15
+                             returned.to = 05-01 00:00 UTC   (== to: the bar
+                             OPENING at ``to`` is inside; 00:15 is not — on
+                             CME's America/Chicago chart too, so ``to`` is
+                             UTC midnight, not the chart tz's);
+      NYSE:F 1D              returned.to = 04-30 13:30 UTC   (the 05-01 13:30
+                             session bar exists on TV and is excluded);
+      CME_MINI:ES1!/NQ1! 1D  returned.to = 04-30 22:00 UTC;
+      NSE:NIFTY 15 / 1D      returned.to = 04-30 09:45 / 03:45 UTC;
+      OANDA:XAUUSD 1D        returned.to = 04-30 21:00 UTC;
+      NYSE:F 15              returned.to = 04-30 19:45 UTC;
+
+    and every open-position row (browser "Open" rows and ws rows with an
+    empty Signal alike) sits on exactly that bar: BTC/ES/NQ/XAU/EURUSD 15
+    and BINANCE:ETHUSDT.P 15 at 05-01 00:00 UTC (ETH: 228 of 397 scrapper
+    tapes, @ 2261.44 = that bar's close), F 1D at 04-30 13:30 (@ 12.08),
+    ES/NQ 1D at 04-30 22:00, XAU 1D at 04-30 21:00, NIFTY 1D at 04-30
+    03:45, AAPL 15 at 04-30 19:45. Survey of 2026-09-02 over the scrapper's
+    17 lane directories (1,356 tapes; every one ``to: 2026-05-01``).
+
+    This bounds the feed the engine measures. The engine books a position
+    still open after its FINAL bar as TradingView's range-end close
+    (record_range_end_close_trades, engine_orders.cpp), so that final bar
+    must be TV's last bar, not the feed's: the ETH chart feed runs on to
+    2026-05-04 15:00 UTC, and unbounded the row would be booked on 05-04
+    15:00 @ 2365.09 — a different bar, ~4.6% off TV's row — and fail
+    exit/pnl against TV's Open row (review finding on the first cut of this
+    change, 2026-09-02).
+
+    The bound is the RANGE end, never the tape's last trade row. A first
+    cut bounded the feed at the tape's latest stamp, and the full-population
+    gate (gate-cand-range-end-close-20260902) failed hard.regression on
+    scrapper:data/standard/waranyutrkm-asian-box-breakout-eda-tuned (ETH
+    15): 110 -> 109 trades. Its last trade closes 04-29 18:00 UTC, so the
+    feed was cut mid-day, and the strategy gates entries on
+    request.security(.., "D", close / ta.ema(close, 50), lookahead_on) —
+    under the historical lookahead projection every 04-29 chart bar reads
+    the 04-29 daily bar's FINAL value. Cut at 18:00 the partial day gave
+    d_close 2240.35 < d_ema 2241.85 and no long; the complete day (as TV
+    sees it, its range running to 05-01) gives 2251.52 > 2242.29 and TV's
+    trade 110 at 09:45. Any probe with a lookahead_on HTF projection and a
+    closed last trade inside the final HTF period is exposed the same way,
+    and the four other near-range-end closed probes in that shard were
+    byte-identical either way (spark smoke-asianbox, 2026-09-02). Trades
+    ENTERED after TV's last entry are still dropped by
+    _filter_trades_to_window; the range end only decides which bars the
+    strategy computes on and where a position still open at the end is
+    marked.
+
+    Source: the tape's metrics.json (_tv_metrics_path) —
+    ``wsProvenance.requestedRange.to`` (ms) when present, else ``to``
+    (YYYY-MM-DD, UTC midnight). A metrics.json without a range (or none at
+    all) falls back to the tape's latest row (_tv_tape_last_row_ms), which
+    is right whenever that row is the range-end row and merely early
+    otherwise. None without a tape, or with a tape of no rows and no range."""
+    tv_name = str(meta.get("tv_trades_csv", "tv_trades.csv"))
+    tv_path = strategy_dir / tv_name
+    if not tv_path.exists():
+        return None
+    metrics_path = _tv_metrics_path(strategy_dir, meta, tv_path)
+    if metrics_path.is_file():
+        try:
+            with metrics_path.open(encoding="utf-8") as f:
+                metrics = json.load(f)
+        except (OSError, ValueError):
+            metrics = None
+        found = _tv_metrics_range_end(metrics)
+        if found is not None:
+            return found
+    last_row_ms = _tv_tape_last_row_ms(tv_path, meta)
+    if last_row_ms is None:
+        return None
+    return last_row_ms, "the tape's last row (metrics.json carries no range)"
+
+
+def _load_tv_range_end_ms(strategy_dir: Path, meta: dict) -> int | None:
+    """The value half of _load_tv_range_end."""
+    found = _load_tv_range_end(strategy_dir, meta)
+    return None if found is None else found[0]
+
+
+def _fmt_utc_ms(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _apply_range_end_regime(strategy_dir: Path, meta: dict, run_kwargs: dict) -> tuple[bool, str]:
+    """Decide how a run graded against a TradingView tape ENDS, apply the
+    feed bound it calls for to ``run_kwargs`` (``ohlcv_end_ms``), and return
+    ``(tape_marks_open, why)`` — the regime main() withholds by, and the one
+    line it logs. The rule (v4, 2026-09-02) keys on the tape's marker
+    (_tv_tape_marks_open_rows); the engine's range-end mechanics are the
+    same under both:
+
+    UNMARKED tape (the ws-report-v1 shape — every 1D lane and most 15m: the
+    range-end position is an ordinary closed trade, empty Signal, counted
+    in closedTrades; exactly what the engine's ``open_at_end`` row emulates)
+      -> bound the feed at TradingView's range end (_load_tv_range_end:
+         metrics.json ``wsProvenance.requestedRange.to`` / ``to`` as 00:00
+         UTC inclusive, the tape's last row as the fallback) so the engine's
+         final bar is TV's last bar, and WRITE the range-end close rows.
+         This is the v2 behaviour, and every unmarked lane measured was
+         clean under it: f-1d 10/10 engine-0 -> excellent, waranyutrkm
+         asian-box 110/110 at 100%, the 8 unmarked range-end ETH tapes
+         byte-identical (spark smoke-m2v3 / smoke-m2v3b / f-1d, 2026-09-02).
+         A probe whose inputs.json already sets ``ohlcv_end_ms`` keeps its
+         own bound.
+
+    MARKED tape (the browser export: the same row with Signal "Open"; 227
+    of the 396 scraped ETH tapes)
+      -> the BASELINE behaviour: NO bound — the feed runs as exported, the
+         ETH chart feed to 2026-05-04 15:00 UTC, three days past every ETH
+         tape's range — and no ``open_at_end`` row written (main() withholds
+         them after the run; with an unbounded feed a position may still be
+         open at the FEED's end, and that mark is withheld like any other).
+         Why: the baseline traded past TV's range end, and the canonical
+         grader (scripts/verify_corpus.py) pairs those post-range closes
+         with TV's Open rows on ENTRY time. v2 (bound + emit) paired the
+         marks exactly but moved pnlP90 on the three 3commas grid bots by
+         the cent-rounding of TV's Net PnL (0.55 -> 0.67 / 0.53 -> 0.64 /
+         0.18 -> 0.93 with 22/22/28 open lots each; gate v2 4gfpn), which
+         the hard gate counts as a regression; v3 (bound + withhold) turned
+         every post-range close into a withheld open_at_end row and lost the
+         pairing on ~186 marked probes (3commas-xlm 94.3 -> 93.7 strong,
+         alexgrover 100 -> 99.8; spark pre-check, 2026-09-02). Until
+         verify_corpus.py pairs the marks itself (the follow-up), a marked
+         tape is measured exactly as the baseline measured it.
+
+    Only called with a TV tape window in use; an explicit
+    --emit-window-ohlcv / --no-trim-output run measures the feed it was
+    given and writes every row."""
+    if _tv_tape_marks_open_rows(strategy_dir, meta):
+        return True, (
+            "tape marks its open rows (Signal 'Open') -> baseline regime: "
+            "feed unbounded (measured as exported), open_at_end rows kept out "
+            "of the CSV; the grader pairs post-range closes with TV's Open "
+            "rows on entry time")
+    if run_kwargs.get("ohlcv_end_ms") is not None:
+        return False, (
+            "tape unmarked (ws-report-v1 shape) -> range-end regime: the "
+            f"probe's own ohlcv_end_ms {_fmt_utc_ms(int(run_kwargs['ohlcv_end_ms']))} "
+            "kept as the feed bound, range-end close rows written")
+    found = _load_tv_range_end(strategy_dir, meta)
+    if found is None:
+        return False, (
+            "tape unmarked (ws-report-v1 shape), no range in metrics.json and "
+            "no tape rows -> feed unbounded, range-end close rows written")
+    range_end_ms, source = found
+    run_kwargs["ohlcv_end_ms"] = range_end_ms
+    return False, (
+        "tape unmarked (ws-report-v1 shape) -> range-end regime: feed bounded "
+        f"at TV's range end {_fmt_utc_ms(range_end_ms)} ({source}), "
+        "range-end close rows written")
+
+
+def _trim_ohlcv_csv(ohlcv_path: Path, start_ms: int | None, end_ms: int | None) -> Path | None:
+    """Write a copy of ``ohlcv_path`` holding only the bars inside
+    ``[start_ms, end_ms]`` (either bound optional, both inclusive) to a
+    temporary file and return its path; None when neither bound is set.
+    The ctypes runner applies the same bounds in _load_bars; the container
+    runner needs an already-trimmed CSV (M8 — feed the same trimmed feed
+    downstream). The caller unlinks the file."""
+    if start_ms is None and end_ms is None:
+        return None
+    import tempfile
+    fd, p = tempfile.mkstemp(suffix=".csv", prefix="pf_ohlcv_")
+    out = Path(p)
+    with ohlcv_path.open(newline="", encoding="utf-8") as fin, \
+            os.fdopen(fd, "w", newline="") as fout:
+        r = csv.DictReader(fin)
+        w = csv.DictWriter(fout, fieldnames=r.fieldnames)
+        w.writeheader()
+        for row in r:
+            ts = int(row["timestamp"])
+            if start_ms is not None and ts < int(start_ms):
+                continue
+            if end_ms is not None and ts > int(end_ms):
+                continue
+            w.writerow(row)
+    return out
+
+
 def format_trade_qty(qty: float) -> str:
     """Lot-faithful quantity text for the TV-alignable export.
 
@@ -1748,7 +2071,19 @@ def write_engine_trades_csv(trades: list[dict], path: Path) -> None:
     NEGATIVE total-USD drawdown (TV exports e.g. -8579.36). The engine ABI's
     `max_drawdown` stays positive — that mirrors Pine's
     `strategy.*trades.max_drawdown` accessors — so the sign flip happens only
-    here, in the TV-compatible export representation."""
+    here, in the TV-compatible export representation.
+
+    A trade flagged ``open_at_end`` (the engine's range-end close of a
+    position still open after the final bar) is written like any other
+    trade: TradingView's ws-report-v1 tape reports that position as an
+    ordinary closed trade whose exit row is the last bar at its close with
+    an EMPTY Signal (orb-lite NYSE:F 1D — Exit short 2026-04-30 @ 12.08),
+    so the row must look like every other exit for the verifier to pair it.
+    Whether the row reaches this writer at all is main()'s decision: against
+    a browser tape, which marks the same row Signal "Open", the run is the
+    baseline's (feed unbounded) and main() withholds the engine's row before
+    calling here (_apply_range_end_regime, _withhold_open_at_end_trades).
+    The flag stays available on the report dict for JSON consumers."""
     cum_pnls: dict[int, float] = {}
     running = 0.0
     for n, t in enumerate(trades, 1):
@@ -1850,8 +2185,9 @@ def _run_via_docker(strategy_dir: Path, ohlcv_path: Path, params: dict,
 
     Mirrors Strategy.run's engine setup exactly: inputs filter, strategy_overrides,
     input_tf/script_tf, magnifier (incl. the VOLUME_WEIGHTED->ENDPOINTS+vw mapping),
-    trade_start_time, chart_timezone, syminfo. ohlcv_start_ms is applied by
-    pre-trimming the CSV fed to the container (the ctypes path trims in _load_bars).
+    trade_start_time, chart_timezone, syminfo. ohlcv_start_ms / ohlcv_end_ms are
+    applied by pre-trimming the CSV fed to the container (the ctypes path trims
+    in _load_bars).
     NEVER re-transpiles .pine (uses the committed cpp, no codegen variance)."""
     import pf_release_run as _rel
     if run_kwargs.get("account_currency_fx_series") is not None:
@@ -1862,24 +2198,14 @@ def _run_via_docker(strategy_dir: Path, ohlcv_path: Path, params: dict,
     if not generated_cpp.exists():
         raise FileNotFoundError(f"generated.cpp not found for --runner docker: {generated_cpp}")
 
-    # ohlcv_start_ms: ctypes trims bars in _load_bars; the container needs an
-    # already-trimmed CSV (M8 — feed the same trimmed feed downstream).
-    ohlcv_for_image = ohlcv_path
-    tmp_ohlcv = None
-    start_ms = run_kwargs.get("ohlcv_start_ms")
-    if start_ms is not None:
-        import tempfile
-        fd, p = tempfile.mkstemp(suffix=".csv", prefix="pf_ohlcv_")
-        tmp_ohlcv = Path(p)
-        with ohlcv_path.open(newline="", encoding="utf-8") as fin, \
-                os.fdopen(fd, "w", newline="") as fout:
-            r = csv.DictReader(fin)
-            w = csv.DictWriter(fout, fieldnames=r.fieldnames)
-            w.writeheader()
-            for row in r:
-                if int(row["timestamp"]) >= int(start_ms):
-                    w.writerow(row)
-        ohlcv_for_image = tmp_ohlcv
+    # ohlcv_start_ms / ohlcv_end_ms: ctypes trims bars in _load_bars; the
+    # container needs an already-trimmed CSV (M8 — feed the same trimmed
+    # feed downstream). The end bound, when main() set one (unmarked tapes;
+    # _apply_range_end_regime), is TradingView's range end, so the engine's
+    # range-end close lands on TV's last bar.
+    tmp_ohlcv = _trim_ohlcv_csv(ohlcv_path, run_kwargs.get("ohlcv_start_ms"),
+                                run_kwargs.get("ohlcv_end_ms"))
+    ohlcv_for_image = tmp_ohlcv if tmp_ohlcv is not None else ohlcv_path
 
     # Magnifier dist/vw: mirror Strategy.run. 'VOLUME_WEIGHTED' is not a geometric
     # distribution — fall back to ENDPOINTS for the t-grid AND toggle vw.
@@ -2034,6 +2360,30 @@ def main() -> int:
     if emit_window is not None and not args.allow_trading_before_window:
         if tv_window_used or args.disable_trading_before_window:
             trade_start_ms = emit_window[0]
+    # Where the measurement ENDS is the tape's marker's call
+    # (_apply_range_end_regime, the v4 rule). An UNMARKED tape (ws-report-v1
+    # shape) bounds the feed at TradingView's range end — the bars opening
+    # at or before the range's `to` from the tape's metrics.json, never the
+    # tape's last trade row, which cuts the final HTF period short for a
+    # strategy that reads it through a lookahead_on projection
+    # (_load_tv_range_end) — so the engine's range-end close (open_at_end)
+    # lands on TV's last bar, and the rows are written. A MARKED tape
+    # (browser export, Signal "Open") is measured as the baseline measured
+    # it: no bound, the feed as exported (three days past every ETH tape's
+    # range), and the open_at_end rows withheld after the run, because the
+    # canonical grader pairs the baseline's post-range closes with TV's Open
+    # rows on entry time and a bounded feed loses those pairs. Only with a
+    # tape in use; an explicit --emit-window-ohlcv / --no-trim-output run
+    # measures the feed it was given. The auxiliary request.security feed
+    # (the ETH lane's 1m FEED_1M) is left as exported under both regimes:
+    # the engine's routing ignores aux bars labelled past the last chart bar
+    # (engine_aux_security.cpp tail prefilter; test_aux_security_feed pins
+    # the 15m/1m shape), so the chart's last bar keeps its full slice and
+    # no chart bar is lost.
+    tape_marks_open = False
+    if tv_window_used:
+        tape_marks_open, regime_why = _apply_range_end_regime(strategy_dir, params, run_kwargs)
+        print(f"  range-end: {regime_why}")
 
     if args.runner == "docker":
         if args.trace_json is not None:
@@ -2062,6 +2412,27 @@ def main() -> int:
                            **run_kwargs)
     raw_trade_count = len(report["trades"])
     trades_to_write = _filter_trades_to_window(report["trades"], emit_window)
+    # The marked regime's second half (_apply_range_end_regime): against a
+    # tape that marks its open rows the feed ran unbounded, so a position
+    # still open after the FEED's last bar was booked as an open_at_end row
+    # on that bar (the ETH chart feed's 2026-05-04 15:00 UTC, not TV's range
+    # end). The baseline never wrote that row — it exported closed trades
+    # only — and the grader pairs the post-range closes, not the mark, with
+    # TV's Open rows; so the rows are withheld and the CSV is the baseline's
+    # to the byte. An unmarked tape (no marker; TV counts the row as closed)
+    # keeps the rows, which is the shape the emulation exists for. The
+    # trades the verifier grades are the CSV's — run_strategy.py writes no
+    # report JSON — and the summary line below counts what was written.
+    withheld_open_at_end = 0
+    if tape_marks_open:
+        trades_to_write, withheld_open_at_end = _withhold_open_at_end_trades(trades_to_write)
+        if withheld_open_at_end:
+            print(
+                f"  range-end: withheld {withheld_open_at_end} open_at_end "
+                f"trade(s) from {out_path.name}: the tape marks its still-open "
+                f"position with Signal 'Open', so the run is the baseline's "
+                f"(feed unbounded) and the engine's mark at the feed's last "
+                f"bar is dropped as the baseline never wrote it")
     write_engine_trades_csv(trades_to_write, out_path)
     if args.trace_json is not None:
         trace_to_write = _filter_trace_to_window(report["trace"], emit_window)
@@ -2115,7 +2486,8 @@ def main() -> int:
     print(
         f"{rel}: "
         f"{len(trades_to_write)} trades"
-        f"{'' if raw_trade_count == len(trades_to_write) else f' ({raw_trade_count} raw)'}, "
+        f"{'' if raw_trade_count == len(trades_to_write) else f' ({raw_trade_count} raw)'}"
+        f"{f' ({withheld_open_at_end} open_at_end withheld)' if withheld_open_at_end else ''}, "
         f"net_profit={report['net_profit']:.2f}, "
         f"bars={report['input_bars_processed']}, "
         f"{elapsed:.2f}s -> {out_path.name}"

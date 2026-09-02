@@ -158,6 +158,75 @@ void test_native_chart_and_auxiliary_security_are_isolated() {
 }
 
 
+// The harness bounds the CHART feed at TradingView's range end
+// (run_strategy.py _load_tv_range_end_ms: the bars opening at or before the
+// tape's metrics.json `to`, 2026-05-01 00:00 UTC on every campaign lane) and
+// leaves the finer auxiliary feed as exported -- on the ETH lane the 1m
+// FEED_1M runs on to 05-04 15:00 UTC while the chart now ends at 05-01
+// 00:00. The tail prefilter treats aux bars labelled past the last chart
+// bar as inert coverage: the last chart bar keeps its full slice, no chart
+// bar is dropped, and nothing errors. Pin that on the intraday (15m chart,
+// 1m aux) shape, since the calendar shape above already carries a trailing
+// aux day (day3 + day).
+void test_intraday_aux_feed_running_past_the_chart_range_end_is_inert() {
+    constexpr int64_t range_end = 1777593600000;  // 2026-05-01 00:00 UTC
+    constexpr int64_t minute = 60000;
+    constexpr int64_t quarter = 15 * minute;
+    // Chart: the two 15m bars before the range end and the one opening at
+    // it -- the last bar the harness keeps.
+    const Bar chart[] = {
+        {100.0, 101.0, 99.0, 100.0, 10.0, range_end - 2 * quarter},
+        {200.0, 201.0, 199.0, 200.0, 10.0, range_end - quarter},
+        {300.0, 301.0, 299.0, 300.0, 10.0, range_end},
+    };
+    // Aux: every minute of those three bars (45), then 165 more minutes
+    // past the last chart bar's span that the chart never sees.
+    std::vector<Bar> aux;
+    for (int64_t ts = range_end - 2 * quarter; ts < range_end + 180 * minute;
+         ts += minute) {
+        const double v = static_cast<double>((ts - (range_end - 2 * quarter))
+                                             / minute);
+        aux.push_back({v, v, v, v, 1.0, ts});
+    }
+    assert(aux.size() == 45 + 165);
+
+    SplitFeedProbe probe;
+    strategy_set_syminfo_timezone(
+        static_cast<pf_strategy_t>(&probe), "UTC");
+    strategy_set_syminfo_session(
+        static_cast<pf_strategy_t>(&probe), "0000-0000:1234567");
+    assert(strategy_set_aux_security_feed(
+        static_cast<pf_strategy_t>(&probe),
+        reinterpret_cast<const pf_bar_t*>(aux.data()),
+        static_cast<int>(aux.size()), "1") == 0);
+
+    probe.run(chart, 3, "15", "15", false, 4,
+              MagnifierDistribution::ENDPOINTS);
+    assert(probe.last_error().empty());
+
+    // Every chart bar dispatched, the last one on the range end itself.
+    assert((probe.chart_indexes == std::vector<int>{0, 1, 2}));
+    assert((probe.chart_closes == std::vector<double>{100.0, 200.0, 300.0}));
+    // Each chart bar's lower-tf array is exactly its own 15 aux minutes;
+    // the last bar's slice is the 15 minutes from the range end, and the
+    // 165 trailing aux bars reach no chart bar.
+    assert(probe.lower_tf_at_chart_close.size() == 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        assert(probe.lower_tf_at_chart_close[i].size() == 15);
+        assert(near(probe.lower_tf_at_chart_close[i].front(),
+                    static_cast<double>(15 * i)));
+        assert(near(probe.lower_tf_at_chart_close[i].back(),
+                    static_cast<double>(15 * i + 14)));
+    }
+    // The security value the last chart bar reads is the last aux minute
+    // INSIDE it (44), not anything from the trailing coverage (45..209).
+    assert((probe.security_at_chart_close
+            == std::vector<double>{14.0, 29.0, 44.0}));
+    assert(probe.security_closes.size() == 45);
+    assert(near(probe.security_closes.back(), 44.0));
+}
+
+
 void test_intraday_aux_label_inside_native_span_without_chart_bar_fails() {
     constexpr int64_t bar1 = 1704205800000;  // 2024-01-02 09:30 New York
     constexpr int64_t hour = 3600000;
@@ -354,6 +423,7 @@ void test_overnight_daily_lower_tf_array_does_not_split_at_utc_midnight() {
 
 int main() {
     test_native_chart_and_auxiliary_security_are_isolated();
+    test_intraday_aux_feed_running_past_the_chart_range_end_is_inert();
     test_intraday_aux_label_inside_native_span_without_chart_bar_fails();
     test_nifty_muhurat_shifted_open_maps_by_trading_date();
     test_nq_labor_day_sessions_coalesce_into_native_interval();
