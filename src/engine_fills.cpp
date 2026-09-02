@@ -896,8 +896,48 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
         // account-currency values, so quote-currency price PnL/notional must
         // carry the configured FX multiplier on this path just as they do in
         // the opening-budget branch above. FX=1 preserves the old arithmetic.
+        //
+        // The SHORT cascade marks equity and required margin at the mintick-
+        // ROUNDED high, the same tick the slice will fill at (finding-446:
+        // the adverse extreme is a raw bar price, bar_fill_price rounds it
+        // nearest). Evidence is MEDIUM, not the census grade of the sizing
+        // basis: on the NYSE:F tape the rounded high reproduces 32 TV margin-
+        // call slices where the raw high reproduces 0, and that is one tape
+        // with sub-penny highs. It travels with the sizing-basis fix because
+        // it is the same broker rule — the ledger is marked at tick prices —
+        // and because a raw-high mark can fire a slice on a sub-tick excursion
+        // the on-tick ledger never saw. The LONG side keeps the raw low on
+        // purpose: every leveraged-long cascade pin we hold (the ETHUSDT.P
+        // alpha-wizard-channel 14-nibble bit-exact fit, the p2/5x probes) was
+        // taken on on-tick feeds where the rounding is an identity, so there
+        // is no evidence either way and the fitted arithmetic must not move
+        // on a medium-grade extrapolation. syminfo_mintick_ <= 0 makes the
+        // rounding a no-op (round_to_mintick guards it).
+        //
+        // Three short floor-zero pins in tests/test_margin_call.cpp moved
+        // with this mark — exact_one_step_roundoff_keeps_four_x_nibble,
+        // just_below_step_slices_one_contract, and RED-2
+        // commission_free_short_floor_zero_closes_one_contract (the 166-
+        // event class). Each built its deficit from a SYNTHETIC sub-tick
+        // high, 2000 / (20 - k*step) = 100.0005... over a 10 @ 100 short,
+        // chosen for the arithmetic (q_min lands exactly at / just below /
+        // half of one 0.0001 lot), and the finding-446 comment beside them
+        // said only that the slice BOOKS at the nearest tick — the mark
+        // itself was silently raw. On the on-tick ledger that print is
+        // 100.00, exactly the liquidation price, and the cascade correctly
+        // fires nothing (test_sizing_basis_mintick.cpp E1 pins that
+        // shape). The lot rules they measure are unchanged, so the pins
+        // were re-derived on on-tick highs of the same q_min shape: one
+        // penny of adverse move from a 1999.99 / 2000.00 / 3999.99 entry
+        // (q_min = 20 * tick / adverse = one lot with the quotient one
+        // 2e-11 below 1 / one lot minus 5e-6 / half a lot). The
+        // chronological copy of this test, margin_call_slice_before_priced_
+        // exit, takes the same mark so the ledger does not depend on
+        // whether a priced exit happens to be resting on the bar.
         const double adverse =
-            (position_side_ == PositionSide::LONG) ? bar.low : bar.high;
+            (position_side_ == PositionSide::LONG)
+                ? bar.low
+                : round_to_mintick(bar.high);
         if (!std::isfinite(adverse) || !(adverse > 0.0)) return;
         const double fx = active_account_currency_fx();
         if (!std::isfinite(fx) || !(fx > 0.0)) return;
@@ -910,7 +950,8 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
         const double req_margin_adv = qty * margin_per_unit_adv;
         if (equity_adv >= req_margin_adv) return;
         q_min = qty - equity_adv / margin_per_unit_adv;
-        // finding-446: the adverse extreme is a raw bar price.
+        // finding-446: the adverse extreme is a raw bar price (an identity
+        // on the short side, whose mark above is already the rounded high).
         raw_exit_fill_base = bar_fill_price(adverse);
     }
 
@@ -1241,12 +1282,26 @@ bool BacktestEngine::margin_call_slice_before_priced_exit(
 
     // (c) Pre-fill deficit at the extreme: the same fee-net eq/req
     // arithmetic as the adverse cascade (the position state is pre-fill
-    // because the triggering exit has not been applied yet).
+    // because the triggering exit has not been applied yet). The MARK is
+    // process_margin_call's: a short is marked at the mintick-ROUNDED high
+    // (the broker ledger is on-tick; 32 vs 0 reproduced slices on the
+    // NYSE:F tape — medium evidence, see the cascade comment), a long at
+    // the raw low. `adverse` itself stays RAW above and below: the
+    // chronology test in (b) is a path point on the synthesized OHLC walk,
+    // not a ledger value, and bar_fill_price does its own nearest-tick
+    // rounding of the raw print (finding-446). Marking here at the raw
+    // high while the end-of-bar cascade marks at the rounded one would
+    // make a sub-tick excursion fire a slice only when a priced exit
+    // happens to be resting on the bar — the same ledger must answer the
+    // same question on both paths (test_sizing_basis_mintick.cpp E3).
+    const double adverse_mark =
+        (position_side_ == PositionSide::LONG) ? adverse
+                                                : round_to_mintick(adverse);
     const double fx = active_account_currency_fx();
     if (!std::isfinite(fx) || !(fx > 0.0)) return false;
-    const double equity_adv = percent_commission_live_equity(adverse);
+    const double equity_adv = percent_commission_live_equity(adverse_mark);
     if (!std::isfinite(equity_adv)) return false;
-    const double margin_per_unit_adv = adverse * pv * fx * m;
+    const double margin_per_unit_adv = adverse_mark * pv * fx * m;
     const double req_margin_adv = qty * margin_per_unit_adv;
     if (equity_adv >= req_margin_adv) return false;
     double q_min = qty - equity_adv / margin_per_unit_adv;
@@ -3778,6 +3833,26 @@ void BacktestEngine::apply_filled_order_to_state(
         //   - process_orders_on_close: the signal bar IS the fill bar, so
         //     slipped_fill == sizing_price and the frozen qty was floored to
         //     fit sizing_equity — the shortfall is structurally 0 (no-op).
+        //     That equality holds because the sizing basis is the mintick-
+        //     ROUNDED close (frozen_sizing_price / calc_qty, engine.hpp),
+        //     the same tick bar_fill_price books. It was FALSE while sizing
+        //     divided by the raw close: on a sub-tick x.xx5 print the fill
+        //     rounded up, the quantity had been floored against the lower
+        //     raw price, and this arm declined a zero-gap fill by
+        //     ~qty * mintick/2 — the mechanism behind 463/463 missing
+        //     taro-F entries (0 counterexamples) and every one of the
+        //     26 drgunjan-F / 6 mazi-F missing entries, all on sub-penny
+        //     signal closes. With the basis on-tick, a fill AT the signal
+        //     close yields a shortfall that is identically zero at
+        //     slippage 0 (sizing_price and the fill are the same
+        //     round_to_mintick double) and within the float guard
+        //     otherwise: with slippage ticks the sizing price is
+        //     round(c) + s*tick while the slipped fill is
+        //     ceil((round(c) + s*tick)/tick - 1e-9)*tick, which differ by
+        //     one ulp on 42,656 of 149,700 (price, slippage 1..3) 2dp
+        //     combos, a qty*ulp (~1e-11) shortfall the max(1e-9, E*1e-12)
+        //     guard below absorbs. Either way this gate only ever sees a
+        //     genuine close->open gap.
         if (order.opening_affordability_exemption_candidate
             && position_side_ == PositionSide::FLAT
             && !same_dir && !reversal
@@ -3883,7 +3958,24 @@ void BacktestEngine::apply_filled_order_to_state(
             // reversal arm the way it does to the others, because there the
             // frozen quantity was floored against the PREVIOUS bar's close while
             // the order fills at THIS bar's open: the overshoot is an observable
-            // gap, not floor luck. The flat-open and same-direction-add arms
+            // gap, not floor luck. That statement is only true when the
+            // previous close the quantity was floored against is the SAME
+            // tick the fill books — which it is now that the sizing basis is
+            // round_to_mintick(close(S)) (frozen_sizing_price, engine.hpp).
+            // While the basis was the raw close, a sub-tick x.xx5 signal
+            // print that rounds UP at the open handed this arm a phantom
+            // "gap" of half a tick on a flat open (qty floored on the lower
+            // raw price times the higher rounded fill), and a float-guard
+            // epsilon is precisely the width that turns half a tick of
+            // notional into a decline: the raw basis is what the taro-F
+            // replay (463/463 missing entries predicted) and the drgunjan-F
+            // / mazi-F sub-penny censuses (26/26, 6/6) were measuring, not
+            // this gate. With the basis on-tick, a fill at the rounded
+            // signal close reproduces |qty| * sizing_price <= sizing_equity
+            // exactly (the floor invariant), the shortfall of a flat open is
+            // identically zero, and the epsilon below is asked only about a
+            // real close->open gap — the question the ETHUSDT.P dossier
+            // answered. The flat-open and same-direction-add arms
             // keep the one-lot term — each is separately TV-pinned, nothing has
             // falsified their premise, and the flat-open arm is undeclinable by
             // the floor invariant anyway (it prices at the sizing notional).

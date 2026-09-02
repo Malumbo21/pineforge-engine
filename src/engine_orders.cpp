@@ -29,27 +29,38 @@ double BacktestEngine::calc_qty_for_type(double fill_price, double qty_value, in
     if (qty_type < 0 || qty_type == static_cast<int>(QtyType::FIXED)) {
         return apply_qty_step(qty_value);
     }
+    // The explicit percent_of_equity / cash branches below run on the SAME
+    // on-tick basis as calc_qty (engine.hpp): the open lot is marked and the
+    // budget is divided at round_to_mintick of the price, never at a raw
+    // sub-tick print, so the two sizing consumers cannot diverge on a
+    // sub-penny feed. Reachability note: order.qty_type is set only from
+    // strategy_entry's per-call qty_type parameter (default -1); the corpus'
+    // generated code only ever sets default_qty_type_ and pineforge.h exposes
+    // no per-call qty_type, so this path is reached by direct C++ callers
+    // only — it is kept on the rounded basis for consistency, not because a
+    // tape pinned it (calc_qty carries the F / AAPL census).
+    const double basis = round_to_mintick(fill_price);
     if (qty_type == static_cast<int>(QtyType::PERCENT_OF_EQUITY)) {
-        const double equity =
-            percent_commission_live_equity(current_bar_.close);
+        const double equity = percent_commission_live_equity(
+            round_to_mintick(current_bar_.close));
         if (!std::isfinite(equity)) return 0.0;
         double cash = reserve_percent_commission(equity * (qty_value / 100.0));
         // Reject (qty 0) on a non-finite / non-positive fill price — a degenerate
         // $0/NaN print must NOT size as the raw % number (silent wrong-qty bug).
-        // One contract's currency exposure is fill_price × pointvalue (1.0 for
+        // One contract's currency exposure is basis × pointvalue (1.0 for
         // crypto/equity — legacy math unchanged; futures divide the budget by
         // the full per-contract notional). cash is account-currency (equity is);
         // convert to quote currency via account_currency_fx_ before dividing by
-        // the quote-currency fill_price — same convention as calc_qty() in
+        // the quote-currency basis — same convention as calc_qty() in
         // engine.hpp. fx=1.0 is a no-op.
-        return (std::isfinite(fill_price) && fill_price > 0.0)
+        return (std::isfinite(basis) && basis > 0.0)
             ? apply_qty_step((cash / active_account_currency_fx())
-                             / (fill_price * syminfo_.pointvalue)) : 0.0;
+                             / (basis * syminfo_.pointvalue)) : 0.0;
     }
     if (qty_type == static_cast<int>(QtyType::CASH)) {
-        return (std::isfinite(fill_price) && fill_price > 0.0)
+        return (std::isfinite(basis) && basis > 0.0)
             ? apply_qty_step((qty_value / active_account_currency_fx())
-                             / (fill_price * syminfo_.pointvalue)) : 0.0;
+                             / (basis * syminfo_.pointvalue)) : 0.0;
     }
     return apply_qty_step(qty_value);
 }

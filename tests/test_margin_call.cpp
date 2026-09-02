@@ -94,8 +94,9 @@ class ShortLiqProbe : public MCEngine {
 public:
     bool disable_mc_ = false;
     explicit ShortLiqProbe(bool disable_mc = false, double qty_step = 0.0,
-                           double account_fx = 1.0) {
-        initial_capital_ = 1000.0;
+                           double account_fx = 1.0,
+                           double initial_capital = 1000.0) {
+        initial_capital_ = initial_capital;
         default_qty_type_ = QtyType::PERCENT_OF_EQUITY;
         default_qty_value_ = 100.0;          // size the short at 100% of equity
         commission_type_ = CommissionType::PERCENT;
@@ -316,42 +317,59 @@ static void test_short_margin_call_zero_cover_closes_sub_one_residual() {
 static void test_short_margin_call_exact_one_step_roundoff_keeps_four_x_nibble() {
     std::printf("test_short_margin_call_exact_one_step_roundoff_keeps_four_x_nibble\n");
     constexpr double step = 0.0001;
-    // For a 10@100 all-in short, q_min = 20 - 2000/adverse. This adverse is
-    // mathematically exactly one step, but the engine's equivalent arithmetic
-    // represents the quotient just below 1. A bare floor would erase the lot
-    // and incorrectly enter the zero-cover full-close fallback.
-    const double adverse = 2000.0 / (20.0 - step);
-    const double equity_at_high = 1000.0 - (adverse - 100.0) * 10.0;
+    // An all-in short of 10 @ entry from 10*entry of equity leaves
+    //   q_min = 20 * (adverse - entry) / adverse
+    // at the adverse high. The short cascade marks that deficit at the
+    // mintick-ROUNDED high (process_margin_call, the sizing-basis fix: the
+    // broker ledger is on-tick, 32 vs 0 reproduced slices on the NYSE:F
+    // tape), so the shape is built on ON-TICK prices where the rounding is
+    // an identity and the pin measures the lot rule alone: one penny of
+    // adverse move at 2000.00 is mathematically exactly one 0.0001 lot,
+    // but the engine's equivalent arithmetic represents the quotient just
+    // below 1 (0.99999999998). A bare floor would erase the lot and
+    // incorrectly enter the zero-cover full-close fallback.
+    //
+    // This case used to sit at 10 @ 100 with a SYNTHETIC sub-tick high of
+    // 2000 / (20 - step) = 100.0005..., marked raw; the on-tick mark reads
+    // that high as 100.00, exactly at the liquidation price, and no slice
+    // fires — which is the E1 pin of test_sizing_basis_mintick.cpp, not a
+    // lot-rule question. The lot rule pinned here is unchanged.
+    const double entry = 1999.99;
+    const double adverse = 2000.00;
+    const double capital = 10.0 * entry;
+    const double equity_at_high = capital - (adverse - entry) * 10.0;
     const double q_min = 10.0 - equity_at_high / adverse;
     const double step_count = q_min / step;
     CHECK(q_min < step);
     CHECK(std::abs(step_count - std::round(step_count)) < 1e-6);
 
     std::vector<Bar> bars = {
-        mk_bar(1000, 100.0, 100.0, 99.0, 100.0, 1.0),
-        mk_bar(2000, 100.0, adverse, 99.0, 100.0, 1.0),
+        mk_bar(1000, entry, entry, entry - 1.0, entry, 1.0),
+        mk_bar(2000, entry, adverse, entry - 1.0, entry, 1.0),
     };
 
     // Without the opt-in metadata the representation jitter is NOT rounded
     // away, so this lands on the generic floor-zero discontinuity and closes
     // one whole contract.
-    ShortLiqProbe default_eng(/*disable_mc=*/false, /*qty_step=*/step);
+    ShortLiqProbe default_eng(/*disable_mc=*/false, /*qty_step=*/step,
+                              /*account_fx=*/1.0, capital);
     default_eng.run(bars.data(), (int)bars.size());
     CHECK(default_eng.trade_count() == 1);
     CHECK(default_eng.exit_comment(0) == std::string("Margin call"));
     CHECK(near(default_eng.trade_size(0), 1.0, 1e-12));
     CHECK(near(default_eng.position_size(), -9.0, 1e-12));
 
-    ShortLiqProbe eng(/*disable_mc=*/false, /*qty_step=*/step);
+    ShortLiqProbe eng(/*disable_mc=*/false, /*qty_step=*/step,
+                      /*account_fx=*/1.0, capital);
     eng.set_syminfo_metadata("margin_zero_cover_full_liquidation", 1.0);
     eng.run(bars.data(), (int)bars.size());
 
     CHECK(eng.trade_count() == 1);
     CHECK(eng.exit_comment(0) == std::string("Margin call"));
-    // finding-446: the adverse extreme (100.0005..., a sub-tick synthetic
-    // high) is a RAW BAR PRICE and books at the nearest tick, 100.00 —
-    // no longer the buy-side ceil to 100.01.
-    CHECK(near(eng.exit_price(0), 100.00, 1e-12));
+    // finding-446: the adverse extreme is a RAW BAR PRICE and books at the
+    // nearest tick (an identity on this on-tick high), never the buy-side
+    // ceil.
+    CHECK(near(eng.exit_price(0), adverse, 1e-12));
     CHECK(near(eng.trade_size(0), 4.0 * step, 1e-12));
     CHECK(near(eng.position_size(), -(10.0 - 4.0 * step), 1e-12));
 }
@@ -359,40 +377,50 @@ static void test_short_margin_call_exact_one_step_roundoff_keeps_four_x_nibble()
 static void test_short_margin_call_just_below_step_slices_one_contract() {
     std::printf("test_short_margin_call_just_below_step_slices_one_contract\n");
     constexpr double step = 0.0001;
-    constexpr double below_guard_ratio = 1.0 - 2e-6;
-    // This is genuinely below one step by more than the 1e-6 representation
-    // guard. It must quantize to zero and land on the settled floor-zero
-    // discontinuity: TV closes ONE whole contract and HOLDS the remainder.
-    // The full-residual opt-in no longer overrides that settled slice —
-    // at an eps-scale deficit it used to liquidate the whole ten-contract
-    // position here, an exit TV never prints (finding 279, serhan ADX).
-    const double adverse = 2000.0 / (20.0 - step * below_guard_ratio);
-    const double equity_at_high = 1000.0 - (adverse - 100.0) * 10.0;
+    // Same all-in shape as the exact-one-step case above (q_min =
+    // 20 * (adverse - entry) / adverse, marked at the on-tick high), one
+    // penny of adverse move from a 2000.00 entry: q_min / step =
+    // 2000 / 2000.01 = 0.999995, genuinely below one step by 5e-6 — more
+    // than the 1e-6 representation guard. It must quantize to zero and land
+    // on the settled floor-zero discontinuity: TV closes ONE whole contract
+    // and HOLDS the remainder. The full-residual opt-in no longer overrides
+    // that settled slice — at an eps-scale deficit it used to liquidate the
+    // whole ten-contract position here, an exit TV never prints (finding
+    // 279, serhan ADX). (Formerly a synthetic sub-tick high of
+    // 2000 / (20 - step * (1 - 2e-6)) over a 10 @ 100 short, marked raw;
+    // the on-tick mark reads that print as 100.00 and fires nothing — see
+    // the sibling above.)
+    const double entry = 2000.00;
+    const double adverse = 2000.01;
+    const double capital = 10.0 * entry;
+    const double equity_at_high = capital - (adverse - entry) * 10.0;
     const double q_min = 10.0 - equity_at_high / adverse;
     const double step_count = q_min / step;
     CHECK(q_min < step);
     CHECK(std::abs(step_count - std::round(step_count)) > 1e-6);
 
     std::vector<Bar> bars = {
-        mk_bar(1000, 100.0, 100.0, 99.0, 100.0, 1.0),
-        mk_bar(2000, 100.0, adverse, 99.0, 100.0, 1.0),
+        mk_bar(1000, entry, entry, entry - 1.0, entry, 1.0),
+        mk_bar(2000, entry, adverse, entry - 1.0, entry, 1.0),
     };
 
-    ShortLiqProbe eng(/*disable_mc=*/false, /*qty_step=*/step);
+    ShortLiqProbe eng(/*disable_mc=*/false, /*qty_step=*/step,
+                      /*account_fx=*/1.0, capital);
     eng.set_syminfo_metadata("margin_zero_cover_full_liquidation", 1.0);
     eng.run(bars.data(), (int)bars.size());
 
     CHECK(eng.trade_count() == 1);
     CHECK(eng.exit_comment(0) == std::string("Margin call"));
-    // finding-446: the adverse extreme (100.0005..., a sub-tick synthetic
-    // high) is a RAW BAR PRICE and books at the nearest tick, 100.00 —
-    // no longer the buy-side ceil to 100.01.
-    CHECK(near(eng.exit_price(0), 100.00, 1e-12));
+    // finding-446: the adverse extreme is a RAW BAR PRICE and books at the
+    // nearest tick (an identity on this on-tick high), never the buy-side
+    // ceil.
+    CHECK(near(eng.exit_price(0), adverse, 1e-12));
     CHECK(near(eng.trade_size(0), 1.0, 1e-12));
     CHECK(near(eng.position_size(), -9.0, 1e-12));
 
     // Control: the flag-off engine takes the identical settled slice.
-    ShortLiqProbe default_eng(/*disable_mc=*/false, /*qty_step=*/step);
+    ShortLiqProbe default_eng(/*disable_mc=*/false, /*qty_step=*/step,
+                              /*account_fx=*/1.0, capital);
     default_eng.run(bars.data(), (int)bars.size());
     CHECK(default_eng.trade_count() == 1);
     CHECK(near(default_eng.trade_size(0), 1.0, 1e-12));
@@ -2878,32 +2906,45 @@ static void test_commission_free_long_floor_zero_closes_one_contract() {
 static void test_commission_free_short_floor_zero_closes_one_contract() {
     std::printf("test_commission_free_short_floor_zero_closes_one_contract\n");
     constexpr double step = 0.0001;
-    constexpr double target_q_min = 0.5 * step;   // half a lot -> floors to zero
-    // All-in short of 10 @ 100 from 1000 of equity:
-    //   equity(adverse) = 1000 - (adverse - 100) * 10
-    //   q_min           = 10 - equity(adverse) / adverse = 20 - 2000 / adverse
-    const double adverse = 2000.0 / (20.0 - target_q_min);
-    const double equity_at_high = 1000.0 - (adverse - 100.0) * 10.0;
+    // All-in short of 10 @ 3999.99 from 39999.9 of equity, one penny of
+    // adverse move to an ON-TICK high of 4000.00:
+    //   equity(adverse) = capital - (adverse - entry) * 10
+    //   q_min           = 10 - equity(adverse) / adverse
+    //                   = 20 * (adverse - entry) / adverse = 0.5 * step
+    // — half a lot, floors to zero. The short cascade marks the deficit at
+    // the mintick-ROUNDED high (process_margin_call, the sizing-basis fix),
+    // so the shape is built on-tick where the rounding is an identity and
+    // the pin measures the floor-zero rule alone. The shape used to be a
+    // 10 @ 100 short against a SYNTHETIC sub-tick high of
+    // 2000 / (20 - 0.5 * step) = 100.00025..., marked raw; on the on-tick
+    // ledger that print is 100.00, exactly at liquidation, and fires
+    // nothing (test_sizing_basis_mintick.cpp E1). The 166-event class this
+    // pins is a lot-rule fact and is unchanged by the mark.
+    const double entry = 3999.99;
+    const double adverse = 4000.00;
+    const double capital = 10.0 * entry;
+    const double equity_at_high = capital - (adverse - entry) * 10.0;
     const double q_min = 10.0 - equity_at_high / adverse;
     CHECK(q_min > 0.0);
     CHECK(q_min < step);
+    CHECK(near(q_min, 0.5 * step, 1e-12));
 
     std::vector<Bar> bars = {
-        mk_bar(1000, 100.0, 100.0, 99.0, 100.0, 1.0),   // short 10 fills @100
-        mk_bar(2000, 100.0, adverse, 99.0, 100.0, 1.0),  // adverse high
+        mk_bar(1000, entry, entry, entry - 1.0, entry, 1.0),    // short 10 fills @entry
+        mk_bar(2000, entry, adverse, entry - 1.0, entry, 1.0),  // adverse high
     };
 
     CommissionFreeShortFloorZeroProbe eng(
-        /*initial_capital=*/1000.0, /*qty_step=*/step);
+        /*initial_capital=*/capital, /*qty_step=*/step);
     eng.run(bars.data(), static_cast<int>(bars.size()));
 
     CHECK(eng.trade_count() == 1);
     CHECK(eng.exit_comment(0) == std::string("Margin call"));
-    CHECK(near(eng.entry_price(0), 100.0));
-    // finding-446: the adverse extreme (100.0005..., a sub-tick synthetic
-    // high) is a RAW BAR PRICE and books at the nearest tick, 100.00 —
-    // no longer the buy-side ceil to 100.01.
-    CHECK(near(eng.exit_price(0), 100.00, 1e-12));
+    CHECK(near(eng.entry_price(0), entry));
+    // finding-446: the adverse extreme is a RAW BAR PRICE and books at the
+    // nearest tick (an identity on this on-tick high), never the buy-side
+    // ceil.
+    CHECK(near(eng.exit_price(0), adverse, 1e-12));
     CHECK(near(eng.trade_size(0), 1.0, 1e-9));
     CHECK(near(eng.position_size(), -9.0, 1e-9));
 }

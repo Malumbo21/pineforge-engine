@@ -407,7 +407,12 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         // frozen_default_market_qty (engine.hpp) for the rule and the
         // empirical basis. current_bar_.close is close(S) right here, so
         // placement is the one point where the frozen computation is
-        // naturally correct (no double count, no fill-bar look-ahead).
+        // naturally correct (no double count, no fill-bar look-ahead). The
+        // broker's basis is round_to_mintick(close(S)) — the tick the fill
+        // will book, not the sub-tick print Pine's signal path just read
+        // (calc_qty documents the F/AAPL census) — and every member of the
+        // snapshot (price, equity mark, sizing_mark) is taken on that same
+        // rounded price so the fill-time admission compares like with like.
         // FIXED default sizing needs no freeze: its fill-time value is
         // identical. The frozen quantity goes in frozen_default_qty, NOT in
         // order.qty — order.qty must stay NaN so every isnan(order.qty)-keyed
@@ -422,9 +427,9 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             // admission re-check (see PendingOrder::sizing_equity in
             // engine.hpp and the gate in apply_filled_order_to_state).
             order.sizing_price = frozen_sizing_price(/*is_buy=*/is_long);
+            order.sizing_mark = round_to_mintick(current_bar_.close);
             order.sizing_equity =
-                percent_commission_live_equity(current_bar_.close);
-            order.sizing_mark = current_bar_.close;
+                percent_commission_live_equity(order.sizing_mark);
             order.sizing_fx = active_account_currency_fx();
             // Direction-neutral: two fill-time consumers read this flag.
             //   1. KI-61 long entry-bar affordability trim
@@ -2101,8 +2106,9 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
         // Same signal-time freeze as strategy_entry's MARKET branch: a
         // default-sized strategy.order market order runs through the same
         // TV default-sizing engine, so its quantity is frozen at this
-        // (signal) bar's close too. Stored off to the side (order.qty stays
-        // NaN) for the same reason as in strategy_entry.
+        // (signal) bar's close too — on the mintick-ROUNDED close, the same
+        // basis as strategy_entry (calc_qty, engine.hpp). Stored off to the
+        // side (order.qty stays NaN) for the same reason as in strategy_entry.
         if (std::isnan(qty)
             && (default_qty_type_ == QtyType::PERCENT_OF_EQUITY
                 || default_qty_type_ == QtyType::CASH)
@@ -2113,9 +2119,9 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
             // (they only close the position) — see
             // apply_filled_order_to_state.
             order.sizing_price = frozen_sizing_price(/*is_buy=*/is_long);
+            order.sizing_mark = round_to_mintick(current_bar_.close);
             order.sizing_equity =
-                percent_commission_live_equity(current_bar_.close);
-            order.sizing_mark = current_bar_.close;
+                percent_commission_live_equity(order.sizing_mark);
             order.sizing_fx = active_account_currency_fx();
         }
     } else {

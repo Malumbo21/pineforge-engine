@@ -436,9 +436,13 @@ struct PendingOrder {
         std::numeric_limits<double>::quiet_NaN();
     // TV margin-admission snapshot for a FROZEN default-sized market order
     // (KI-54). Captured at the same placement point as frozen_default_qty:
-    //   sizing_equity = current_equity() + open_profit(close(S))
+    //   sizing_equity = current_equity() + open_profit(tick(close(S)))
     //                   - paid commission on surviving open lots [account ccy]
-    //   sizing_price  = close(S) + slippage*mintick*(+1 buy/-1 sell)
+    //   sizing_price  = tick(close(S)) + slippage*mintick*(+1 buy/-1 sell)
+    // where tick(x) = round_to_mintick(x): the broker's sizing basis is the
+    // mintick-ROUNDED signal close, never the raw feed print — see
+    // frozen_sizing_price for the tape census behind that. sizing_mark is
+    // the same tick(close(S)).
     // At fill time the broker re-checks (see the gate in
     // apply_filled_order_to_state for the full evidence trail)
     //   |qty| * admit_price * pointvalue * fx * margin_pct/100
@@ -512,7 +516,9 @@ struct PendingOrder {
     // Captured at the explicit-qty MARKET placement point. NaN = no snapshot.
     double explicit_placement_equity = std::numeric_limits<double>::quiet_NaN();
     // Slipped signal close at placement (frozen_sizing_price convention:
-    // close(S) + slippage*mintick*(+1 buy / -1 sell)). Its |qty|-scaled notional
+    // round_to_mintick(close(S)) + slippage*mintick*(+1 buy / -1 sell) — the
+    // tick basis, so a POOC fill at the rounded close is an exact no-op on a
+    // sub-tick feed too). Its |qty|-scaled notional
     // floors the fill-time decline threshold, so a fill AT/BELOW the slipped
     // signal close — POOC (fill == close(S)+slip both sides), a no-gap open, or a
     // favorable gap — is a structural no-op even with slippage != 0; only an
@@ -1400,7 +1406,9 @@ protected:
     // adverse extreme, a strategy.close at the close / COOF bar-point
     // cursor — books the raw print rounded to the NEAREST tick and only then
     // carries slippage ticks. The FEED is never quantized (indicators consume
-    // the raw sub-tick values); only the fill is on-tick. The directional
+    // the raw sub-tick values); only the fill and the broker's default-sizing
+    // snapshot (calc_qty / frozen_sizing_price, same nearest-tick form) are
+    // on-tick. The directional
     // snap (round_to_mintick_directional) is reserved for COMPUTED stop /
     // limit LEVELS that fall between ticks; applying it to a raw bar price
     // was the finding-432/446 defect (sells floored, buys ceiled — 43 AAPL
@@ -1629,7 +1637,54 @@ protected:
             ? cash / (1.0 + commission_value_ / 100.0) : cash;
     }
 
+    // The broker's sizing arithmetic runs ON-TICK. Both the price the budget
+    // is divided by and the price the open position is marked at for the
+    // equity term are round_to_mintick() of their raw inputs; the FEED itself
+    // stays raw (ta.*, crossovers, plots and every strategy.* metric TV
+    // reports on raw values keep reading current_bar_.close directly — only
+    // this sizing snapshot and the fill are quantized). The evidence is the
+    // same tape family that pinned the signal-bar freeze below:
+    //
+    //   - taro-s-c-c-ma-simplified-2-color replayed over the NYSE:F and
+    //     NASDAQ:AAPL tapes: qty = floor(E / tick(close_S)) with E marked at
+    //     tick(close_S) reproduces 674/674 F and 832/832 AAPL reversals; the
+    //     raw-close divisor fits only 476/674 on F. The same replay matches
+    //     675/675 TV entries by RAW-close crossovers, which is why the signal
+    //     path is left alone.
+    //   - drgunjan-F trade 1: a 9.565 signal close, TV qty 10460 =
+    //     floor(100000 / 9.56) (9.565 / 0.01 = 956.49999... rounds DOWN under
+    //     the census formula, exactly as 228.765 does); the raw divisor gave
+    //     floor(100000 / 9.565) = 10454.
+    //   - The raw basis also DECLINED entries TV filled: when an x.xx5 close
+    //     rounds UP at the fill (bar_fill_price) while the quantity was
+    //     floored against the raw close, qty * fill exceeds the sizing
+    //     equity by ~qty * mintick/2 and the true-flat gap-reject / reversal
+    //     float-guard arms in apply_filled_order_to_state saw a phantom gap.
+    //     463/463 missing taro-F entries were predicted by that mechanism
+    //     with 0 counterexamples; 26/26 drgunjan-F and 6/6 mazi-F missing
+    //     entries had sub-penny signal closes.
+    //
+    // On a price that is already n*tick (bar_fill_price output, a
+    // directionally-snapped level, or the slipped sizing price
+    // frozen_sizing_price builds) round_to_mintick is identical to within
+    // ONE ULP — not an identity: double(tick) is inexact for every decimal
+    // tick, so floor(x/0.01 + 0.5)*0.01 != x for 6,951 of 49,900 decimal-
+    // parsed 2dp prices 1.00..500.00 (always +1 ulp, double(0.01) > 0.01),
+    // for 35,736 of 70,000 5dp prices at tick 1e-5, and for 0 of 12,000 at
+    // the binary-exact 0.25. The ulp is absorbed by apply_qty_step's 1e-6
+    // nudge (0 floor flips of floor(100000/x) across all 49,900 prices) and
+    // by the 1e-9 / 1e-12 float guards on every admission arm, so no
+    // quantity or verdict moves on an on-tick feed: the fill-time legacy
+    // callers and the frozen path reproduce the pre-fix numbers there, and
+    // only sub-tick prints move — to TV's number.
+    //
+    // QtyType::CASH follows percent_of_equity by construction (the same
+    // broker division, only the numerator differs) and is UNPINNED: every
+    // census above is default percent_of_equity sizing, and no strategy.cash
+    // tape discriminating round(close) from close has been replayed. A
+    // future CASH mismatch on a sub-tick feed is traced here first.
     double calc_qty(double fill_price) const {
+        const double basis = round_to_mintick(fill_price);
         switch (default_qty_type_) {
             case QtyType::FIXED:
                 return apply_qty_step(default_qty_value_);
@@ -1638,19 +1693,21 @@ protected:
                 // omitted percent-of-equity add sizes from mark-to-market
                 // equity AFTER the paid percent commission on surviving lots.
                 // This is a ledger rule, independent of pct=100, margin, or
-                // how the already-open position was sized.
-                const double equity =
-                    percent_commission_live_equity(current_bar_.close);
+                // how the already-open position was sized. The open lot is
+                // marked at the ROUNDED close (see above): a sub-tick print
+                // never reaches the broker ledger.
+                const double equity = percent_commission_live_equity(
+                    round_to_mintick(current_bar_.close));
                 if (!std::isfinite(equity)) return 0.0;
                 double cash = reserve_percent_commission(equity * (default_qty_value_ / 100.0)) / active_account_currency_fx();
                 // Reject (qty 0) on a non-finite / non-positive fill price — a
                 // degenerate $0/NaN print must NOT size as the raw % number.
-                return (std::isfinite(fill_price) && fill_price > 0)
-                    ? apply_qty_step(cash / (fill_price * syminfo_.pointvalue)) : 0.0;
+                return (std::isfinite(basis) && basis > 0)
+                    ? apply_qty_step(cash / (basis * syminfo_.pointvalue)) : 0.0;
             }
             case QtyType::CASH:
-                return (std::isfinite(fill_price) && fill_price > 0)
-                    ? apply_qty_step((default_qty_value_ / active_account_currency_fx()) / (fill_price * syminfo_.pointvalue)) : 0.0;
+                return (std::isfinite(basis) && basis > 0)
+                    ? apply_qty_step((default_qty_value_ / active_account_currency_fx()) / (basis * syminfo_.pointvalue)) : 0.0;
         }
         return apply_qty_step(default_qty_value_);
     }
@@ -1659,18 +1716,20 @@ protected:
     // bar — the bar whose on_bar issued the strategy.entry/strategy.order
     // call — not at the fill:
     //
+    //   tick(x)      = round_to_mintick(x)          // nearest tick, census form
     //   equity_S     = initial_capital + realized net profit
-    //                  + open_profit(close(S))     // position may still be OPEN
-    //   sizing_price = close(S) + slippage*mintick*(+1 buy / -1 sell)
+    //                  + open_profit(tick(close(S)))  // position may still be OPEN
+    //   sizing_price = tick(close(S)) + slippage*mintick*(+1 buy / -1 sell)
     //   qty          = floor_step( reserve_percent_commission(budget)
     //                              / fx / (sizing_price * pointvalue) )
     //
     // The market order then fills at the NEXT bar's open carrying this frozen
     // quantity. calc_qty(price) implements exactly that shape when evaluated
     // AT SIGNAL TIME (current_bar_ IS the signal bar: open_profit marks at
-    // close(S) and the divisor is the argument), so the freeze is simply
-    // calc_qty(slipped signal close) captured at placement. Evaluating the
-    // same expression at FILL time — the pre-freeze behavior — was wrong in
+    // tick(close(S)) and the divisor is the rounded argument), so the freeze
+    // is simply calc_qty(slipped rounded signal close) captured at
+    // placement. Evaluating the same expression at FILL time — the
+    // pre-freeze behavior — was wrong in
     // three separable ways on a reversal/gap: it double-counted the just-
     // closed position's PnL (current_equity() already realized the exit while
     // position_* still held the stale lot for open_profit), it marked open
@@ -1689,8 +1748,20 @@ protected:
     // The sizing price of the frozen rule above, exposed separately so the
     // placement sites can persist it on the order (PendingOrder::sizing_price)
     // for the fill-time margin-admission re-check.
+    //
+    // The basis is the mintick-ROUNDED signal close. Rounding happens BEFORE
+    // the slippage ticks are added so the result is n*tick for any feed
+    // print, exactly as a bar_fill_price fill carries its slippage: TV's
+    // broker never sees the sub-tick close Pine sees (674/674 F, 832/832
+    // AAPL reversals on the taro tapes fit tick(close_S); the raw close fits
+    // 476/674 — see calc_qty). A feed that is already on-tick is unaffected
+    // in every quantity and verdict, though not bit-for-bit: round_to_mintick
+    // returns the n*tick double to within one ulp (double(tick) is inexact
+    // for decimal ticks — the measurement is in calc_qty's comment), and
+    // that ulp is absorbed by apply_qty_step's 1e-6 nudge and by the
+    // admission arms' float guards.
     double frozen_sizing_price(bool is_buy) const {
-        double sizing_price = current_bar_.close;
+        double sizing_price = round_to_mintick(current_bar_.close);
         if (slippage_ != 0 && syminfo_mintick_ > 0.0) {
             sizing_price += (is_buy ? 1.0 : -1.0) * slippage_ * syminfo_mintick_;
         }
@@ -1724,8 +1795,11 @@ protected:
             if (o.created_bar != bar_index_) continue;
             o.frozen_default_qty = calc_qty(o.sizing_price);
             if (!std::isnan(o.sizing_equity)) {
-                o.sizing_equity =
-                    percent_commission_live_equity(current_bar_.close);
+                // Same on-tick mark the placement sites took
+                // (engine_strategy_commands.cpp): the re-freeze must land on
+                // the number placement would have produced post-liquidation.
+                o.sizing_equity = percent_commission_live_equity(
+                    round_to_mintick(current_bar_.close));
             }
             o.sizing_fx = active_account_currency_fx();
         }
