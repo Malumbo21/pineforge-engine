@@ -29,6 +29,76 @@ namespace ta {
 // byte-identical to the prior src-seed behavior.
 bool& ema_na_warmup_flag();
 
+// Per-context bar index for bar-addressed window state (thread-local).
+//
+// TradingView keeps the source history of a window call site (``ta.highest``,
+// ``ta.lowest``, ``ta.highestbars``, ``ta.lowestbars``) in a ring of
+// ``K = length + 1`` slots addressed by ``bar_index % K``. A call on bar ``b``
+// writes ``slot[b % K] = src`` and returns the extremum over the WRITTEN slots
+// ``(b - k) % K``, ``k in [0, length)``. For a call that executes every bar
+// that is the plain positional window. For a call that executes
+// CONDITIONALLY (inside an ``if`` block that does not run every bar) the slots
+// not rewritten keep their stale values from earlier executions, never-written
+// slots are skipped, and the result is na iff ``bar_index < length - 1`` — NOT
+// until ``length`` executions have accumulated. Pinned 2026-09-03 with
+// ``lab tv`` on NYSE:F 1D (``if bar_index % 7 == 3: v = ta.highest(high, 5)``
+// 39/39 entry sizes exact, cadence 9 30/30; production: colasbreugnon-sma
+// F@1D 31/31 only with K = 6). ``ta.sma`` inside ``if`` is NOT ring-addressed
+// (per-execution buffer, pinned separately) and is untouched.
+//
+// The engine installs the executing context's bar index around every dispatch
+// of generated code: the chart's Pine ``bar_index`` around ``on_bar`` and the
+// requested context's evaluated-bar index around each ``evaluate_security``
+// (HTF / lower-tf / auxiliary feeds). ``origin`` is the first bar index the
+// context has data for — the warmup reference — so a feed that starts after
+// TradingView's hidden first chart bar (``bar_index_offset``) still warms up
+// over its own first ``length`` bars, exactly as before. With no context
+// installed (the default — unit tests, standalone use) every ``compute()`` is
+// its own bar and the objects are byte-identical to the previous positional
+// deque.
+struct BarContext {
+    bool installed = false;
+    long long bar_index = 0;   // ring address: the context's current bar index
+    long long origin = 0;      // warmup reference: the context's first bar index
+};
+BarContext& bar_context();
+
+// RAII installer: sets the thread-local BarContext for the enclosed dispatch
+// and restores the previous one on exit (also during stack unwinding), so
+// chart and request.security evaluation never see each other's index.
+class BarContextScope {
+    BarContext previous_;
+
+public:
+    BarContextScope(long long bar_index, long long origin);
+    ~BarContextScope();
+    BarContextScope(const BarContextScope&) = delete;
+    BarContextScope& operator=(const BarContextScope&) = delete;
+};
+
+// Bar-addressed extremum ring shared by Highest / Lowest / HighestBars /
+// LowestBars — the TradingView rule documented at bar_context() above.
+class ExtremeRing {
+public:
+    struct Result {
+        double value;   // na: window not formed yet, or no written non-na member
+        int bars_back;  // k of the extremum slot (0 = the current bar)
+    };
+    explicit ExtremeRing(int length);
+    // advance = true  -> compute():   records src for the context's current bar
+    // advance = false -> recompute(): rewrites the current bar's slot
+    // An na src is recorded as a gap (skipped by the extremum, never a member).
+    // Ties resolve to the OLDEST member (strict comparison, oldest slot first).
+    Result update(double src, bool advance, bool want_max);
+
+private:
+    int length_;
+    std::vector<double> values_;
+    std::vector<unsigned char> written_;
+    long long own_bar_ = -1;   // cadence when no context is installed
+    bool has_written_ = false;
+};
+
 class RMA {
     double output_val;
     double sum;
@@ -158,8 +228,7 @@ public:
 // --- Highest ---
 
 class Highest {
-    std::deque<double> buffer;
-    int length;
+    ExtremeRing ring_;
 
 public:
     explicit Highest(int length);
@@ -170,8 +239,7 @@ public:
 // --- Lowest ---
 
 class Lowest {
-    std::deque<double> buffer;
-    int length;
+    ExtremeRing ring_;
 
 public:
     explicit Lowest(int length);
@@ -597,8 +665,7 @@ public:
 // --- HighestBars ---
 
 class HighestBars {
-    int length_;
-    std::deque<double> buffer_;
+    ExtremeRing ring_;
 
 public:
     explicit HighestBars(int length);
@@ -609,8 +676,7 @@ public:
 // --- LowestBars ---
 
 class LowestBars {
-    int length_;
-    std::deque<double> buffer_;
+    ExtremeRing ring_;
 
 public:
     explicit LowestBars(int length);

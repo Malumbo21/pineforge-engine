@@ -266,6 +266,17 @@ void BacktestEngine::validate_security_timeframes(const std::string& input_tf) {
 }
 
 
+void BacktestEngine::dispatch_security_eval(SecurityEvalState& state,
+                                            const Bar& bar, bool publish,
+                                            int64_t bar_index) {
+    state.ta_bar_index = bar_index;
+    // The requested context starts at its own bar 0 (origin 0): its TA members
+    // warm up over the first `length` evaluated bars, exactly as before.
+    ta::BarContextScope bar_scope(static_cast<long long>(bar_index), 0);
+    evaluate_security(state.sec_id, bar, publish);
+}
+
+
 bool BacktestEngine::security_series_slot_is_new(int sec_id) const {
     if (security_history_publication_replay_) {
         return false;
@@ -298,8 +309,11 @@ void BacktestEngine::publish_security_eval_state_at_calling_boundary(
     // the final requested value that was already evaluated for the completed
     // caller, before the chart body runs and before that retained input is fed.
     // security_series_slot_is_new() returns false in this scope, so generated
-    // TA sites recompute the current slot instead of advancing their cadence.
-    evaluate_security(state.sec_id, state.current_bar, true);
+    // TA sites recompute the current slot instead of advancing their cadence —
+    // under the same requested-context bar index as the evaluation replayed.
+    dispatch_security_eval(state, state.current_bar, true,
+                           state.ta_bar_index >= 0 ? state.ta_bar_index
+                                                   : state.eval_complete_count);
 }
 
 
@@ -457,7 +471,8 @@ void BacktestEngine::feed_security_eval_state(
                 state.current_bar = b;
                 state.current_sub_bar_count = 1;
                 state.eval_complete_count++;
-                evaluate_security(state.sec_id, b, true);
+                dispatch_security_eval(state, b, true,
+                                       state.eval_complete_count - 1);
                 state.lower_tf_sub_bar_index++;
             }
             state.lower_tf_input_buffer.clear();
@@ -500,7 +515,8 @@ void BacktestEngine::feed_security_eval_state(
             state.current_bar = synthetic_bar;
             state.current_sub_bar_count = 1;
             state.eval_complete_count++;
-            evaluate_security(state.sec_id, synthetic_bar, true);
+            dispatch_security_eval(state, synthetic_bar, true,
+                                   state.eval_complete_count - 1);
             state.lower_tf_sub_bar_index++;
         }
         return;
@@ -541,8 +557,10 @@ void BacktestEngine::feed_security_eval_state(
         } else {
             state.eval_partial_count++;
         }
-        evaluate_security(state.sec_id, projected_bar,
-                          projection.is_complete);
+        dispatch_security_eval(state, projected_bar, projection.is_complete,
+                               projection.is_complete
+                                   ? state.eval_complete_count - 1
+                                   : state.eval_complete_count);
         return;
     }
 
@@ -577,7 +595,8 @@ void BacktestEngine::feed_security_eval_state(
             // replaced.
             publish = calling_bar_complete;
         }
-        evaluate_security(state.sec_id, ab.bar, publish);
+        dispatch_security_eval(state, ab.bar, publish,
+                               state.eval_complete_count - 1);
     } else if (state.lookahead_on) {
         if (state.heikinashi) apply_ha(ab.bar, /*commit=*/false);
         state.current_bar = ab.bar;
@@ -587,7 +606,9 @@ void BacktestEngine::feed_security_eval_state(
         // merged history without adding a second evaluator/TA dispatch.
         const bool publish = state.publish_gate_tf_seconds > 0
             && calling_bar_complete;
-        evaluate_security(state.sec_id, ab.bar, publish);
+        // Partial (in-progress) bucket: the index the completion will carry.
+        dispatch_security_eval(state, ab.bar, publish,
+                               state.eval_complete_count);
     } else {
         state.current_bar = ab.bar;
         if (state.gaps_on) {

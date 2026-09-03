@@ -279,7 +279,8 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
             state.current_bar = bar;
             state.current_sub_bar_count = 1;
             state.eval_complete_count++;
-            evaluate_security(state.sec_id, bar, true);
+            dispatch_security_eval(state, bar, true,
+                                   state.eval_complete_count - 1);
             state.lower_tf_sub_bar_index++;
         }
         state.lower_tf_input_buffer.clear();

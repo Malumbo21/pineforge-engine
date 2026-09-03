@@ -2220,6 +2220,11 @@ protected:
         int64_t feed_count = 0;
         int64_t eval_complete_count = 0;
         int64_t eval_partial_count = 0;
+        // Requested-context bar index of the latest dispatch_security_eval()
+        // (the ring address its TA members saw, see ta::bar_context()); -1
+        // before the first dispatch. The calling-boundary replay re-dispatches
+        // the same bar under the same index.
+        int64_t ta_bar_index = -1;
         // ``request.security_lower_tf`` returns one element per
         // synthesised sub-bar of the current chart bar, so the codegen
         // needs to know which sub-bar inside the current chart bar is
@@ -2380,6 +2385,17 @@ protected:
     int security_lower_tf_sub_bar_index(int sec_id) const;
     void validate_security_timeframes(const std::string& input_tf);
     bool security_series_slot_is_new(int sec_id) const;
+    // The one path to evaluate_security(): installs the requested context's
+    // bar index for the evaluator's TA members (ta::bar_context()) for the
+    // duration of the dispatch. `bar_index` is the 0-based index of the
+    // requested-context bar being evaluated — the just-completed bucket for a
+    // complete evaluation (eval_complete_count - 1), the in-progress bucket
+    // for a partial/lookahead one (eval_complete_count) — so every
+    // compute()/recompute() dispatch of one requested bar rewrites the same
+    // ring slot, and a conditional window call inside the security expression
+    // is addressed exactly like TradingView addresses it.
+    void dispatch_security_eval(SecurityEvalState& state, const Bar& bar,
+                                bool publish, int64_t bar_index);
     // KI-55 range-start gate for one evaluator: true when the input bar at
     // `input_ts` belongs to an HTF bucket that opened before
     // security_range_start_ms_ (always false while the flag is off). The

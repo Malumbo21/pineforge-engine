@@ -790,14 +790,14 @@ All **✅ Runtime** — backed by `PineMatrix` (`matrix.hpp` / `matrix.cpp`) for
 | `ta.dmi()` | fn | ✅ Runtime | `ta::DMI` class | |
 | `ta.ema()` | fn | ✅ Runtime | `ta::EMA` class | |
 | `ta.falling()` | fn | ✅ Runtime | `ta::Falling` class | |
-| `ta.highest()` | fn | ✅ Runtime | `ta::Highest` class | |
-| `ta.highestbars()` | fn | ✅ Runtime | `ta::HighestBars` class | |
+| `ta.highest()` | fn | ✅ Runtime | `ta::Highest` class | bar-addressed ring (K = length + 1 slots by `bar_index`, per context — chart and each `request.security`): a call inside an `if` that does not run every bar keeps stale slots, skips never-written ones, na iff `bar_index < length - 1` (NYSE:F 1D pins 39/39, 30/30); every-bar callers unchanged |
+| `ta.highestbars()` | fn | ✅ Runtime | `ta::HighestBars` class | same ring as `ta.highest`; offset = slot distance of the extremum |
 | `ta.hma()` | fn | ✅ Runtime | `ta::HMA` class | |
 | `ta.kc()` | fn | ✅ Runtime | `ta::KC` class | |
 | `ta.kcw()` | fn | ✅ Runtime | `ta::KCW` class | |
 | `ta.linreg()` | fn | ✅ Runtime | `ta::Linreg` class | |
-| `ta.lowest()` | fn | ✅ Runtime | `ta::Lowest` class | |
-| `ta.lowestbars()` | fn | ✅ Runtime | `ta::LowestBars` class | |
+| `ta.lowest()` | fn | ✅ Runtime | `ta::Lowest` class | same bar-addressed ring as `ta.highest` (mirror) |
+| `ta.lowestbars()` | fn | ✅ Runtime | `ta::LowestBars` class | same ring as `ta.lowest`; offset = slot distance of the extremum |
 | `ta.macd()` | fn | ✅ Runtime | `ta::MACD` class | |
 | `ta.max()` | fn | ✅ Runtime | `ta::AllTimeMax` class | Single-arg form only |
 | `ta.median()` | fn | ✅ Runtime | `ta::Median` class | |
