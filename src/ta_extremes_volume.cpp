@@ -22,55 +22,125 @@ namespace pineforge {
 namespace ta {
 
 
+// --- Bar-addressed extremum ring (Highest / Lowest / HighestBars / LowestBars) ---
+//
+// TradingView's rule (see <pineforge/ta.hpp> bar_context()): a window call site
+// owns K = length + 1 slots addressed by bar_index % K; a call on bar b writes
+// slot[b % K] = src and reads the extremum over the WRITTEN slots (b - k) % K,
+// k in [0, length). Every-bar callers get the positional window (findings
+// 331/332 oracle, KI-55 family): an na input advances the window as a gap, the
+// extremum is taken over the non-na members, na while the window has not
+// formed or has no non-na member. Conditional callers (inside an ``if`` that
+// does not run every bar) keep stale values in the slots they did not rewrite,
+// skip never-written slots, and are na iff bar_index < length - 1 — pinned
+// 2026-09-03 on NYSE:F 1D (cadence-7 39/39, cadence-9 30/30 entry sizes).
+
+BarContext& bar_context() {
+    // Thread-local so parallel in-process engines never cross-contaminate;
+    // default "not installed" keeps standalone objects on their own cadence.
+    static thread_local BarContext ctx;
+    return ctx;
+}
+
+BarContextScope::BarContextScope(long long bar_index, long long origin)
+    : previous_(bar_context()) {
+    BarContext& ctx = bar_context();
+    ctx.installed = true;
+    ctx.bar_index = bar_index;
+    ctx.origin = origin;
+}
+
+BarContextScope::~BarContextScope() {
+    bar_context() = previous_;
+}
+
+namespace {
+
+inline std::size_t ring_slot(long long bar, long long K) {
+    long long m = bar % K;
+    if (m < 0) m += K;
+    return static_cast<std::size_t>(m);
+}
+
+}  // namespace
+
+ExtremeRing::ExtremeRing(int length)
+    : length_(length),
+      values_(length > 0 ? static_cast<std::size_t>(length) + 1 : 0, na<double>()),
+      written_(length > 0 ? static_cast<std::size_t>(length) + 1 : 0, 0) {}
+
+ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max) {
+    Result out{na<double>(), 0};
+    if (length_ <= 0) return out;
+
+    long long bar;
+    long long origin;
+    const BarContext& ctx = bar_context();
+    if (ctx.installed) {
+        bar = ctx.bar_index;
+        origin = ctx.origin;
+    } else {
+        // No context: every compute() is its own bar and recompute() rewrites
+        // the current one (a pristine recompute() counts as the first bar) —
+        // the previous positional-deque cadence, byte for byte.
+        if (advance || !has_written_) ++own_bar_;
+        bar = own_bar_;
+        origin = 0;
+    }
+
+    const long long K = static_cast<long long>(length_) + 1;
+    const std::size_t cur = ring_slot(bar, K);
+    values_[cur] = src;
+    written_[cur] = 1;
+    has_written_ = true;
+
+    // na until the context has seen `length` bars (TV: bar_index < length - 1;
+    // `origin` keeps a range-truncated feed warming up over its own bars).
+    if (bar - origin < static_cast<long long>(length_) - 1) return out;
+
+    double best = na<double>();
+    int best_k = 0;
+    // Oldest slot first with a strict comparison: ties resolve to the oldest
+    // member, exactly as the deque scan did (only the *Bars offsets can tell).
+    for (int k = length_ - 1; k >= 0; --k) {
+        const std::size_t i = ring_slot(bar - k, K);
+        if (!written_[i]) continue;          // never written: skipped, not na
+        const double v = values_[i];
+        if (is_na(v)) continue;              // written gap: skipped
+        if (is_na(best) || (want_max ? v > best : v < best)) {
+            best = v;
+            best_k = k;
+        }
+    }
+    out.value = best;
+    out.bars_back = best_k;
+    return out;
+}
+
 // --- Highest ---
 
 Highest::Highest(int length)
-    : length(length) {}
+    : ring_(length) {}
 
 double Highest::compute(double src) {
-    // TV positional-window semantics (findings 331/332 oracle, KI-55 family):
-    // the lookback window covers the last `length` BARS — an na input advances
-    // the window as a gap instead of being dropped, the extremum is taken over
-    // the non-na members, and the result is na only while the bar window has
-    // not fully formed or contains no non-na member. On gap-free series this
-    // is byte-identical to the previous last-N-non-na buffer.
-    buffer.push_back(src);
-    while ((int)buffer.size() > length) {
-        buffer.pop_front();
-    }
+    return ring_.update(src, /*advance=*/true, /*want_max=*/true).value;
+}
 
-    if ((int)buffer.size() < length) {
-        return na<double>();
-    }
-
-    double hi = na<double>();
-    for (int i = 0; i < (int)buffer.size(); i++) {
-        if (!is_na(buffer[i]) && (is_na(hi) || buffer[i] > hi)) hi = buffer[i];
-    }
-    return hi;
+double Highest::recompute(double src) {
+    return ring_.update(src, /*advance=*/false, /*want_max=*/true).value;
 }
 
 // --- Lowest ---
 
 Lowest::Lowest(int length)
-    : length(length) {}
+    : ring_(length) {}
 
 double Lowest::compute(double src) {
-    // TV positional-window semantics — see Highest::compute above.
-    buffer.push_back(src);
-    while ((int)buffer.size() > length) {
-        buffer.pop_front();
-    }
+    return ring_.update(src, /*advance=*/true, /*want_max=*/false).value;
+}
 
-    if ((int)buffer.size() < length) {
-        return na<double>();
-    }
-
-    double lo = na<double>();
-    for (int i = 0; i < (int)buffer.size(); i++) {
-        if (!is_na(buffer[i]) && (is_na(lo) || buffer[i] < lo)) lo = buffer[i];
-    }
-    return lo;
+double Lowest::recompute(double src) {
+    return ring_.update(src, /*advance=*/false, /*want_max=*/false).value;
 }
 
 // --- PivotHigh ---
@@ -258,63 +328,38 @@ double Median::compute(double src) {
 }
 
 // --- HighestBars ---
+// Same ring as Highest; the result is the slot distance k of the extremum
+// (0 = the current bar, negative offsets as TV reports them). An na input is
+// recorded as a positional gap and answers na on that bar.
 
-HighestBars::HighestBars(int length) : length_(length) {}
+HighestBars::HighestBars(int length) : ring_(length) {}
 
 double HighestBars::compute(double src) {
-    if (is_na(src)) {
-        return na<double>();
-    }
+    const ExtremeRing::Result r = ring_.update(src, /*advance=*/true, /*want_max=*/true);
+    if (is_na(src) || is_na(r.value)) return na<double>();
+    return -static_cast<double>(r.bars_back);
+}
 
-    buffer_.push_back(src);
-    while ((int)buffer_.size() > length_) {
-        buffer_.pop_front();
-    }
-
-    if ((int)buffer_.size() < length_) {
-        return na<double>();
-    }
-
-    int max_idx = 0;
-    double max_val = buffer_[0];
-    for (int i = 1; i < (int)buffer_.size(); i++) {
-        if (buffer_[i] > max_val) {
-            max_val = buffer_[i];
-            max_idx = i;
-        }
-    }
-    // Return negative offset from current bar
-    return (double)(max_idx - ((int)buffer_.size() - 1));
+double HighestBars::recompute(double src) {
+    const ExtremeRing::Result r = ring_.update(src, /*advance=*/false, /*want_max=*/true);
+    if (is_na(src) || is_na(r.value)) return na<double>();
+    return -static_cast<double>(r.bars_back);
 }
 
 // --- LowestBars ---
 
-LowestBars::LowestBars(int length) : length_(length) {}
+LowestBars::LowestBars(int length) : ring_(length) {}
 
 double LowestBars::compute(double src) {
-    if (is_na(src)) {
-        return na<double>();
-    }
+    const ExtremeRing::Result r = ring_.update(src, /*advance=*/true, /*want_max=*/false);
+    if (is_na(src) || is_na(r.value)) return na<double>();
+    return -static_cast<double>(r.bars_back);
+}
 
-    buffer_.push_back(src);
-    while ((int)buffer_.size() > length_) {
-        buffer_.pop_front();
-    }
-
-    if ((int)buffer_.size() < length_) {
-        return na<double>();
-    }
-
-    int min_idx = 0;
-    double min_val = buffer_[0];
-    for (int i = 1; i < (int)buffer_.size(); i++) {
-        if (buffer_[i] < min_val) {
-            min_val = buffer_[i];
-            min_idx = i;
-        }
-    }
-    // Return negative offset from current bar
-    return (double)(min_idx - ((int)buffer_.size() - 1));
+double LowestBars::recompute(double src) {
+    const ExtremeRing::Result r = ring_.update(src, /*advance=*/false, /*want_max=*/false);
+    if (is_na(src) || is_na(r.value)) return na<double>();
+    return -static_cast<double>(r.bars_back);
 }
 
 // --- OBV ---
@@ -562,36 +607,6 @@ double Range::compute(double src) {
     return h - l;
 }
 
-// --- Highest ---
-double Highest::recompute(double src) {
-    if (buffer.empty()) return compute(src);
-    buffer.back() = src;
-
-    if ((int)buffer.size() < length) return na<double>();
-
-    // Mirrors Highest::compute — positional window, na members skipped.
-    double hi = na<double>();
-    for (int i = 0; i < (int)buffer.size(); i++) {
-        if (!is_na(buffer[i]) && (is_na(hi) || buffer[i] > hi)) hi = buffer[i];
-    }
-    return hi;
-}
-
-// --- Lowest ---
-double Lowest::recompute(double src) {
-    if (buffer.empty()) return compute(src);
-    buffer.back() = src;
-
-    if ((int)buffer.size() < length) return na<double>();
-
-    // Mirrors Lowest::compute — positional window, na members skipped.
-    double lo = na<double>();
-    for (int i = 0; i < (int)buffer.size(); i++) {
-        if (!is_na(buffer[i]) && (is_na(lo) || buffer[i] < lo)) lo = buffer[i];
-    }
-    return lo;
-}
-
 // --- PivotHigh ---
 // Recompute mirrors compute(): LEFT non-strict (`>` rejects), RIGHT strict
 // (`>=` rejects). Both must stay in lockstep — a delta here would surface as
@@ -671,38 +686,6 @@ double Median::recompute(double src) {
     int n = (int)sorted.size();
     if (n % 2 == 1) return sorted[n / 2];
     return (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
-}
-
-// --- HighestBars ---
-double HighestBars::recompute(double src) {
-    if (buffer_.empty()) return compute(src);
-    buffer_.back() = src;
-
-    if (is_na(src)) return na<double>();
-    if ((int)buffer_.size() < length_) return na<double>();
-
-    int max_idx = 0;
-    double max_val = buffer_[0];
-    for (int i = 1; i < (int)buffer_.size(); i++) {
-        if (buffer_[i] > max_val) { max_val = buffer_[i]; max_idx = i; }
-    }
-    return (double)(max_idx - ((int)buffer_.size() - 1));
-}
-
-// --- LowestBars ---
-double LowestBars::recompute(double src) {
-    if (buffer_.empty()) return compute(src);
-    buffer_.back() = src;
-
-    if (is_na(src)) return na<double>();
-    if ((int)buffer_.size() < length_) return na<double>();
-
-    int min_idx = 0;
-    double min_val = buffer_[0];
-    for (int i = 1; i < (int)buffer_.size(); i++) {
-        if (buffer_[i] < min_val) { min_val = buffer_[i]; min_idx = i; }
-    }
-    return (double)(min_idx - ((int)buffer_.size() - 1));
 }
 
 // --- OBV ---

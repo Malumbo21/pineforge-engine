@@ -87,6 +87,13 @@ void BacktestEngine::invoke_chart_on_bar(const Bar& bar) {
         }
     } scope(chart_ema_na_warmup_);
 
+    // Bar-addressed window state (ta::bar_context()): the chart context's TA
+    // members address their rings by the Pine bar_index the script sees, and
+    // warm up from the feed's first bar (pine index bar_index_offset_).
+    // Every tick of one script bar (compute() then recompute() under the bar
+    // magnifier) shares the index, so they rewrite the same slot.
+    ta::BarContextScope bar_scope(pine_bar_index(), bar_index_offset_);
+
     named_entry_cancelled_incarnation_in_current_eval_.clear();
     on_bar(bar);
 }
@@ -764,6 +771,7 @@ void BacktestEngine::run(const Bar* bars, int n) {
         state.eval_partial_count = 0;
         state.current_bar = Bar{};
         state.current_sub_bar_count = 0;
+        state.ta_bar_index = -1;
     }
 
     for (int i = 0; i < n; i++) {
