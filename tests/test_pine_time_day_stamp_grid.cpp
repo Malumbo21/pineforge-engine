@@ -19,11 +19,13 @@
 //   NSE:NIFTY (Asia/Kolkata 0915-1530): "D" = 23:45 NY (= 09:15 IST) on
 //     39/39; "240" in {23:45, 03:45} NY (= 09:15 / 13:15 IST);
 //   BINANCE:BTCUSDT (UTC 24x7): "D" = 20:00 NY (= 00:00 UTC) on 19/19 --
-//     the epoch grid, where the day stamp is 00:00 UTC.
-// CME_MINI:ES1! (America/Chicago 1700-1600) exported 0 rows, so its time()
-// values are the rule's extrapolation; what is pinned there is that its
-// request.security grid (test_oanda_day_stamp_grid rule E) does not move
-// and time("240") reads that grid.
+//     the epoch grid, where the day stamp is 00:00 UTC;
+//   CME_MINI:ES1! and NQ1! (America/Chicago 1700-1600; pin-time-hours-cme,
+//     capital 1e14 so every entry is affordable): "D" = 18:00 NY (= 17:00
+//     CT) on 147/147 each; "240" in {18:00, 22:00, 02:00, 06:00, 10:00,
+//     14:00} NY (= 17:00 / 21:00 / 01:00 / 05:00 / 09:00 / 13:00 CT); "60"
+//     every hour on the hour except 17:00 NY (the 16:00-17:00 CT break) --
+//     the 17:00-CT session-open grid request.security already used.
 //
 // Rules pinned here:
 //   A. OANDA:XAUUSD: time("D") is the 17:00 ET stamp for every bar of the
@@ -34,8 +36,9 @@
 //   C. NSE:NIFTY: "240" anchored at 09:15 IST; time("D") 09:15 IST;
 //   D. 24x7 UTC: every form is the epoch grid, bit-identical to the
 //      five-argument (tz-less) forms;
-//   E. CME 1700-1600 CT: stamp == open; the "240" grid is the 17:00-CT one
-//      request.security already used; D / W anchors unchanged.
+//   E. CME 1700-1600 CT: stamp == open; time("D") is 17:00 CT, "240" / "60"
+//      the 17:00-CT grid request.security already used (unchanged);
+//      D / W anchors unchanged.
 #include <cstdio>
 #include <initializer_list>
 #include <string>
@@ -357,7 +360,7 @@ void test_24x7_utc_is_the_epoch_grid() {
 // ─── E. CME 1700-1600 America/Chicago: the grid does not move ────────────────
 
 void test_cme_grid_unchanged() {
-    std::printf("E. CME 1700-1600 CT: stamp == open; \"240\" is the 17:00-CT grid request.security keeps\n");
+    std::printf("E. CME 1700-1600 CT: time(\"D\") == 17:00 CT; \"240\" / \"60\" on the 17:00-CT grid request.security keeps\n");
     const int64_t mon_open = utc_ms(2025, 3, 31, 22, 0);     // Mon 17:00 CDT
     CHECK_EQ_MS(session_period_open_ms(utc_ms(2025, 4, 1, 7, 0), CHI, CME, CalendarPeriod::DAY), mon_open);
     CHECK_EQ_MS(session_period_close_ms(utc_ms(2025, 4, 1, 7, 0), CHI, CME, CalendarPeriod::DAY),
@@ -365,6 +368,7 @@ void test_cme_grid_unchanged() {
     CHECK_EQ_MS(session_period_open_ms(utc_ms(2025, 4, 1, 7, 0), CHI, CME, CalendarPeriod::WEEK),
                 utc_ms(2025, 3, 30, 22, 0));
     CHECK_EQ_MS(T(utc_ms(2025, 4, 1, 7, 0), "D", CHI, CME), mon_open);
+    CHECK_EQ_MS(hhmm_ny(T(utc_ms(2025, 4, 1, 7, 0), "D", CHI, CME)), 1800);
     CHECK_EQ_MS(TC(utc_ms(2025, 4, 1, 7, 0), "D", CHI, CME), utc_ms(2025, 4, 1, 21, 0) - 1);
     // request.security's "240" grid, exactly as test_oanda_day_stamp_grid
     // rule E pins it: 22:00Z / 02:00Z / 06:00Z / .. / 18:00Z.
@@ -378,11 +382,43 @@ void test_cme_grid_unchanged() {
     CHECK_EQ_MS(T(utc_ms(2025, 4, 1, 1, 45), "240", CHI, CME), mon_open);
     CHECK_EQ_MS(T(utc_ms(2025, 4, 1, 2, 0), "240", CHI, CME), utc_ms(2025, 4, 1, 2, 0));
     CHECK_EQ_MS(T(utc_ms(2025, 4, 1, 20, 45), "240", CHI, CME), utc_ms(2025, 4, 1, 18, 0));
+    CHECK_EQ_MS(hhmm_ny(T(utc_ms(2025, 4, 1, 20, 45), "240", CHI, CME)), 1400);
     CHECK_EQ_MS(T(utc_ms(2025, 3, 31, 22, 30), "60", CHI, CME), mon_open);
-    std::vector<int64_t> bars;
-    for (int i = 0; i < 92; ++i) bars.push_back(mon_open + i * k15m);   // 17:00 .. 15:45 CDT
-    CHECK(grid_disagreements(bars, "240", CHI, CME) == 0);
-    CHECK(grid_disagreements(bars, "60", CHI, CME) == 0);
+    CHECK_EQ_MS(hhmm_ny(T(utc_ms(2025, 3, 31, 22, 30), "60", CHI, CME)), 1800);
+    // The epoch grid (00:00Z-anchored) is not it.
+    CHECK_EQ_MS(T0(utc_ms(2025, 4, 1, 1, 45), "240"), utc_ms(2025, 4, 1, 0, 0));
+    CHECK(T(utc_ms(2025, 4, 1, 1, 45), "240", CHI, CME) != T0(utc_ms(2025, 4, 1, 1, 45), "240"));
+    // Every bar of every session in the tapes' range reads the tapes' Size
+    // values (ES1! and NQ1!: 147/147 D entries at 18:00 NY; H4 in the
+    // six-hour set; H1 on the hour and never 17:00 NY), and D closes at
+    // 16:00 CT.
+    int sessions = 0, bad_d = 0, bad_h4 = 0, bad_h1 = 0, bad_grid = 0;
+    for (int64_t day = utc_ms(2025, 3, 30); day < utc_ms(2025, 6, 30); day += k1d) {
+        const int wd = weekday_utc(day);
+        if (wd == 5 || wd == 6) continue;          // no Fri / Sat evening open
+        const int64_t open_z = day + 22 * k1h;      // 17:00 CDT
+        std::vector<int64_t> bars;
+        for (int i = 0; i < 92; ++i) bars.push_back(open_z + i * k15m);   // 17:00 .. 15:45 CDT
+        for (int64_t t : bars) {
+            const int64_t d = T(t, "D", CHI, CME);
+            if (d != open_z || hhmm_ny(d) != 1800) ++bad_d;
+            if (TC(t, "D", CHI, CME) != open_z + 23 * k1h - 1) ++bad_d;
+            const int64_t h4 = T(t, "240", CHI, CME);
+            if (!in_set(hhmm_ny(h4), {200, 600, 1000, 1400, 1800, 2200})) ++bad_h4;
+            if ((h4 - open_z) % k4h != 0 || h4 > t || t >= h4 + k4h) ++bad_h4;
+            if (TC(t, "240", CHI, CME) != h4 + k4h) ++bad_h4;
+            const int64_t h1 = T(t, "60", CHI, CME);
+            if (pine_minute(h1, NY) != 0 || hhmm_ny(h1) == 1700 || h1 > t || t >= h1 + k1h) ++bad_h1;
+        }
+        bad_grid += grid_disagreements(bars, "240", CHI, CME);
+        bad_grid += grid_disagreements(bars, "60", CHI, CME);
+        ++sessions;
+    }
+    CHECK(sessions == 66);   // Sun Mar 30 .. Sun Jun 29 evening opens
+    CHECK(bad_d == 0);
+    CHECK(bad_h4 == 0);
+    CHECK(bad_h1 == 0);
+    CHECK(bad_grid == 0);
 }
 
 }  // namespace
