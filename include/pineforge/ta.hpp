@@ -56,6 +56,27 @@ bool& ema_na_warmup_flag();
 // installed (the default — unit tests, standalone use) every ``compute()`` is
 // its own bar and the objects are byte-identical to the previous positional
 // deque.
+//
+// The ring is read through a cached extremum with an implied bar. Each call
+// site keeps ``{value, bar}``: the first call caches ``(src, b)``; a call on
+// bar ``b`` with ``b - bar < length`` only compares ``src`` against the cache
+// (strict — ties never displace the cached member); the new-extremum test
+// comes FIRST, so a bar whose ``src`` beats the cache takes it without
+// reading the slots even when the cache has aged out; otherwise, once the
+// cached extremum has aged out (``b - bar >= length`` — by bars, not calls)
+// the slots are rescanned, oldest first, and the cache becomes
+// ``(best, b - k_best)``; otherwise the cache is kept. The output is the
+// cached value (the *Bars offset is ``b - bar``). Pinned 2026-09-04 with 8
+// ``lab tv`` tapes on NYSE:F 1D (696/696 entries), the BINANCE:ETHUSDT.P
+// geometry pin (82/82) and the jayentriken BBWP ETH replay (593/593):
+// ``m = bar_index % 49; if m < 4 or 37 <= m < 47 or m == 48: v =
+// ta.lowest(low, 10)`` answers 9.88 (cached from bar 42) on bars 48..51
+// although bar 3's stale 9.20 sits one slot behind bar 48 — the plain ring
+// would say 9.20 — and rescans to 9.20 on bar 52 once the cache has aged;
+// on ETH the run-start bar 4990 (low 2648.62 < the expired cache 2650.47)
+// answers its own low and never reads the aliased 08:15 slot the plain ring
+// returned. For an every-bar caller the cache is exactly the positional
+// window, so nothing changes there.
 struct BarContext {
     bool installed = false;
     long long bar_index = 0;   // ring address: the context's current bar index
@@ -97,6 +118,17 @@ private:
     std::vector<unsigned char> written_;
     long long own_bar_ = -1;   // cadence when no context is installed
     bool has_written_ = false;
+    // TradingView's cached extremum with an implied bar (bar_context() docs):
+    // the value the site last answered and the bar it is attributed to.
+    bool cached_ = false;
+    double cval_ = 0.0;
+    long long cbar_ = 0;
+    // The cache as it stood BEFORE the current bar's first tick, so a
+    // recompute() (same bar, advance=false) restores it and re-applies.
+    long long cache_seen_bar_ = -1;
+    bool saved_cached_ = false;
+    double saved_cval_ = 0.0;
+    long long saved_cbar_ = 0;
 };
 
 class RMA {
