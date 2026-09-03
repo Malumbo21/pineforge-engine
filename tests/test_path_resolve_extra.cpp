@@ -515,15 +515,27 @@ static void test_fractional_trail_offset_truncates() {
         /*trail_points=*/100, /*trail_price=*/kNaN, /*trail_offset=*/50.0, /*entry=*/100,
         /*best_start=*/kNaN, false, false, kMintick);
     CHECK(near(fl_int.fill_price, 101.50));
-    // Sub-tick offsets (0 < offset < 1) truncate to zero ticks: the level
-    // rides the extreme itself once armed (distinct from an explicit 0,
-    // which is the exit-at-activation shape). peak 102 -> fill @ 102.00.
+    // Sub-tick offsets (0 < offset < 1) truncate to zero ticks AND then
+    // follow the explicit-zero exit-at-activation rule: fill AT the
+    // activation crossing (101 on the L->H leg), NOT at the peak 102.
+    // This cell used to pin the peak (a finite zero-distance trail riding
+    // the extreme, "distinct from an explicit 0") as an extrapolation of
+    // the floor rule; it was never tape-backed and TradingView refutes it:
+    // `lab tv` on OANDA:EURUSD 15m 2025-04-01 -> 05-01 gives byte-identical
+    // tapes for trail_offset = 0, 0.5 and 0.9 (190 rows, sha256
+    // 36aa80ac...). Full pins, including the gapped open and the #148
+    // no-retro-arm hold, live in test_trail_open_arm_subtick_offset.cpp.
     ExitPathFill fl_sub = resolve_exit_path_fill(
         trail_long, PositionSide::LONG, kNaN, kNaN,
         /*trail_points=*/100, /*trail_price=*/kNaN, /*trail_offset=*/0.6, /*entry=*/100,
         /*best_start=*/kNaN, false, false, kMintick);
     CHECK(fl_sub.should_fill == true);
-    CHECK(near(fl_sub.fill_price, 102.00));
+    CHECK(near(fl_sub.fill_price, 101.00));
+    ExitPathFill fl_zero = resolve_exit_path_fill(
+        trail_long, PositionSide::LONG, kNaN, kNaN,
+        /*trail_points=*/100, /*trail_price=*/kNaN, /*trail_offset=*/0.0, /*entry=*/100,
+        /*best_start=*/kNaN, false, false, kMintick);
+    CHECK(near(fl_sub.fill_price, fl_zero.fill_price));
 }
 
 static void test_entry_bar_blocks_no_trail_exit() {

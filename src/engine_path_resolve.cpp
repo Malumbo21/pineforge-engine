@@ -563,27 +563,42 @@ ExitTrailState compute_exit_trail_state(bool is_long, double trail_points,
         // Absolute activation price level (no entry-relative tick rounding).
         s.activation_level = trail_price;
     }
-    // TV treats an explicit zero offset like an omitted offset: the exit fires
-    // at the activation crossing itself. Keep zero represented as NaN here so
-    // it follows the existing activation-only path; positive offsets retain
-    // the ordinary best-price-minus/plus-offset trailing behaviour.
-    if (!std::isnan(trail_offset) && trail_offset != 0.0) {
-        // A fractional trail_offset (ticks) is TRUNCATED to whole ticks by
-        // TradingView, not rounded up: the trailing level sits
-        // floor(offset) ticks behind the running extreme. Measured on every
-        // non-gap trailing exit whose level could be recovered from the TV
-        // tape (level = TV fill + slippage ticks): nils123456-orb-strat on
-        // BINANCE:ETHUSDT.P (trail_offset = price / mintick, slippage 0)
-        // 11/11 and legalrice2697-nse-elite-strategy-v6-full-system on
-        // OANDA:EURUSD (atr * 4 / mintick, slippage 2) 58/62 sat exactly
-        // ONE tick nearer the extreme than the ceil() level, for offsets
-        // with a fractional part both below and above .5 (never zero for
-        // the .5+ half, which rules out round-to-nearest). Whole-tick
-        // offsets are unchanged.
-        s.trail_offset_price = std::floor(trail_offset) * syminfo_mintick;
+    // A fractional trail_offset (ticks) is TRUNCATED to whole ticks by
+    // TradingView, not rounded up: the trailing level sits floor(offset)
+    // ticks behind the running extreme. Measured on every non-gap trailing
+    // exit whose level could be recovered from the TV tape (level = TV fill
+    // + slippage ticks): nils123456-orb-strat on BINANCE:ETHUSDT.P
+    // (trail_offset = price / mintick, slippage 0) 11/11 and
+    // legalrice2697-nse-elite-strategy-v6-full-system on OANDA:EURUSD
+    // (atr * 4 / mintick, slippage 2) 58/62 sat exactly ONE tick nearer the
+    // extreme than the ceil() level, for offsets with a fractional part both
+    // below and above .5 (never zero for the .5+ half, which rules out
+    // round-to-nearest). Whole-tick offsets are unchanged.
+    //
+    // The truncation comes FIRST, and an offset that truncates to ZERO ticks
+    // -- an explicit 0 or any sub-tick value in (0, 1) -- is TV's
+    // exit-at-activation trail (the one-shot rule below), NOT a zero-distance
+    // trail riding on the running extreme. Keep it represented as NaN so it
+    // follows the activation-only path; positive whole-tick offsets retain
+    // the ordinary best-price-minus/plus-offset trailing behaviour. Pinned
+    // with `lab tv` on OANDA:EURUSD 15m (2025-04-01 -> 05-01): the tapes for
+    // strategy.exit("x", "L", trail_points=3, trail_offset=0),
+    // trail_offset=0.5 and trail_offset=0.9 are byte-identical (190 rows,
+    // sha256 36aa80ac...). The engine used to keep floor(0.6) = 0 as a
+    // FINITE zero distance, so the stop sat on the running extreme and
+    // filled at the bar's best price: winthetrade ema-9-vwap ATR trail
+    // (trail_offset = atr*2 passed as ticks) on OANDA:EURUSD 15m, short
+    // 2025-03-31 03:45Z @1.08330, atr*2 ~ 0.0006 "ticks" -> activation
+    // ceil -> 1 tick = 1.08329, offset floor -> 0; exit bar O 1.08330
+    // L 1.08314: TV 1.08329 (the activation), engine 1.08314 (the low).
+    const double trail_offset_ticks = std::floor(trail_offset);  // NaN stays NaN
+    const bool zero_tick_offset = (trail_offset_ticks == 0.0);   // explicit [0, 1)
+    if (!std::isnan(trail_offset_ticks) && !zero_tick_offset) {
+        s.trail_offset_price = trail_offset_ticks * syminfo_mintick;
     }
     s.exits_at_activation = std::isnan(s.trail_offset_price);
-    // An EXPLICIT trail_offset=0 is TV's one-shot exit-at-activation trail:
+    // An EXPLICIT trail_offset=0 (or a sub-tick offset that truncates to 0
+    // ticks, see above) is TV's one-shot exit-at-activation trail:
     // it FILLS at the activation crossing itself, so it can never survive
     // into a later bar in the armed state — an armed zero-offset trail is an
     // executed one. Deriving "armed" for it from the running post-entry
@@ -612,8 +627,7 @@ ExitTrailState compute_exit_trail_state(bool is_long, double trail_points,
     // only a carried armed state can produce. Offset>0 trails likewise keep
     // the reconstruction: activation is durable for every trail that keeps
     // running after it activates.
-    const bool one_shot_zero_offset_trail =
-        !std::isnan(trail_offset) && trail_offset == 0.0;
+    const bool one_shot_zero_offset_trail = zero_tick_offset;
     if (!one_shot_zero_offset_trail && !std::isnan(s.best_price)) {
         s.trail_active = is_long ? (s.best_price >= s.activation_level)
                                  : (s.best_price <= s.activation_level);
@@ -707,6 +721,54 @@ void update_exit_trail_state(bool is_long, bool rising, bool falling,
             trail->best_price = to_price;
         }
         if (!trail->trail_active && trail->best_price <= trail->activation_level) {
+            trail->trail_active = true;
+        }
+    }
+}
+
+// Fold the bar's OPEN into the trail state before the intrabar path walk.
+// TradingView's broker emulator sees the open as the FIRST traded price of
+// the bar: a trail whose activation level the open already sits past arms AT
+// the open with best = open, so the trailing level on the first leg is
+// open -/+ offset. The engine used to observe prices only at the END of each
+// path segment (update_exit_trail_state), so on an adverse-leg-first bar
+// (|O-L| < |H-O| for a long) the trail stayed dormant through the retrace,
+// armed only at the favourable extreme and filled at extreme -/+ offset --
+// the worst-case price TV never prints.
+//
+// Evidence (winthetrade-ema-9-vwap-strategy-with-atr-trailing-stop family,
+// trail_points = trail_offset = atr*2 passed as ticks; the entries are POOC
+// close fills, so the carried best is the entry price itself):
+//   OANDA:XAUUSD 15m long 2025-04-04 10:45Z @3110.31; 11:00Z bar O 3110.40
+//     H 3136.775 L 3109.24 C 3134.46, 15 ticks / 15 ticks (mintick 0.001):
+//     TV "Long Exit" 3110.385 = open - 0.015 (PnL 24.47); engine 3136.76 =
+//     high - 0.015 (PnL 8631). 194 of the 195 differing XAUUSD exits fit
+//     TV = open -/+ k ticks vs engine = extreme -/+ the same k, always on an
+//     adverse-leg-first path with the open past the activation level.
+//   NASDAQ:AAPL 15m short 2025-04-02 18:45Z @222.93; 04-03 13:30Z bar
+//     O 205.54 L 202.52: TV 205.55 (open + 1 tick), engine 202.53 (low + 1).
+//   NYSE:F 1D long 2025-04-21 @9.47; 04-22 bar O 9.55 H 9.72: TV 9.54,
+//     engine 9.71.
+//
+// Only the OPEN itself arms here -- never the carried best: a one-shot
+// zero-offset trail must not retro-arm from a carried extreme (#148, see
+// compute_exit_trail_state), and an open already past its activation has
+// been filled by try_exit_open_gap_fill before this runs, so for the
+// exit-at-activation shapes this is a pure best-price observation.
+void observe_exit_trail_open(bool is_long, double open, ExitTrailState* trail) {
+    if (!trail->has_trail) return;
+    if (is_long) {
+        if (std::isnan(trail->best_price) || open > trail->best_price) {
+            trail->best_price = open;
+        }
+        if (!trail->trail_active && open >= trail->activation_level) {
+            trail->trail_active = true;
+        }
+    } else {
+        if (std::isnan(trail->best_price) || open < trail->best_price) {
+            trail->best_price = open;
+        }
+        if (!trail->trail_active && open <= trail->activation_level) {
             trail->trail_active = true;
         }
     }
@@ -884,6 +946,14 @@ ExitPathFill resolve_exit_path_fill(const Bar& bar,
             fill.path_position = 0.0;
             return fill;
         }
+        // No gap fill: the open is still the first price this bar the
+        // resting order saw. Fold it into the trail's running best (and arm
+        // the trail if the open is already past its activation) before the
+        // segment walk, exactly as TV's emulator does -- see
+        // observe_exit_trail_open for the tapes. Same liveness condition as
+        // the gap shortcut: a mid-path cursor or a non-magnifier entry bar
+        // means the order did not exist at the open.
+        observe_exit_trail_open(is_long, bar.open, &trail);
     }
 
     double path[4];
