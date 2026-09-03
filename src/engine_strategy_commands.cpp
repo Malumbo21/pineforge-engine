@@ -183,53 +183,74 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         }
     }
 
-    // TradingView broker rule: market-entry orders are admitted only
-    // when ``qty * <signal-bar close> * margin_pct/100 <= equity``.
-    // The check happens HERE (at signal time, with current_bar_.close
-    // — the close of the bar where ``strategy.entry`` was just called),
-    // NOT later in apply_market_order_fill where fill_price is the
-    // NEXT bar's open. For ``qty = strategy.equity / close`` sizing
-    // patterns (parity-anomalies/equity-mirror, community/IES) this
-    // distinction is load-bearing: the close-vs-open slippage routinely
-    // inflates overshoot from ~zero (at signal) to ~$20 (at fill), and
-    // pre-fix engine rejected those at fill time while TV accepted
-    // them at signal time — accumulating into community/IES's PnL
-    // drift. Verified empirically by parity-probe-04..06 (all 57/57
-    // matched) and the equity-mirror anomaly (full-equity sizing right at the
-    // 1× boundary, where TV's behaviour is itself non-deterministic — see
-    // corpus/validation/anomaly-equity-mirror-strategy-equity-01).
-    // Only applied to MARKET entries (limit/stop entries have their
-    // own price baked into the order itself).
+    // design-market-entry-affordability: TradingView's broker admission for a
+    // MARKET entry — rule, pins and evidence on
+    // PendingOrder::affordability_placement_equity (engine.hpp). This is the
+    // PLACEMENT half: the resulting position, lot-floored, is costed at the
+    // slipped on-tick signal close against MARK-TO-MARKET equity. A rejected
+    // flat open or same-direction add is dropped outright; a rejected reversal
+    // keeps ONLY its closing leg (affordability_close_only). The fill-time
+    // half in apply_filled_order_to_state costs the same quantity at
+    // max(signal price, slipped fill) against the placement snapshot.
     //
-    // Scope: this signal-time gate covers EXPLICIT-qty market entries only
-    // (the empirical base above — parity-probe-04..06 — is all explicit
-    // ``qty = <expr>`` sizing, all with headroom at the boundary). DEFAULT-
-    // sized (qty=na) market entries never reach it (qty is NaN here); their
-    // quantity is frozen at this bar's close further below (see
-    // frozen_default_market_qty), AFTER this gate, precisely so the freeze
-    // cannot accidentally activate a gate whose equity basis (realized-only
-    // current_equity()) was never validated for default sizing. Those frozen
-    // default-sized entries instead get their own, much narrower fill-time
-    // re-check: the percent==100 zero-commission true-flat above-lot gap-reject
-    // in apply_filled_order_to_state (design-cntvxiao-gap-reject). It does NOT
-    // contradict the explicit-qty "signal-time only" rule above — different
-    // sizing regime, different TV ground truth.
-    if (!std::isnan(qty) && std::isnan(limit_price) && std::isnan(stop_price)) {
-        double margin_pct = is_long ? margin_long_ : margin_short_;
-        if (margin_pct > 0.0 && !std::isnan(current_bar_.close)) {
-            // Position value in account currency includes the futures
-            // point-value multiplier (1.0 for crypto/equity — unchanged).
-            // The notional is in the symbol's quote currency; convert it to the
-            // account currency (FX 1.0 unless the script declared a differing
-            // currency=) so it is comparable to equity, which is denominated in
-            // the account currency. Default 1.0 leaves the corpus untouched.
-            double required_margin = std::abs(qty) * current_bar_.close
-                                     * syminfo_.pointvalue
-                                     * active_account_currency_fx()
-                                     * (margin_pct / 100.0);
-            double available_equity = current_equity();
-            double epsilon = std::max(1e-9, std::abs(available_equity) * 1e-12);
-            if (required_margin > available_equity + epsilon) {
+    // Scope: explicit-qty entries and DEFAULT FIXED / CASH sizing. Default
+    // percent_of_equity entries never reach it: their quantity is frozen at
+    // this bar's close further below (frozen_default_market_qty) and their
+    // admission is the separately pinned KI-54 / gap-reject / gross-admission
+    // family in apply_filled_order_to_state. Priced (limit/stop) entries carry
+    // their own price and their own admission (KI-62). margin_pct == 0
+    // disables the check, as it does in TradingView.
+    const bool affordability_scope =
+        std::isnan(limit_price) && std::isnan(stop_price)
+        && (!std::isnan(qty)
+            || default_qty_type_ == QtyType::FIXED
+            || default_qty_type_ == QtyType::CASH);
+    bool affordability_close_only = false;
+    double affordability_placement_equity =
+        std::numeric_limits<double>::quiet_NaN();
+    double affordability_signal_price =
+        std::numeric_limits<double>::quiet_NaN();
+    double affordability_held_qty = 0.0;
+    if (affordability_scope) {
+        const double margin_pct = is_long ? margin_long_ : margin_short_;
+        if (margin_pct > 0.0 && std::isfinite(current_bar_.close)
+            && current_bar_.close > 0.0) {
+            const PositionSide requested =
+                is_long ? PositionSide::LONG : PositionSide::SHORT;
+            const bool same_dir = position_side_ == requested;
+            const bool reversal =
+                position_side_ != PositionSide::FLAT && !same_dir;
+            // The on-tick signal close is the price the rule is stated on
+            // (slippage ticks are in neither basis). The quantity is exactly
+            // the one the fill kernel dispatches: the lot-floored explicit
+            // contracts, the FIXED default, or the CASH default frozen at its
+            // slipped sizing basis (frozen_default_market_qty).
+            const double signal_price = round_to_mintick(current_bar_.close);
+            const double own_qty = std::isnan(qty)
+                ? frozen_default_market_qty(/*is_buy=*/is_long)
+                : calc_qty_for_type(signal_price, std::abs(qty), qty_type);
+            // A same-direction add is costed as the RESULTING position. Calls
+            // are evaluated in source order, so a strategy.close issued
+            // earlier in this on_bar has already released its quantity
+            // (pending_close_qty_in_bar_ — the tv_carry_qty convention
+            // below).
+            const double held_qty = same_dir
+                ? std::max(0.0, position_qty_ - pending_close_qty_in_bar_)
+                : 0.0;
+            // Position value in account currency: the futures point-value
+            // multiplier (1.0 for crypto/equity) and the account-currency FX
+            // (1.0 unless the script declared a differing currency=), so the
+            // notional is comparable to equity.
+            const double placement_equity =
+                current_equity() + open_profit(current_bar_.close);
+            const double required_margin =
+                (held_qty + own_qty) * signal_price * syminfo_.pointvalue
+                * active_account_currency_fx() * (margin_pct / 100.0);
+            const double epsilon =
+                std::max(1e-9, std::abs(placement_equity) * 1e-12);
+            if (std::isfinite(required_margin)
+                && std::isfinite(placement_equity)
+                && required_margin > placement_equity + epsilon) {
                 last_rejected_strategy_entry_call_bar_ = bar_index_;
                 // A rejected third call leaves no PendingOrder or incarnation,
                 // but it still means the source body was not the clean exact
@@ -238,7 +259,15 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                     pending_flat_market_pair_disqualified_bars_.insert(
                         bar_index_);
                 }
-                return;
+                if (!reversal) return;
+                // The reversal's closing leg still executes: the order is
+                // kept as a close-only transaction.
+                affordability_close_only = true;
+            }
+            if (std::isfinite(placement_equity)) {
+                affordability_placement_equity = placement_equity;
+                affordability_signal_price = signal_price;
+                affordability_held_qty = held_qty;
             }
         }
     }
@@ -392,6 +421,13 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         order.type = OrderType::MARKET;
         order.limit_price = std::numeric_limits<double>::quiet_NaN();
         order.stop_price = std::numeric_limits<double>::quiet_NaN();
+        // design-market-entry-affordability: the placement snapshot the
+        // fill-time half re-checks against, and the close-only verdict of a
+        // reversal whose entry leg was already rejected above.
+        order.affordability_placement_equity = affordability_placement_equity;
+        order.affordability_signal_price = affordability_signal_price;
+        order.affordability_held_qty = affordability_held_qty;
+        order.affordability_close_only = affordability_close_only;
         if (paired_flat_market_candidate) {
             order.paired_flat_market_candidate = true;
             order.paired_flat_market_own_qty = paired_flat_market_own_qty;
@@ -482,18 +518,15 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                 && std::isfinite(order.sizing_mark)
                 && order.sizing_mark > 0.0;
         }
-        // design-explicit-qty-fill-admission: capture the fill-time admission
-        // snapshot for an EXPLICIT-qty (the caller passed a finite qty) MARKET
-        // entry created TRUE-FLAT. The signal-time gate above (~:139-158)
-        // already rejected orders whose notional at THIS bar's close overshoots
-        // equity; this snapshot lets the fill-time re-check drop the entry when
-        // the next-bar fill gaps adversely enough that |qty|*slipped_fill
-        // exceeds the placement equity — TV's pinned behavior for the all-in
-        // floor idiom (probe-68 / mdfe3757). Disjoint from the frozen default-
-        // sizing snapshot above (that path requires isnan(qty)); priced
-        // (limit/stop) entries never reach here (else-branch) and RAW
-        // strategy.order builds its order elsewhere, so neither carries the
-        // candidate flag. Commission is EXCLUDED from the fill predicate.
+        // design-explicit-qty-fill-admission: capture the true-flat EXPLICIT-
+        // qty MARKET snapshot. Its fill-time admission is now the unified
+        // design-market-entry-affordability gate (affordability_* above); the
+        // candidate flag and snapshot are retained as the KI-65 explicit
+        // MARKET/MARKET pair's eligibility and gross-transaction basis
+        // (finalize_pending_flat_market_pair / its fill-time admission).
+        // Disjoint from the frozen default-sizing snapshot above (that path
+        // requires isnan(qty)); priced (limit/stop) entries never reach here
+        // (else-branch) and RAW strategy.order builds its order elsewhere.
         if (!std::isnan(qty) && !std::isnan(current_bar_.close)) {
             const double explicit_margin = is_long ? margin_long_ : margin_short_;
             // Equity basis matches the frozen path (KI-54): realized equity plus

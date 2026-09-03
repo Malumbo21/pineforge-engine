@@ -3628,18 +3628,23 @@ void BacktestEngine::apply_filled_order_to_state(
     // with pct <= 100 — the one regime where the floor invariant above
     // exists AND TV ground truth pins the behavior. CASH default sizing
     // has NO equity term (cash/(price*pv)), so required is unbounded by
-    // sizing_equity and the gate would decline perfectly ordinary flat
-    // opens whenever cash_value > equity (a real transpiled cash-20k-on-
-    // 10k-capital probe lost all 73 of its trades to it). The same
-    // applies to pct > 100 (leveraged sizing). Neither regime has TV
-    // ground truth; frozen CASH / pct>100 orders keep their freeze but
-    // are admitted unconditionally here.
+    // sizing_equity and THIS gate's flat-open arm would decline ordinary
+    // flat opens whenever cash_value > equity; pct > 100 (leveraged sizing)
+    // breaks the invariant too. Frozen CASH / pct>100 orders keep their
+    // freeze and skip this gate. CASH (and FIXED) default MARKET entries are
+    // instead admitted by the unified design-market-entry-affordability gate
+    // below (resulting position costed at max(signal, fill) against the
+    // placement MTM equity) — a cash 20k on 10k capital account at margin 100
+    // is over-notional there and declines, exactly like a fixed-qty order of
+    // the same notional (pin-afford-gapdown).
     //
     // Frozen MARKET entries and frozen RAW market orders are checked; an
     // opposite-direction RAW fill only CLOSES the position
     // (apply_raw_order_fill's exit branch) and is never dropped.
-    // Explicit-qty entries keep the signal-time gate in strategy_entry;
-    // priced (limit/stop) entries carry no snapshot. Runs BEFORE the
+    // Explicit-qty and FIXED/CASH-default entries take the unified
+    // design-market-entry-affordability gate (placement half in
+    // strategy_entry, fill half below); priced (limit/stop) entries carry no
+    // snapshot. Runs BEFORE the
     // intraday-cap accounting below: a dropped order was never filled, so
     // it must not consume a max_intraday_filled_orders slot.
     // KI-72: a default-sized percent_of_equity MARKET/RAW order whose FROZEN
@@ -4008,37 +4013,88 @@ void BacktestEngine::apply_filled_order_to_state(
         }
     }
 
-    // design-explicit-qty-fill-admission: TV declines an EXPLICIT-qty (caller
-    // passed a finite qty) true-flat MARKET entry at fill when its notional at
-    // the SLIPPED FILL price overshoots the placement equity snapshot. This is
-    // the explicit-qty sibling of the frozen gap-reject family above (those all
-    // require isnan(qty) via the frozen snapshot / candidate flag); the shipped
-    // frozen fix deliberately left the explicit path alone.
+    // design-market-entry-affordability: the FILL-time half of TradingView's
+    // market-entry admission (rule, pins and evidence on
+    // PendingOrder::affordability_placement_equity, engine.hpp; the placement
+    // half is in strategy_entry). The quantity is exactly what the market
+    // kernel is about to dispatch (the frozen CASH default, the FIXED default,
+    // or the lot-floored explicit qty), a same-direction add is costed as
+    // held + add with "held" FROZEN AT PLACEMENT (a same-tick sibling that
+    // filled first is not re-costed here — thula INR short pair, TV rows in
+    // test_margin_call), a reversal as its own new side only, and the price is
+    // max(tick(close(S)), tick(fill)) — slippage ticks in neither basis: a
+    // fill at or below the placement price can never re-decline what
+    // placement admitted, only an adverse gap can (pin-afford-gapup: capital
+    // 380,000, signal close
+    // 18,820.50 = 376,410 admitted, fill 19,225 = 384,500 -> NOT filled;
+    // pin-afford-gapup-ctl at 1e6 fills). The threshold is the PLACEMENT
+    // equity snapshot with the float guard only — NO signal-notional floor
+    // (pin-admit-allin-f: floor(E/10.225) shares costed at the 10.23 fill
+    // overshoot E and TV declines) and NO raw-qty notional (pin-admit-allin-
+    // xau 2025-04-08 13:30Z: 662.968 -> 662.96 lots * 3013.75 <= 1,998,000.02,
+    // admitted). A declined reversal keeps its closing leg
+    // (affordability_close_only, dispatched by apply_market_order_fill); a
+    // declined flat open / add is dropped (no trade row, and it runs BEFORE
+    // the intraday-cap accounting so it consumes no slot). Commission is
+    // EXCLUDED — a fee-only overage admits here and the KI-61-family entry-bar
+    // trim may fire downstream. order.qty is NOT mutated (isnan(order.qty)
+    // stays the live default-sizing discriminator).
     //
-    //   |qty| * slipped_fill * pv * fx * (margin_pct/100)
-    //     >  max(placement_equity,
-    //            |qty| * slipped_signal_close * pv * fx * margin/100)
-    //        + max(1e-9, |placement_equity| * 1e-12)      (float guard only)
-    //
-    // The slipped-signal-close notional floors the threshold: a fill AT/BELOW
-    // the slipped signal close (POOC — fill == close(S)+slip on both sides — a
-    // no-gap open, or a favorable gap) can never decline, so the fill-time gate
-    // never re-declines what the signal-time gate already admitted; only an
-    // ADVERSE gap beyond the slip declines. With slippage 0 the floor collapses
-    // to the pure "fill notional > equity" rule the census pins (probe-68 comm=0
-    // decline-iff-notional>equity, zero slack, 99.94%; mdfe3757 306/306).
-    //
-    // Scope: created TRUE-FLAT (candidate flag) AND still FLAT at THIS fill,
-    // MARKET only, margin_pct>0. Commission is EXCLUDED — a fee-only overage
-    // ADMITS here, then the KI-61-family entry-bar trim may fire downstream.
-    // Reversals/adds are out of scope (flat-at-fill required — the flag is only
-    // set from a true-flat placement, and position_side_==FLAT is re-proven
-    // here). Runs BEFORE the intraday-cap accounting below: a declined order
-    // never filled, so it must not consume a max_intraday_filled_orders slot.
-    // order.qty is NOT mutated (isnan(order.qty) stays a live default-sizing
-    // discriminator for OCA / reversal-binding / partial-exit classification).
-    if (order.explicit_flat_admission_candidate
+    // The KI-65 explicit MARKET/MARKET pair is carved out: its first broker
+    // fill moves the frozen GROSS transaction and keeps the pinned pair
+    // admission below (test_dual_entry_placement_sizing).
+    const bool paired_flat_market_fill_admission =
+        order.explicit_flat_admission_candidate
         && order.type == OrderType::MARKET
+        && pending_flat_market_pair_is_live(order);
+    if (order.type == OrderType::MARKET
+        && !paired_flat_market_fill_admission
+        && !order.affordability_close_only
+        && std::isfinite(order.affordability_placement_equity)
+        && std::isfinite(order.affordability_signal_price)) {
+        const double margin_pct = order.is_long ? margin_long_ : margin_short_;
+        if (margin_pct > 0.0) {
+            const PositionSide requested =
+                order.is_long ? PositionSide::LONG : PositionSide::SHORT;
+            const bool same_dir = position_side_ == requested;
+            const bool reversal =
+                position_side_ != PositionSide::FLAT && !same_dir;
+            const double tick_fill = round_to_mintick(fill_price);
+            const double own_qty = !std::isnan(order.frozen_default_qty)
+                ? order.frozen_default_qty
+                : calc_qty_for_type(
+                      apply_fill_slippage(fill_price, order.is_long),
+                      std::isnan(order.qty) ? order.qty : std::abs(order.qty),
+                      order.qty_type);
+            const double held_qty =
+                std::isfinite(order.affordability_held_qty)
+                    ? order.affordability_held_qty : 0.0;
+            const double admit_price =
+                std::max(order.affordability_signal_price, tick_fill);
+            const double required_margin =
+                (held_qty + own_qty) * admit_price * syminfo_.pointvalue
+                * active_account_currency_fx() * (margin_pct / 100.0);
+            const double float_guard = std::max(
+                1e-9, std::abs(order.affordability_placement_equity) * 1e-12);
+            if (std::isfinite(required_margin)
+                && required_margin
+                       > order.affordability_placement_equity + float_guard) {
+                if (!reversal) {
+                    decline_and_cancel();
+                    return;
+                }
+                order.affordability_close_only = true;
+            }
+        }
+    }
+
+    // design-explicit-qty-fill-admission, KI-65 pair carve-out: a finalized
+    // explicit MARKET/MARKET pair's first broker fill may be the later source
+    // call and moves the frozen GROSS transaction. Cost that exact transaction
+    // at the slipped fill against max(placement equity, its slipped-signal-
+    // close notional) — the pair's pinned admission (POOC / no-gap fills are a
+    // structural no-op; only an adverse gap beyond the slip declines).
+    if (paired_flat_market_fill_admission
         && position_side_ == PositionSide::FLAT
         && !std::isnan(order.qty)
         && !std::isnan(order.explicit_placement_equity)
@@ -4050,19 +4106,10 @@ void BacktestEngine::apply_filled_order_to_state(
             const double notional_k = syminfo_.pointvalue
                                       * active_account_currency_fx()
                                       * (margin_pct / 100.0);
-            // A finalized pair's first broker fill may be the later source
-            // call and moves the frozen GROSS transaction. Cost that exact
-            // transaction here; using order.qty would admit an adverse gap on
-            // half the notional the fill is about to open.
-            const bool paired_flat_market =
-                pending_flat_market_pair_is_live(order);
-            const double admission_qty = paired_flat_market
-                ? order.paired_flat_market_transaction_qty
-                : std::abs(order.qty);
+            const double admission_qty =
+                order.paired_flat_market_transaction_qty;
             const double fill_notional =
                 admission_qty * slipped_fill * notional_k;
-            // POOC / no-gap admission floor: a fill at the slipped signal close
-            // was already admitted at signal time.
             const double signal_notional =
                 admission_qty * order.explicit_slipped_signal_close
                 * notional_k;
@@ -4828,6 +4875,29 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
                                              const Bar& bar,
                                              double& trail_best_path_state,
                                              bool later_same_tick_entry) {
+    // design-market-entry-affordability: the entry leg was declined (at
+    // placement or at fill) while an OPPOSITE position was live — execute the
+    // reversal's closing leg only (rampatel BTC 2025-05-12 07:15Z: TV closed
+    // the short by "Buy" @105,600 and opened no long). The exit rows carry
+    // this order's id/comment through the generic post-fill tagging. Flat or
+    // same-side at the fill: nothing to close, the order is consumed with no
+    // broker effect.
+    if (order.affordability_close_only) {
+        const PositionSide requested =
+            order.is_long ? PositionSide::LONG : PositionSide::SHORT;
+        if (position_side_ != PositionSide::FLAT
+            && position_side_ != requested
+            && std::isfinite(fill_price)) {
+            flip_market_position_to(
+                order.id, order.is_long,
+                apply_fill_slippage(fill_price, order.is_long),
+                order.qty, order.qty_type,
+                /*explicit_qty_prequantized=*/false,
+                /*close_only=*/true, order.incarnation);
+        }
+        trail_best_path_state = trail_best_price_;
+        return;
+    }
     // The final Short in the exact SHORT-seed collision is the broker
     // transaction that closes both physical LONG lots (the entry lot L and
     // the materialized min(S, L) lot) and re-opens the direction with exactly

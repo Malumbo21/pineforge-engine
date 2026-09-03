@@ -606,7 +606,10 @@ public:
         } else if (bar_index_ == 1) {
             captured_after_reversal = direct_lifecycle_active();
             if (mutation_ == Mutation::AcceptedAdd) {
-                strategy_entry("A", false, kNaN, kNaN, 1.0);
+                // Placed on bar 2 instead (see below): the all-in short has no
+                // free equity at its own fill price, so an add costed as
+                // held + add (design-market-entry-affordability) is only
+                // affordable once the short is in profit (close 90).
             } else if (mutation_ == Mutation::ScriptPartialReduction) {
                 strategy_close(
                     "S", "", 1.0, kNaN, /*immediately=*/true);
@@ -622,6 +625,10 @@ public:
                 cleared_after_mutation = !direct_lifecycle_active();
             }
         } else if (bar_index_ == 2
+                   && mutation_ == Mutation::AcceptedAdd) {
+            // MTM 11,000 at close 90 vs (100 + 1) * 90 = 9,090: admitted.
+            strategy_entry("A", false, kNaN, kNaN, 1.0);
+        } else if (bar_index_ == 3
                    && mutation_ == Mutation::AcceptedAdd) {
             mutation_applied =
                 position_side_ == PositionSide::SHORT

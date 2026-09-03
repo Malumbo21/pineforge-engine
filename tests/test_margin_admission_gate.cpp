@@ -29,9 +29,12 @@
  *      0/1068 gap-up flip fills against a 50/50 gapping feed.)
  *   E. A reversal whose fill price EQUALS the sizing price is an exact
  *      required == free_funds tie at all-in — the epsilon must ADMIT it.
- *   F. CASH default sizing is exempt: a flat open with cash_value >
- *      equity (no floor invariant exists for CASH) must be ADMITTED —
- *      regression pin for the gate's percent_of_equity/pct<=100 scope.
+ *   F. CASH default sizing skips THIS gate (no floor invariant exists for
+ *      CASH) but is admitted by the unified design-market-entry-affordability
+ *      gate instead: cash 20,000 on 10,000 capital at margin 100 is DECLINED,
+ *      cash 5,000 fills 50 lots. (Re-pinned 2026-09-03 — the former "exempt,
+ *      must fill" pin was a scope carve-out, not a TV observation; TV's broker
+ *      rule is sizing-type-blind: pin-afford-gapdown.)
  */
 
 #include <cmath>
@@ -240,23 +243,44 @@ void test_reversal_admitted_at_exact_tie() {
     }
 }
 
-// F. CASH default sizing is exempt from the re-check: cash 20000 on 10000
-//    capital sizes 200 lots @100 — no floor invariant bounds it by equity,
-//    and no TV ground truth pins a decline, so the flat open must FILL.
-//    (Pre-fix the gate declined every such entry: 445/445 on a real
-//    transpiled cash probe, 73 trades -> 0.)
-void test_cash_flat_open_admitted() {
-    std::printf("-- F: cash default sizing exempt, flat open admitted --\n");
-    Probe eng(QtyType::CASH, 20000.0, 1);
-    eng.script = "L..";
-    std::vector<Bar> bars = {
-        mk_bar(1000, 100, 100, 100, 100),   // frozen 20000/100 = 200
-        mk_bar(2000, 100, 100, 100, 100),   // must fill: LONG 200
-        mk_bar(3000, 100, 100, 100, 100),
-    };
-    eng.run(bars.data(), (int)bars.size());
-    CHECK(eng.position_side_ == PositionSide::LONG);
-    CHECK_NEAR(eng.position_qty_, 200.0, 1e-9);
+// F. CASH default sizing skips the KI-54 re-check (no floor invariant bounds
+//    it by equity) — it is admitted by the unified design-market-entry-
+//    affordability gate instead (strategy_entry placement half): cash 20000
+//    on 10000 capital sizes 200 lots @100 = 20,000 > 10,000 -> DECLINED;
+//    cash 5000 sizes 50 lots = 5,000 -> fills.
+//    RE-PIN (2026-09-03): this used to assert "exempt, must FILL" on the
+//    grounds that no TV ground truth pinned a decline. TV's broker rule is
+//    sizing-type-blind (pin-afford-gapdown: a fixed-qty notional over equity is
+//    rejected at placement), so an over-notional CASH open is rejected the same
+//    way. The historical note that a cash-20k-on-10k transpiled probe "lost 73
+//    trades" to the old gate is retained in engine_fills.cpp's KI-54 comment
+//    for the record; no TV tape of that probe was ever pinned.
+void test_cash_flat_open_gated() {
+    std::printf("-- F: cash default sizing gated by the unified rule --\n");
+    {
+        Probe eng(QtyType::CASH, 20000.0, 1);
+        eng.script = "L..";
+        std::vector<Bar> bars = {
+            mk_bar(1000, 100, 100, 100, 100),   // frozen 20000/100 = 200 lots
+            mk_bar(2000, 100, 100, 100, 100),   // 20,000 > 10,000 -> declined
+            mk_bar(3000, 100, 100, 100, 100),
+        };
+        eng.run(bars.data(), (int)bars.size());
+        CHECK(eng.position_side_ == PositionSide::FLAT);
+        CHECK(eng.trade_count() == 0);
+    }
+    {
+        Probe eng(QtyType::CASH, 5000.0, 1);
+        eng.script = "L..";
+        std::vector<Bar> bars = {
+            mk_bar(1000, 100, 100, 100, 100),   // frozen 5000/100 = 50 lots
+            mk_bar(2000, 100, 100, 100, 100),   // 5,000 <= 10,000 -> fills
+            mk_bar(3000, 100, 100, 100, 100),
+        };
+        eng.run(bars.data(), (int)bars.size());
+        CHECK(eng.position_side_ == PositionSide::LONG);
+        CHECK_NEAR(eng.position_qty_, 50.0, 1e-9);
+    }
 }
 
 }  // namespace
@@ -622,7 +646,7 @@ int main() {
     test_fractional_same_dir_add_admitted();
     test_reversal_declined_on_adverse_gap();
     test_reversal_admitted_at_exact_tie();
-    test_cash_flat_open_admitted();
+    test_cash_flat_open_gated();
     test_slipped_short_reversal_zero_gap_admitted();
     test_reversal_lot_step_slack();
     test_fractional_add_marked_to_market();

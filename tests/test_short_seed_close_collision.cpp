@@ -646,7 +646,12 @@ public:
             // Signal-time margin rejection: no PendingOrder/incarnation remains,
             // so the source-bar rejection tombstone is the only proof this was
             // not the exact three-call book.
-            strategy_entry("Rejected", true, kNaN, kNaN, 1'000'000.0);
+            // An over-notional SAME-direction add: rejected at placement, no
+            // order object. (It used to be an opposite-direction call; under
+            // design-market-entry-affordability a rejected REVERSAL keeps its
+            // closing leg as a queued close-only order, so it would no longer
+            // be an invisible rejection.)
+            strategy_entry("Rejected", false, kNaN, kNaN, 1'000'000.0);
         }
 
         strategy_entry("Long", true,
