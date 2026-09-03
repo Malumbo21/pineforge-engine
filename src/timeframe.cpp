@@ -216,13 +216,50 @@ static int64_t calendar_clock_ms(int64_t ts, const std::string& tz) {
     return ts - tz_offset_ms(ts, tz);
 }
 
-/// Intraday grid clock: exchange-tz seconds since (local-midnight + session
-/// open), so integer division by the bucket width reproduces TV's
-/// session-open-anchored grouping (09:30/13:30 on equities).
+static int session_length_minutes(const std::string& session);
+
+/// Minutes from symbol-local midnight to the symbol's DAY STAMP: the instant
+/// its daily bar starts, which is where TradingView anchors the intraday HTF
+/// grid ("45", "240", ...) and where the session-day ordinal below rolls.
+/// For every declared session that is the session open -- 09:30 ET on NYSE
+/// RTH, 09:15 IST on NSE, 17:00 CT on CME 1700-1600, 17:00 ET on OANDA forex
+/// 1700-1700, midnight on 24x7 -- with ONE exception the engine has to know
+/// by its session string: OANDA's 1800-1700 metals / CFD session (XAUUSD,
+/// XAGUSD, ...). It trades from 18:00 ET, but OANDA aligns every
+/// instrument's day at the 17:00 ET forex roll -- the stamp its native daily
+/// bars carry (engine_aux_security.cpp routes them by the session they
+/// COVER for that reason) -- and TradingView inherits that alignment.
+/// Pinned with `lab tv` on OANDA:XAUUSD 15, 2025-04-01..04-15
+/// (pin-xau-grid-240 / -45: entries on ta.change(time("<tf>"))): "240"
+/// buckets open 21:00Z / 01:00Z / 05:00Z / 09:00Z / 13:00Z / 17:00Z -- 17:00
+/// EDT, the 17:00-21:00 bucket holding only the 18:00-20:45 bars -- and "45"
+/// buckets 21:00Z / 21:45Z / 22:30Z / 23:15Z; the 18:00 ET session-open
+/// anchor put them at 22:00Z / 02:00Z / ... and 22:00Z / 22:45Z / 23:30Z.
+/// Every 3commas-* XAUUSD DCA probe (request.security "240" RSI gate) shows
+/// the same 17:00-ET grid on TV against the engine's 18:00-ET one, the DCA
+/// legs agreeing to 1e-6 once the grid does. The session OPEN stays the
+/// session-day's nominal open (the D bar's label and its close arithmetic,
+/// session_day_open_nominal_ms); only the clock moves, and no 1800-1700 bar
+/// trades in the 17:00-18:00 hour the two clocks attribute differently.
+static int session_day_stamp_offset_minutes(const std::string& session) {
+    const int open = session_open_offset_minutes(session);
+    if (open == 18 * 60
+        && (open + session_length_minutes(session)) % 1440 == 17 * 60) {
+        return 17 * 60;
+    }
+    return open;
+}
+
+/// Intraday grid clock: exchange-tz seconds since (local-midnight + the
+/// symbol's day stamp), so integer division by the bucket width reproduces
+/// TV's day-anchored grouping (09:30/13:30 on equities, 17:00 ET on OANDA).
+/// The session-day ordinal (session_day_index) runs on the same clock: the
+/// day rolls at the stamp, and the nominal session open is added back per
+/// day by session_day_open_nominal_ms.
 static int64_t intraday_clock_ms(int64_t ts, const std::string& tz,
                                  const std::string& session) {
     return calendar_clock_ms(ts, tz)
-               - static_cast<int64_t>(session_open_offset_minutes(session)) * 60000;
+               - static_cast<int64_t>(session_day_stamp_offset_minutes(session)) * 60000;
 }
 
 /// Minutes from symbol-local midnight to the first session window's CLOSE
@@ -420,6 +457,11 @@ static int64_t session_day_close_real_ms(int64_t d, const std::string& tz,
 int64_t session_covered_instant_ms(int64_t ms, const std::string& tz,
                                    const std::string& session) {
     const int64_t d = session_day_index(ms, tz, session);
+    // Before the session-day's open -- the 17:00-18:00 ET hour between the
+    // 1800-1700 day stamp and its session open, where OANDA stamps the daily
+    // bar: the stamp covers the session about to open.
+    const int64_t open = session_day_open_real_ms(d, tz, session);
+    if (ms < open) return open;
     // Inside the session-day (before its exclusive close): covered as-is.
     // ""/24x7 sessions close exactly at the next open, so the gap is empty
     // and every timestamp takes this branch.

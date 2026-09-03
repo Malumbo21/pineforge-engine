@@ -90,8 +90,12 @@ bool crosses_boundary(int64_t prev_ms, int64_t curr_ms, CalendarPeriod period);
 /// behavior for 24x7 symbols (the corpus regime). Session symbols
 /// (equities RTH, forex) anchor HTF buckets on the exchange clock instead:
 /// daily boundaries at symbol-local midnight, intraday buckets offset by the
-/// session-open minutes. With tz="UTC" and session ""/"24x7" these are
-/// bit-identical to the UTC forms, so existing callers are unaffected.
+/// symbol's day stamp -- the session open, except OANDA's 1800-1700 metals
+/// session whose day (and TradingView's "45"/"240" grid) rolls at the 17:00
+/// ET forex roll one hour before it opens (session_day_stamp_offset_minutes
+/// in timeframe.cpp cites the pin). With tz="UTC" and session ""/"24x7"
+/// these are bit-identical to the UTC forms, so existing callers are
+/// unaffected.
 bool crosses_boundary(int64_t prev_ms, int64_t curr_ms, CalendarPeriod period,
                       const std::string& tz, const std::string& session);
 bool tf_change(int64_t prev_ms, int64_t curr_ms, const std::string& tf,
@@ -131,10 +135,11 @@ int64_t session_period_open_ms(int64_t ms, const std::string& tz,
                                CalendarPeriod period);
 
 /// The session instant a native CALENDAR chart stamp covers. A stamp inside
-/// its session-day returns unchanged. A stamp in the inter-session gap (at
-/// or after its session-day's close) covers the session about to open --
-/// OANDA stamps daily FX/metal bars at the 17:00 ET break under an
-/// 1800-1700 session -- and rolls forward to the next session-day's open.
+/// its session (open to exclusive close) returns unchanged. A stamp in the
+/// inter-session gap -- before its session-day's open (the 1800-1700 day
+/// stamp hour) or at / after its close -- covers the session about to open
+/// -- OANDA stamps daily FX/metal bars at the 17:00 ET break under an
+/// 1800-1700 session -- and rolls forward to that session's open.
 /// ""/24x7 sessions have no gap and always return `ms` unchanged.
 int64_t session_covered_instant_ms(int64_t ms, const std::string& tz,
                                    const std::string& session);
