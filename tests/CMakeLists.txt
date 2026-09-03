@@ -140,6 +140,7 @@ set(TEST_SOURCES
     test_short_seed_collision_percent
     test_exit_bracket_position_cycle_lifetime
     test_range_end_close
+    test_close_id_retires_ledger
 )
 
 find_package(Threads REQUIRED)

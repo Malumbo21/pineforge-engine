@@ -629,8 +629,10 @@ void BacktestEngine::strategy_close(const std::string& id,
     double matching_qty = 0.0;
     double qty_to_close = 0.0;
     bool all_entries_match = false;
+    double retired_ledger_qty = 0.0;
     if (!compute_close_target_qty(id, qty, qty_percent,
-                                  matching_qty, qty_to_close, all_entries_match)) {
+                                  matching_qty, qty_to_close, all_entries_match,
+                                  retired_ledger_qty)) {
         return;
     }
 
@@ -678,9 +680,11 @@ void BacktestEngine::strategy_close(const std::string& id,
 
     // design-declined-reversal-close-leg: compute_close_target_qty's default-
     // FIFO branch (below condition) debited id_unclosed_qty_[id] by
-    // qty_to_close. Record it on the deferred close so a later reversal-decline
-    // suppression can re-credit exactly that amount — UNLESS the POOC recalc
-    // block below re-credits it immediately (guard against a double-credit).
+    // qty_to_close — and, since round-4b F1, retired the rest of that ledger
+    // (retired_ledger_qty) with it. Record both on the deferred close so a
+    // later reversal-decline suppression can re-credit exactly the pre-call
+    // balance — UNLESS the POOC recalc block below re-credits it immediately
+    // (guard against a double-credit).
     const bool default_fifo_close = !close_entries_rule_any_ && !id.empty()
         && std::isnan(qty) && std::isnan(qty_percent);
     const bool immediate_ledger_recredit = coof_scheduler_active_
@@ -692,7 +696,9 @@ void BacktestEngine::strategy_close(const std::string& id,
     const uint64_t deferred_close_incarnation = queue_deferred_close_order(
         id, comment, qty_to_close, matching_qty,
         closes_full_position, closes_any_qty,
-        consumed_ledger_qty);
+        consumed_ledger_qty,
+        (default_fifo_close && !immediate_ledger_recredit)
+            ? retired_ledger_qty : 0.0);
 
     // TradingView keeps one narrowly identifiable prior-bar broker order
     // across an ordinary deferred close_all: a pure STOP strategy.entry that
@@ -744,9 +750,10 @@ void BacktestEngine::strategy_close(const std::string& id,
     // target above. When the command was born after an already-consumed POOC
     // close, its market order expires without a broker tick; keep the logical
     // entry ledger available so a later ordinary-close execution can reissue
-    // and actually fill the close (Delta's next-bar lifecycle).
+    // and actually fill the close (Delta's next-bar lifecycle). The whole
+    // pre-call balance comes back: the target plus whatever F1 retired.
     if (immediate_ledger_recredit) {
-        id_unclosed_qty_[id] += qty_to_close;
+        id_unclosed_qty_[id] += qty_to_close + retired_ledger_qty;
     }
 }
 
@@ -977,6 +984,16 @@ void BacktestEngine::enqueue_same_bar_close(const std::string& id,
     const double avail = std::max(
         0.0, persistent_avail - pending_reserved);
     const double target = std::min(unclosed, avail);
+    // round-4b F1: a sole call's flush retires the id's ledger whole only
+    // when the position / a prior-bar (persistent) reservation is what
+    // capped it — the pinned xlm/nvdax mechanism. A shortfall owed SOLELY to
+    // this bar's other pending sites keeps the pre-F1 debit-by-target rule,
+    // continuous with the zero-target branch below, which performs no
+    // cleanup for that case (the fresh A/A->B oracle) and schedules it only
+    // when persistent_avail <= eps. Unpinned against TV; see
+    // SameBarCloseCallsite::retire_ledger_whole. (An uncapped call debits
+    // its whole ledger either way; only a same-bar-only shortfall differs.)
+    const bool retire_ledger_whole = unclosed > persistent_avail + eps;
     if (target <= eps) {
         // Do not mutate shared ledgers here. Other source callsites may own
         // earlier reservations against the same logical id. A zero-capacity
@@ -1026,12 +1043,14 @@ void BacktestEngine::enqueue_same_bar_close(const std::string& id,
         site.id = id;
         site.comment = comment;
         site.target = target;
+        site.retire_ledger_whole = retire_ledger_whole;
         site.queue_seq = ++callsite_close_queue_seq_;
         return;
     }
     if (id == site.id) {
         site.comment = comment;
         site.target = target;
+        site.retire_ledger_whole = retire_ledger_whole;
         return;
     }
 
@@ -1061,6 +1080,7 @@ void BacktestEngine::enqueue_same_bar_close(const std::string& id,
     site.id = id;
     site.comment = comment;
     site.target = target;
+    site.retire_ledger_whole = retire_ledger_whole;
 }
 
 // End the script-evaluation phase. Distinct compiler callsites flush by the
@@ -1136,7 +1156,8 @@ void BacktestEngine::flush_same_bar_close() {
         sb_close_comment_ = site.comment;
         flush_active_same_bar_close(
             site.target, callsite_qty_remaining,
-            site.first_ledger_consumed, site.token);
+            site.first_ledger_consumed, site.token,
+            site.retire_ledger_whole);
     }
 
     for (const auto& cleanup : deferred_cleanup_ids) {
@@ -1197,7 +1218,8 @@ void BacktestEngine::flush_same_bar_close() {
 
 void BacktestEngine::flush_active_same_bar_close(
     double admitted_target, double pending_later_qty,
-    bool defer_first_ledger_consume, uint64_t callsite_token) {
+    bool defer_first_ledger_consume, uint64_t callsite_token,
+    bool retire_ledger_whole) {
     if (!sb_close_active_) return;
 
     const std::string id = sb_close_id_;
@@ -1281,12 +1303,51 @@ void BacktestEngine::flush_active_same_bar_close(
     }
 
     if (sole_call) {
-        // Single close call for this source site: consume the ledger and
+        // Single close call for this source site: retire the id's ledger and
         // release any prior reservation for this id.
+        //
+        // finding-close-id-retires-ledger (round-4b F1): the ledger is
+        // retired WHOLE, not debited by the target. When avail (position
+        // minus other ids' reservations) capped the target below unclosed,
+        // this path used to carry the remainder and the next entry under the
+        // same id re-credited on top of it (engine_orders.cpp
+        // execute_market_entry / engine_fills.cpp apply_entry fill:
+        // id_unclosed_qty_[id] += qty), so the next close(id) over-closed by
+        // the carry. TradingView retires the id's whole entry set on a
+        // close(id) ("all entries with the ID are exited at once"): a capped
+        // fill still retires the id. Evidence: 3commas xlm-grid 2025-05-08
+        // 10:45 TP_L35 closes 0.0987 of an L35 lot of 0.1043 on both engine
+        // and TV; on 2026-02-06 14:30 the engine then closed 0.1099 = 0.1043
+        // + 0.0056 carried while TV closed 0.1043 (nvdax: 0.0972 vs 0.0926).
+        // A Python port of the two ledger rules reproduced the engine's
+        // closed qty byte-for-byte on 3/3 grid bots. A DELIBERATE partial
+        // (explicit qty / qty_percent, strategy.exit legs) never reaches
+        // this branch — strategy_close routes those off the ledger — so its
+        // semantics are untouched.
+        //
+        // The whole-retire applies when the position or a PRIOR-BAR
+        // (persistent) reservation capped the target — every evidence point
+        // above (an uncapped call empties its ledger through the debit
+        // either way). A tokenized site
+        // whose shortfall came SOLELY from this bar's other pending sites
+        // (retire_ledger_whole == false, computed at admission in
+        // enqueue_same_bar_close) keeps the pre-F1 debit-by-target rule:
+        // that case is unpinned against TV and its zero-target sibling (the
+        // fresh A/A->B oracle) deliberately performs no cleanup, so a 99%
+        // same-bar cap must not behave differently from a 100% one. A
+        // position cap discovered only now (position_qty_ shrank below the
+        // admitted target since admission) is a position cap and retires
+        // whole. Token 0 never carries a same-bar pending reservation.
         if (it != id_unclosed_qty_.end()) {
-            it->second -= target;
-            if (it->second <= eps) {
+            const bool position_capped_at_flush =
+                has_admitted_target && target < admitted_target - eps;
+            if (retire_ledger_whole || position_capped_at_flush) {
                 id_unclosed_qty_.erase(it);
+            } else {
+                it->second -= target;
+                if (it->second <= eps) {
+                    id_unclosed_qty_.erase(it);
+                }
             }
         }
         if (callsite_token == 0) {
@@ -1406,6 +1467,14 @@ void BacktestEngine::flush_active_same_bar_close(
         // A surviving multi-evaluation close normally keeps its established
         // ledger. Exact-two replacement chains may first restore the prior
         // batch's recorded first target (never a physical-lot recount).
+        //
+        // Out of scope for round-4b F1 (F2, deliberately left as is): the
+        // close_reserved_qty_ / callsite_close_reserved_qty_ claims written
+        // below never decay on their own — they are released only by a
+        // later sole call for the same id or by going flat — so a stale
+        // claim can keep capping later closes of OTHER ids through avail.
+        // The TradingView rule for that reservation is unpinned; F1 only
+        // makes the capped sole call retire its own ledger.
         if (batch_calls == 2 && first_carry_valid
             && std::isfinite(first_carry_qty) && first_carry_qty > eps) {
             id_unclosed_qty_[first_id] = first_carry_qty;
@@ -2162,8 +2231,10 @@ bool BacktestEngine::compute_close_target_qty(const std::string& id,
                                               double qty_percent,
                                               double& matching_qty_out,
                                               double& qty_to_close_out,
-                                              bool& all_entries_match_out) {
+                                              bool& all_entries_match_out,
+                                              double& retired_ledger_qty_out) {
     const double eps0 = kQtyEpsilon;
+    retired_ledger_qty_out = 0.0;
     // Default FIFO close-entries rule: strategy.close(id) with no explicit
     // qty/qty_percent closes the UNCLOSED quantity tagged `id`
     // (id_unclosed_qty_) and FIFO-attributes the resulting trade records to
@@ -2193,11 +2264,23 @@ bool BacktestEngine::compute_close_target_qty(const std::string& id,
         }
         matching_qty_out = target;
         qty_to_close_out = target;
-        // Consume the id's unclosed ledger now that the close commits.
-        it->second -= target;
-        if (it->second <= eps0) {
-            id_unclosed_qty_.erase(it);
-        }
+        // Retire the id's unclosed ledger WHOLE now that the close commits.
+        //
+        // finding-close-id-retires-ledger (round-4b F1): this used to debit
+        // only the target and carry the remainder when position_qty_ capped
+        // it, and the next entry under the id re-credited on top of the
+        // carry, so the next close(id) over-closed by exactly that carry
+        // (xlm-grid 2026-02-06 14:30: engine 0.1099 = 0.1043 + 0.0056 carried,
+        // TV 0.1043). TradingView retires every entry under the id on a
+        // close(id) regardless of how much of it the position could fill.
+        // The retired remainder is reported so the two paths that undo an
+        // unfilled close (the COOF reissue re-credit in strategy_close and
+        // suppress_declined_reversal_close_legs) can restore the exact
+        // pre-call balance. Same rule as the POOC flush's sole-call branch
+        // (flush_active_same_bar_close). Explicit qty / qty_percent closes
+        // take the physical-lot branch below and never touch this ledger.
+        retired_ledger_qty_out = std::max(0.0, unclosed - target);
+        id_unclosed_qty_.erase(it);
         return true;
     }
 
@@ -2366,7 +2449,8 @@ uint64_t BacktestEngine::queue_deferred_close_order(
         double matching_qty,
         bool closes_full_position,
         bool closes_any_qty,
-        double consumed_ledger_qty) {
+        double consumed_ledger_qty,
+        double retired_ledger_qty) {
     const double eps = kQtyEpsilon;
     PendingOrder order;
     order.id = "__close__" + id;
@@ -2410,6 +2494,8 @@ uint64_t BacktestEngine::queue_deferred_close_order(
     // suppression can re-credit exactly that amount. NaN when nothing was
     // debited (ANY rule / explicit qty / close_all).
     order.suppressed_close_consumed_ledger_qty = consumed_ledger_qty;
+    // round-4b F1: the rest of that ledger the same call retired.
+    order.suppressed_close_retired_ledger_qty = retired_ledger_qty;
 
     const uint64_t incarnation = order.incarnation;
     pending_orders_.push_back(std::move(order));

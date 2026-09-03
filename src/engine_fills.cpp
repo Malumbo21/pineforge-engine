@@ -5478,8 +5478,11 @@ void BacktestEngine::suppress_declined_reversal_close_legs(
         co.suppress_as_declined_reversal_close = true;          // false->true transition
         if (!std::isnan(co.suppressed_close_consumed_ledger_qty)
             && co.suppressed_close_consumed_ledger_qty > 0.0) {
+            // round-4b F1: the call retired the id's ledger whole; restore
+            // the target AND the remainder it retired beyond the target.
             id_unclosed_qty_[co.id.substr(kClosePrefix.size())]
-                += co.suppressed_close_consumed_ledger_qty;
+                += co.suppressed_close_consumed_ledger_qty
+                   + co.suppressed_close_retired_ledger_qty;
         }
     }
 }

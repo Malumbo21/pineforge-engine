@@ -581,6 +581,15 @@ struct PendingOrder {
     // debit the id ledger).
     double suppressed_close_consumed_ledger_qty =
         std::numeric_limits<double>::quiet_NaN();
+    // finding-close-id-retires-ledger (round-4b F1): the part of
+    // id_unclosed_qty_[<bare id>] a default-FIFO strategy.close(id) retired
+    // BEYOND its availability-capped target (unclosed - target), so the
+    // suppression re-credit above restores the ledger to its exact pre-call
+    // value. 0 when the target covered the whole ledger or nothing was
+    // debited. Kept apart from suppressed_close_consumed_ledger_qty, whose
+    // value (the placement-frozen TARGET) the short-seed collision cohort
+    // reads as the materialized qty and must stay byte-identical.
+    double suppressed_close_retired_ledger_qty = 0.0;
     ShortSeedCollisionRole short_seed_collision_role =
         ShortSeedCollisionRole::NONE;
 };
@@ -799,6 +808,17 @@ protected:
         // Shared mutation is deferred until every site's broker flush.
         std::vector<std::string> deferred_cleanup_ids;
         uint64_t queue_seq = 0;
+        // round-4b F1: whether a sole-call flush retires id's ledger WHOLE.
+        // True when the admitted target was capped by the position or by a
+        // PRIOR-BAR (persistent) reservation (unclosed > persistent_avail)
+        // — the pinned xlm/nvdax rule. False when it was not capped by
+        // those, i.e. either uncapped (the debit then empties the ledger
+        // anyway) or short SOLELY because of this bar's other pending
+        // callsites (pending_reserved): that case is unpinned against TV,
+        // and its zero-target sibling (the fresh A/A->B oracle in
+        // enqueue_same_bar_close) performs no cleanup, so a partial
+        // same-bar cap keeps the pre-F1 debit-by-target rule.
+        bool retire_ledger_whole = true;
     };
     // Per-source-bar only. Cross-bar reservation/provenance is stored in the
     // owner-aware maps below, so a one-callsite generated strategy remains
@@ -2778,12 +2798,15 @@ private:
 
     // strategy_close / strategy_exit helpers (defined in
     // engine_strategy_commands.cpp).
+    // retired_ledger_qty_out: the id_unclosed_qty_[id] balance the default-
+    // FIFO branch retired beyond qty_to_close_out (0 on every other branch).
     bool compute_close_target_qty(const std::string& id,
                                   double qty,
                                   double qty_percent,
                                   double& matching_qty_out,
                                   double& qty_to_close_out,
-                                  bool& all_entries_match_out);
+                                  bool& all_entries_match_out,
+                                  double& retired_ledger_qty_out);
     void cancel_orders_for_full_close(const std::string& id, bool closing_long);
     void cancel_same_bar_market_reentries_after_full_close(
         bool closed_long, bool preserve_undercap_entries);
@@ -2793,11 +2816,14 @@ private:
                                 const std::string& comment,
                                 uint64_t callsite_token);
     void flush_same_bar_close();
+    // retire_ledger_whole: see SameBarCloseCallsite::retire_ledger_whole.
+    // Token 0 has no same-bar pending reservation, so it always retires whole.
     void flush_active_same_bar_close(
         double admitted_target = std::numeric_limits<double>::quiet_NaN(),
         double pending_later_qty = 0.0,
         bool defer_first_ledger_consume = false,
-        uint64_t callsite_token = 0);
+        uint64_t callsite_token = 0,
+        bool retire_ledger_whole = true);
     double close_reserved_other_qty(const std::string& id) const;
     double callsite_close_reserved_other_qty(
         uint64_t callsite_token, const std::string& id) const;
@@ -2820,7 +2846,8 @@ private:
         bool closes_full_position,
         bool closes_any_qty,
         double consumed_ledger_qty =
-            std::numeric_limits<double>::quiet_NaN());
+            std::numeric_limits<double>::quiet_NaN(),
+        double retired_ledger_qty = 0.0);
     // cleared_leg_count_out: how many live EXIT legs carried this
     // (id, from_entry) before the erase. TV re-issues MODIFY every live leg
     // (each keeping its own entry binding) rather than collapsing them into
