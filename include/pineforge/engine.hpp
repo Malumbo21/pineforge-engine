@@ -2152,10 +2152,51 @@ protected:
     // and session.islastbar (prev_in_session_ && !in_session).
     bool prev_in_session_ = false;
     // Current-bar session predicates — recomputed at the start of each bar
-    // by update_session_state() in engine_run.cpp.
+    // by set_session_bar_state() (engine_run.cpp) on every bar pump.
     bool session_ismarket_ = false;
     bool session_isfirstbar_ = false;
     bool session_islastbar_ = false;
+
+    // session.ismarket of the CHART bar stamped bar_ms on the symbol's
+    // session clock — the chart-timeframe-aware rule of session_time.hpp:
+    // every bar of a daily-or-higher chart is the regular-session bar,
+    // intraday bars keep the time-of-day test.
+    bool chart_bar_ismarket(int64_t bar_ms) const;
+    // Set the three per-bar predicates for the chart bar being dispatched.
+    // in_session is chart_bar_ismarket(that bar); intraday_islastbar is the
+    // pump's own lookahead verdict for an intraday chart (peek at the next
+    // bar, barstate.islast, or never in magnifier mode). On a D/W/M chart
+    // the bar IS the whole session — its own first and last bar — so
+    // session.isfirstbar and session.islastbar both equal in_session there
+    // and the prev/next bookkeeping does not apply.
+    void set_session_bar_state(bool in_session, bool intraday_islastbar);
+
+    // The session.is* market-state variables as the generated strategy
+    // evaluates them. Codegen lowers session.ismarket / ispremarket /
+    // ispostmarket to the unqualified call
+    //   pine_session_is*(syminfo_.session, syminfo_.timezone, current_bar_.timestamp)
+    // inside the generated class, and class-scope lookup resolves it to these
+    // members (a member hides the namespace-scope function of the same name
+    // and suppresses ADL), so the chart timeframe joins the predicate with
+    // the emitted code unchanged. TradingView: on "1D" and above
+    // session.ismarket is always true, ispremarket / ispostmarket always
+    // false — OANDA:XAUUSD @1D (1800-1700, bars stamped 17:00 ET) took 0
+    // trades against TradingView's 57 while the time-of-day test decided.
+    // Every BacktestEngine member resolves here too; the one caller that
+    // wants the raw time-of-day test (the streaming clock's closed-interval
+    // skip) qualifies pineforge:: explicitly.
+    bool pine_session_ismarket(const std::string& session,
+                               const std::string& tz, int64_t bar_ms) const {
+        return pineforge::pine_session_ismarket(session, tz, bar_ms, script_tf_);
+    }
+    bool pine_session_ispremarket(const std::string& session,
+                                  const std::string& tz, int64_t bar_ms) const {
+        return pineforge::pine_session_ispremarket(session, tz, bar_ms, script_tf_);
+    }
+    bool pine_session_ispostmarket(const std::string& session,
+                                   const std::string& tz, int64_t bar_ms) const {
+        return pineforge::pine_session_ispostmarket(session, tz, bar_ms, script_tf_);
+    }
 
     // --- Timeframe state ---
     std::string input_tf_;

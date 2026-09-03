@@ -541,6 +541,35 @@ bool pine_session_ispostmarket(const std::string& session,
     return (mod >= rth_close_min && mod < post_close_min);
 }
 
+// Chart-timeframe forms (see session_time.hpp): a D/W/M chart bar is the
+// symbol's regular-session bar whatever time of day its stamp reads.
+bool pine_session_ismarket(const std::string& session,
+                           const std::string& tz,
+                           int64_t bar_ms,
+                           const std::string& chart_tf) {
+    if (tf_is_daily_or_higher(chart_tf))
+        return true;
+    return pine_session_ismarket(session, tz, bar_ms);
+}
+
+bool pine_session_ispremarket(const std::string& session,
+                              const std::string& tz,
+                              int64_t bar_ms,
+                              const std::string& chart_tf) {
+    if (tf_is_daily_or_higher(chart_tf))
+        return false;
+    return pine_session_ispremarket(session, tz, bar_ms);
+}
+
+bool pine_session_ispostmarket(const std::string& session,
+                               const std::string& tz,
+                               int64_t bar_ms,
+                               const std::string& chart_tf) {
+    if (tf_is_daily_or_higher(chart_tf))
+        return false;
+    return pine_session_ispostmarket(session, tz, bar_ms);
+}
+
 // ---------------------------------------------------------------------------
 // pine_time / pine_time_close (existing public API)
 // ---------------------------------------------------------------------------

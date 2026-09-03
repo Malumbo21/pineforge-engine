@@ -141,6 +141,7 @@ set(TEST_SOURCES
     test_exit_bracket_position_cycle_lifetime
     test_range_end_close
     test_close_id_retires_ledger
+    test_session_predicates_daily_chart
 )
 
 find_package(Threads REQUIRED)

@@ -1535,6 +1535,28 @@ void BacktestEngine::clear_historical_security_lookahead_projections() {
 }
 
 
+bool BacktestEngine::chart_bar_ismarket(int64_t bar_ms) const {
+    return pineforge::pine_session_ismarket(syminfo_.session, syminfo_.timezone,
+                                            bar_ms, script_tf_);
+}
+
+void BacktestEngine::set_session_bar_state(bool in_session,
+                                           bool intraday_islastbar) {
+    session_ismarket_ = in_session;
+    if (tf_is_daily_or_higher(script_tf_)) {
+        // A daily-or-higher chart bar covers its whole session day(s): it is
+        // the session's first bar and its last bar at once (TradingView's
+        // "first / last bar of the day's session", read on a bar that IS the
+        // day), so both predicates hold on every bar of such a chart.
+        session_isfirstbar_ = in_session;
+        session_islastbar_ = in_session;
+        return;
+    }
+    session_isfirstbar_ = in_session && !prev_in_session_;
+    session_islastbar_ = intraday_islastbar;
+}
+
+
 // Bar pump for the no-aggregation, no-magnifier case: every input bar is a
 // script bar, fed straight to on_bar with the standard
 // pending-orders / per-trade-extremes / on_bar / equity-update sequence
@@ -1571,20 +1593,16 @@ void BacktestEngine::run_simple_bar_loop(const Bar* input_bars, int n_input) {
         }
 
         // Update session predicates for session.ismarket / isfirstbar / islastbar.
-        session_ismarket_  = pine_session_ismarket(syminfo_.session, syminfo_.timezone,
-                                                    current_bar_.timestamp);
-        session_isfirstbar_ = session_ismarket_ && !prev_in_session_;
-        // islastbar: fire when this bar is in-session but the NEXT bar won't be
-        // (lookahead: peek at next bar's timestamp if available, else fire on last bar).
-        if (session_ismarket_) {
+        // Intraday islastbar: fire when this bar is in-session but the NEXT bar
+        // won't be (lookahead: peek at the next bar's timestamp if available,
+        // else fire on the last bar).
+        {
+            const bool in_session = chart_bar_ismarket(current_bar_.timestamp);
             bool next_in_session = false;
-            if (i + 1 < n_input) {
-                next_in_session = pine_session_ismarket(syminfo_.session, syminfo_.timezone,
-                                                         input_bars[i + 1].timestamp);
+            if (in_session && i + 1 < n_input) {
+                next_in_session = chart_bar_ismarket(input_bars[i + 1].timestamp);
             }
-            session_islastbar_ = !next_in_session;
-        } else {
-            session_islastbar_ = false;
+            set_session_bar_state(in_session, in_session && !next_in_session);
         }
 
         dispatch_bar();
@@ -1673,10 +1691,10 @@ void BacktestEngine::run_aggregation_bar_loop(const Bar* input_bars, int n_input
             if (bar_magnifier && !group_sub_bars.empty()) {
                 // Magnifier mode: update session state using script-bar timestamp
                 // (first sub-bar's timestamp represents the aggregated bar).
-                session_ismarket_  = pine_session_ismarket(syminfo_.session, syminfo_.timezone,
-                                                            group_sub_bars.front().timestamp);
-                session_isfirstbar_ = session_ismarket_ && !prev_in_session_;
-                session_islastbar_  = false;  // not deterministic in magnifier mode without lookahead
+                // Intraday islastbar is not deterministic here without lookahead.
+                set_session_bar_state(
+                    chart_bar_ismarket(group_sub_bars.front().timestamp),
+                    /*intraday_islastbar=*/false);
                 run_magnified_bar(
                     group_sub_bars, script_bar_ts, completed_on_boundary);
                 prev_in_session_ = session_ismarket_;
@@ -1697,10 +1715,10 @@ void BacktestEngine::run_aggregation_bar_loop(const Bar* input_bars, int n_input
                 // (09:30-anchored, not UTC-aligned) label correctly too.
                 current_bar_ = ab.bar;
                 // Update session predicates.
-                session_ismarket_  = pine_session_ismarket(syminfo_.session, syminfo_.timezone,
-                                                            current_bar_.timestamp);
-                session_isfirstbar_ = session_ismarket_ && !prev_in_session_;
-                session_islastbar_  = session_ismarket_ && barstate_islast_;
+                {
+                    const bool in_session = chart_bar_ismarket(current_bar_.timestamp);
+                    set_session_bar_state(in_session, in_session && barstate_islast_);
+                }
                 dispatch_bar();
                 prev_in_session_ = session_ismarket_;
             }

@@ -163,4 +163,30 @@ bool pine_session_ispostmarket(const std::string& session,
                                const std::string& tz,
                                int64_t bar_ms);
 
+// Chart-timeframe forms: the rule the session.is* variables of a CHART bar
+// follow. TradingView evaluates them on the chart bar, and a daily-or-higher
+// bar covers whole session days rather than a time of day, so on "1D" and
+// above it documents session.ismarket as always true and session.ispremarket
+// / session.ispostmarket as always false (Pine docs, Sessions). OANDA:XAUUSD
+// @1D made the gap physical: an 1800-1700 America/New_York session and a tape
+// stamped at the 17:00 ET break put every daily open OUTSIDE the time-of-day
+// windows above, session.ismarket never held, and a script that ANDs every
+// signal with it took 0 trades against TradingView's 57. With an intraday or
+// empty chart_tf these forms defer to the three-argument time-of-day forms
+// above, byte for byte.
+bool pine_session_ismarket(const std::string& session,
+                           const std::string& tz,
+                           int64_t bar_ms,
+                           const std::string& chart_tf);
+
+bool pine_session_ispremarket(const std::string& session,
+                              const std::string& tz,
+                              int64_t bar_ms,
+                              const std::string& chart_tf);
+
+bool pine_session_ispostmarket(const std::string& session,
+                               const std::string& tz,
+                               int64_t bar_ms,
+                               const std::string& chart_tf);
+
 } // namespace pineforge

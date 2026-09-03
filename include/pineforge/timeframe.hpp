@@ -82,6 +82,14 @@ enum class CalendarPeriod { NONE, DAY, WEEK, MONTH };
 /// Determine the calendar period for a target TF string.
 CalendarPeriod calendar_period_for(const std::string& tf);
 
+/// True for a daily-or-higher chart timeframe ("D", "1D", "2D", "W", "M"):
+/// a bar that covers whole session days rather than a time of day (the
+/// aggregation path's CALENDAR classification). Intraday timeframes and an
+/// empty (undetected) one are false.
+inline bool tf_is_daily_or_higher(const std::string& tf) {
+    return calendar_period_for(tf) != CalendarPeriod::NONE;
+}
+
 /// Check if two timestamps (Unix milliseconds) fall in different calendar periods.
 bool crosses_boundary(int64_t prev_ms, int64_t curr_ms, CalendarPeriod period);
 
