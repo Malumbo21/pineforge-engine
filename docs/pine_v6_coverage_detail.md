@@ -160,13 +160,13 @@
 
 | Identifier | Kind | Status | Backing | Notes |
 |---|---|---|---|---|
-| `session.isfirstbar` | var | ✅ Runtime | `session_isfirstbar_` on engine; per-bar lookahead in `engine_run.cpp` | Sprint A |
+| `session.isfirstbar` | var | ✅ Runtime | `session_isfirstbar_` on engine; per-bar lookahead in `engine_run.cpp`; on a 1D+ chart every bar (the bar is its whole session) | Sprint A |
 | `session.isfirstbar_regular` | var | ✅ Runtime | Aliased to `session.isfirstbar` — engine has single session string, cannot distinguish RTH vs ETH (documented limitation) | Sprint A |
-| `session.islastbar` | var | ✅ Runtime | `session_islastbar_` on engine; per-bar lookahead | Sprint A |
+| `session.islastbar` | var | ✅ Runtime | `session_islastbar_` on engine; per-bar lookahead; on a 1D+ chart every bar (the bar is its whole session) | Sprint A |
 | `session.islastbar_regular` | var | ✅ Runtime | Aliased to `session.islastbar` | Sprint A |
-| `session.ismarket` | var | ✅ Runtime | `pine_session_ismarket(session, tz, bar_ms)` in `session_time.hpp` | Sprint A |
-| `session.ispostmarket` | var | ✅ Runtime | `pine_session_ispostmarket(...)` — standard ETH window `RTH_close-2000` local | Sprint A |
-| `session.ispremarket` | var | ✅ Runtime | `pine_session_ispremarket(...)` — standard ETH window `0400-RTH_open` local | Sprint A |
+| `session.ismarket` | var | ✅ Runtime | `pine_session_ismarket(session, tz, bar_ms, chart_tf)` in `session_time.hpp` (via `BacktestEngine::pine_session_ismarket`); always true on a 1D+ chart, as TradingView documents | Sprint A |
+| `session.ispostmarket` | var | ✅ Runtime | `pine_session_ispostmarket(...)` — standard ETH window `RTH_close-2000` local; always false on a 1D+ chart | Sprint A |
+| `session.ispremarket` | var | ✅ Runtime | `pine_session_ispremarket(...)` — standard ETH window `0400-RTH_open` local; always false on a 1D+ chart | Sprint A |
 
 ### Variables — strategy
 

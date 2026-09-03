@@ -256,7 +256,12 @@ bool BacktestEngine::stream_end(bool finalize_partial_input_bar) {
 bool BacktestEngine::stream_finalize_until(int64_t timestamp_ms) {
     while (timestamp_ms >= stream_next_input_open_ms_ + stream_input_tf_ms_) {
         const bool had_tick = stream_has_input_bar_;
-        const bool in_session = pine_session_ismarket(
+        // The raw time-of-day session test (namespace-scope form), not the
+        // chart-bar rule BacktestEngine::pine_session_ismarket applies: this
+        // decides whether a tick-less INPUT interval is a closed market that
+        // must not become a synthetic bar, and stays byte-identical on
+        // daily-or-higher feeds too.
+        const bool in_session = pineforge::pine_session_ismarket(
             syminfo_.session, syminfo_.timezone,
             stream_next_input_open_ms_);
 
@@ -374,16 +379,17 @@ void BacktestEngine::stream_dispatch_script_bar(const Bar& bar, bool had_tick) {
     }
 
     current_bar_ = bar;
-    session_ismarket_ = pine_session_ismarket(
-        syminfo_.session, syminfo_.timezone, current_bar_.timestamp);
-    session_isfirstbar_ = session_ismarket_ && !prev_in_session_;
-    if (session_ismarket_ && script_tf_seconds_ > 0) {
-        const int64_t next_ts = current_bar_.timestamp
-            + static_cast<int64_t>(script_tf_seconds_) * 1000;
-        session_islastbar_ = !pine_session_ismarket(
-            syminfo_.session, syminfo_.timezone, next_ts);
-    } else {
-        session_islastbar_ = false;
+    {
+        const bool in_session = chart_bar_ismarket(current_bar_.timestamp);
+        // Intraday islastbar: the next script bar opens one bar width ahead
+        // on the stream clock; fire when that open is out of session.
+        bool intraday_islastbar = false;
+        if (in_session && script_tf_seconds_ > 0) {
+            const int64_t next_ts = current_bar_.timestamp
+                + static_cast<int64_t>(script_tf_seconds_) * 1000;
+            intraday_islastbar = !chart_bar_ismarket(next_ts);
+        }
+        set_session_bar_state(in_session, intraday_islastbar);
     }
 
     _push_source_series();

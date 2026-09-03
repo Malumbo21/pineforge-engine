@@ -142,6 +142,7 @@ set(TEST_SOURCES
     test_range_end_close
     test_close_id_retires_ledger
     test_trail_open_arm_subtick_offset
+    test_session_predicates_daily_chart
 )
 
 find_package(Threads REQUIRED)
