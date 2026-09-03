@@ -98,8 +98,12 @@ bool crosses_boundary(int64_t prev_ms, int64_t curr_ms, CalendarPeriod period);
 /// behavior for 24x7 symbols (the corpus regime). Session symbols
 /// (equities RTH, forex) anchor HTF buckets on the exchange clock instead:
 /// daily boundaries at symbol-local midnight, intraday buckets offset by the
-/// session-open minutes. With tz="UTC" and session ""/"24x7" these are
-/// bit-identical to the UTC forms, so existing callers are unaffected.
+/// symbol's day stamp -- the session open, except OANDA's 1800-1700 metals
+/// session whose day (and TradingView's "45"/"240" grid) rolls at the 17:00
+/// ET forex roll one hour before it opens (session_day_stamp_offset_minutes
+/// in timeframe.cpp cites the pin). With tz="UTC" and session ""/"24x7"
+/// these are bit-identical to the UTC forms, so existing callers are
+/// unaffected.
 bool crosses_boundary(int64_t prev_ms, int64_t curr_ms, CalendarPeriod period,
                       const std::string& tz, const std::string& session);
 bool tf_change(int64_t prev_ms, int64_t curr_ms, const std::string& tf,
@@ -114,8 +118,12 @@ bool tf_change(int64_t prev_ms, int64_t curr_ms, const std::string& tf,
 // Every chart-level consumer of "the symbol's daily bar" — ta.vwap's default
 // anchor, timeframe.change("1D"), time("D")/time_close("D") — has to key on
 // this clock, the same one request.security aggregation already uses
-// (crosses_boundary / session_period_key above). With tz="UTC" and an
-// empty / "24x7" session all of these reduce to plain epoch integer math,
+// (crosses_boundary / session_period_key above). The bar OPENS at the
+// session-day's DAY STAMP — the session open on every session but OANDA's
+// 1800-1700, whose D bar is stamped 17:00 ET an hour before it trades
+// (time("D") reads 17:00 ET on OANDA:XAUUSD, pin-time-hours; the session
+// open stays where the tape trades from). With tz="UTC" and an empty /
+// "24x7" session all of these reduce to plain epoch integer math,
 // bit-identical to the UTC forms the corpus pins.
 //
 // Period attribution follows TV's trading-date rule: a session that wraps
@@ -132,17 +140,33 @@ bool tf_change(int64_t prev_ms, int64_t curr_ms, const std::string& tf,
 int64_t session_day_index(int64_t ms, const std::string& tz,
                           const std::string& session);
 
-/// Open (Unix ms) of the symbol's D/W/M bar that contains `ms`.
-/// CalendarPeriod::NONE returns `ms` unchanged.
+/// Open (Unix ms) of the symbol's D/W/M bar that contains `ms`: the day
+/// stamp of the period's first session-day (17:00 ET on OANDA 1800-1700,
+/// the session open elsewhere). CalendarPeriod::NONE returns `ms` unchanged.
 int64_t session_period_open_ms(int64_t ms, const std::string& tz,
                                const std::string& session,
                                CalendarPeriod period);
 
+/// Open (Unix ms) of the `bucket_sec`-wide intraday bucket that contains
+/// `ms` on the symbol's day-stamp-anchored grid: exchange-tz time since
+/// local midnight + day stamp, floored to the bucket width. This is THE
+/// intraday HTF grid — request.security's ratio buckets
+/// (TimeframeAggregator::bucket_open_ms), tf_change and
+/// time("<intraday tf>") / time_close all read it (pin-time-hours:
+/// time("60") on NYSE:F is 09:30 / 10:30 / .. / 15:30 ET, time("240") on
+/// NSE:NIFTY 09:15 / 13:15 IST, on OANDA:XAUUSD 17:00 ET + 4h*k). With
+/// tz="UTC" and session ""/"24x7" it is the epoch grid, bit-identical to
+/// the tz-less forms. bucket_sec <= 0 returns `ms`.
+int64_t session_intraday_bucket_open_ms(int64_t ms, int64_t bucket_sec,
+                                        const std::string& tz,
+                                        const std::string& session);
+
 /// The session instant a native CALENDAR chart stamp covers. A stamp inside
-/// its session-day returns unchanged. A stamp in the inter-session gap (at
-/// or after its session-day's close) covers the session about to open --
-/// OANDA stamps daily FX/metal bars at the 17:00 ET break under an
-/// 1800-1700 session -- and rolls forward to the next session-day's open.
+/// its session (open to exclusive close) returns unchanged. A stamp in the
+/// inter-session gap -- before its session-day's open (the 1800-1700 day
+/// stamp hour) or at / after its close -- covers the session about to open
+/// -- OANDA stamps daily FX/metal bars at the 17:00 ET break under an
+/// 1800-1700 session -- and rolls forward to that session's open.
 /// ""/24x7 sessions have no gap and always return `ms` unchanged.
 int64_t session_covered_instant_ms(int64_t ms, const std::string& tz,
                                    const std::string& session);
@@ -206,8 +230,9 @@ public:
     /// belongs to, on the aggregator's anchor clock (syminfo tz + session):
     /// CALENDAR -> session_period_open_ms of the bar's D/W/M period (the
     /// forex week opens Sunday 17:00 ET, its month on the session whose
-    /// close date is the 1st); RATIO -> the session-open-anchored intraday
-    /// grid bucket (the same key feed() splits on); PASSTHROUGH, or a
+    /// close date is the 1st); RATIO -> session_intraday_bucket_open_ms,
+    /// the day-stamp-anchored grid bucket (the same key feed() splits on
+    /// and time("<intraday tf>") reads); PASSTHROUGH, or a
     /// count-only ratio with no wall-clock width, -> `ms` itself. Pure
     /// function of the configuration: it neither reads nor advances the
     /// aggregation state, so callers may query it before feeding the bar.
@@ -218,11 +243,13 @@ public:
     /// on every bucket it starts (finding 473). RATIO -> bucket_open_ms
     /// (the session-anchored grid open, whether or not the grid-opening
     /// sub-bar traded: a forex 1m tape that starts at 17:04 ET still yields
-    /// the 17:00 chart bar); CALENDAR -> the open of the session-day holding
-    /// `ms` (the D/W/M bar is dated by its first TRADED session-day, so a
-    /// holiday-Monday week stays Tuesday's bar, but never by a thin-open
-    /// sub-bar inside that day); PASSTHROUGH -> `ms`. Gap-free feeds are
-    /// bit-identical: there the first sub-bar IS the bucket open.
+    /// the 17:00 chart bar); CALENDAR -> the day stamp of the session-day
+    /// holding `ms` (the D/W/M bar is dated by its first TRADED session-day,
+    /// so a holiday-Monday week stays Tuesday's bar, but never by a
+    /// thin-open sub-bar inside that day; on OANDA 1800-1700 the stamp is
+    /// 17:00 ET, an hour before the day trades); PASSTHROUGH -> `ms`.
+    /// Gap-free feeds whose open is the stamp are bit-identical: there the
+    /// first sub-bar IS the bucket open.
     int64_t bar_label_ms(int64_t ms) const;
 
 private:

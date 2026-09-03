@@ -216,13 +216,68 @@ static int64_t calendar_clock_ms(int64_t ts, const std::string& tz) {
     return ts - tz_offset_ms(ts, tz);
 }
 
-/// Intraday grid clock: exchange-tz seconds since (local-midnight + session
-/// open), so integer division by the bucket width reproduces TV's
-/// session-open-anchored grouping (09:30/13:30 on equities).
+static int session_length_minutes(const std::string& session);
+
+/// Minutes from symbol-local midnight to the symbol's DAY STAMP: the instant
+/// its daily bar starts, which is where TradingView anchors the intraday HTF
+/// grid ("45", "240", ...) and where the session-day ordinal below rolls.
+/// For every declared session that is the session open -- 09:30 ET on NYSE
+/// RTH, 09:15 IST on NSE, 17:00 CT on CME 1700-1600, 17:00 ET on OANDA forex
+/// 1700-1700, midnight on 24x7 -- with ONE exception the engine has to know
+/// by its session string: OANDA's 1800-1700 metals / CFD session (XAUUSD,
+/// XAGUSD, ...). It trades from 18:00 ET, but OANDA aligns every
+/// instrument's day at the 17:00 ET forex roll -- the stamp its native daily
+/// bars carry (engine_aux_security.cpp routes them by the session they
+/// COVER for that reason) -- and TradingView inherits that alignment.
+/// Pinned with `lab tv` on OANDA:XAUUSD 15, 2025-04-01..04-15
+/// (pin-xau-grid-240 / -45: entries on ta.change(time("<tf>"))): "240"
+/// buckets open 21:00Z / 01:00Z / 05:00Z / 09:00Z / 13:00Z / 17:00Z -- 17:00
+/// EDT, the 17:00-21:00 bucket holding only the 18:00-20:45 bars -- and "45"
+/// buckets 21:00Z / 21:45Z / 22:30Z / 23:15Z; the 18:00 ET session-open
+/// anchor put them at 22:00Z / 02:00Z / ... and 22:00Z / 22:45Z / 23:30Z.
+/// Every 3commas-* XAUUSD DCA probe (request.security "240" RSI gate) shows
+/// the same 17:00-ET grid on TV against the engine's 18:00-ET one, the DCA
+/// legs agreeing to 1e-6 once the grid does. The stamp is also where the
+/// symbol's D bar OPENS -- time("D") on OANDA:XAUUSD 15 reads 17:00 ET on
+/// 147/147 entries of pin-time-hours (2025-04-01..07-01), never the 18:00
+/// ET session open -- so session_period_open_ms and the D/W/M bucket label
+/// sit on it (session_day_stamp_real_ms). The session OPEN keeps the
+/// trading window: session_day_open_real_ms / session_covered_instant_ms
+/// (where a native 17:00-stamped bar's content lies) and the close
+/// arithmetic (open + length = the next 17:00 stamp). No 1800-1700 bar
+/// trades in the 17:00-18:00 hour the two clocks attribute differently.
+static int session_day_stamp_offset_minutes(const std::string& session) {
+    const int open = session_open_offset_minutes(session);
+    if (open == 18 * 60
+        && (open + session_length_minutes(session)) % 1440 == 17 * 60) {
+        return 17 * 60;
+    }
+    return open;
+}
+
+/// Intraday grid clock: exchange-tz seconds since (local-midnight + the
+/// symbol's day stamp), so integer division by the bucket width reproduces
+/// TV's day-anchored grouping (09:30/13:30 on equities, 17:00 ET on OANDA).
+/// The session-day ordinal (session_day_index) runs on the same clock: the
+/// day rolls at the stamp, and the nominal session open is added back per
+/// day by session_day_open_nominal_ms.
 static int64_t intraday_clock_ms(int64_t ts, const std::string& tz,
                                  const std::string& session) {
     return calendar_clock_ms(ts, tz)
-               - static_cast<int64_t>(session_open_offset_minutes(session)) * 60000;
+               - static_cast<int64_t>(session_day_stamp_offset_minutes(session)) * 60000;
+}
+
+int64_t session_intraday_bucket_open_ms(int64_t ms, int64_t bucket_sec,
+                                        const std::string& tz,
+                                        const std::string& session) {
+    if (bucket_sec <= 0) return ms;
+    // Floor (not truncate) so the open never lands after `ms` on a negative
+    // clock; for every real feed the two agree.
+    const int64_t bucket_ms = bucket_sec * 1000;
+    const int64_t clock = intraday_clock_ms(ms, tz, session);
+    int64_t open_clock = (clock / bucket_ms) * bucket_ms;
+    if (clock < 0 && clock % bucket_ms != 0) open_clock -= bucket_ms;
+    return ms - (clock - open_clock);
 }
 
 /// Minutes from symbol-local midnight to the first session window's CLOSE
@@ -340,17 +395,32 @@ static int64_t session_day_open_nominal_ms(int64_t d, const std::string& session
          + static_cast<int64_t>(session_open_offset_minutes(session)) * 60000;
 }
 
-/// Real epoch of session-day `d`'s open: the nominal wall-clock instant
-/// mapped back through the zone offset in force on THAT date (resolved
-/// twice so an east-of-UTC zone whose local open lands on the previous UTC
-/// date reads its own offset, not the nominal date's).
-static int64_t session_day_open_real_ms(int64_t d, const std::string& tz,
-                                        const std::string& session) {
-    const int64_t nominal = session_day_open_nominal_ms(d, session);
+/// Real epoch of a nominal wall-clock instant (UTC-encoded local time):
+/// mapped back through the zone offset in force at THAT instant (resolved
+/// twice so an east-of-UTC zone whose local instant lands on the previous
+/// UTC date reads its own offset, not the nominal date's).
+static int64_t nominal_to_real_ms(int64_t nominal, const std::string& tz) {
     if (is_utc_tz(tz)) return nominal;
     int64_t real = nominal + tz_offset_ms(nominal, tz);
     real = nominal + tz_offset_ms(real, tz);
     return real;
+}
+
+/// Real epoch of session-day `d`'s OPEN: the first traded instant.
+static int64_t session_day_open_real_ms(int64_t d, const std::string& tz,
+                                        const std::string& session) {
+    return nominal_to_real_ms(session_day_open_nominal_ms(d, session), tz);
+}
+
+/// Real epoch of session-day `d`'s DAY STAMP: where the symbol's D bar
+/// opens (session_day_stamp_offset_minutes) -- the session open everywhere
+/// but 1800-1700, whose bar is stamped 17:00 ET an hour before it trades.
+static int64_t session_day_stamp_real_ms(int64_t d, const std::string& tz,
+                                         const std::string& session) {
+    return nominal_to_real_ms(
+        d * kMsPerDay
+            + static_cast<int64_t>(session_day_stamp_offset_minutes(session)) * 60000,
+        tz);
 }
 
 int64_t session_day_index(int64_t ms, const std::string& tz,
@@ -384,9 +454,11 @@ int64_t session_period_open_ms(int64_t ms, const std::string& tz,
                                const std::string& session,
                                CalendarPeriod period) {
     if (period == CalendarPeriod::NONE) return ms;
+    // The period's bar opens where its first session-day's D bar does: the
+    // day stamp (the session open on every session but 1800-1700).
     const int64_t d = session_day_index(ms, tz, session);
-    return session_day_open_real_ms(session_period_first_day(d, session, period),
-                                    tz, session);
+    return session_day_stamp_real_ms(session_period_first_day(d, session, period),
+                                     tz, session);
 }
 
 /// Epoch day of the first session-day of the W/M period FOLLOWING the one
@@ -420,6 +492,11 @@ static int64_t session_day_close_real_ms(int64_t d, const std::string& tz,
 int64_t session_covered_instant_ms(int64_t ms, const std::string& tz,
                                    const std::string& session) {
     const int64_t d = session_day_index(ms, tz, session);
+    // Before the session-day's open -- the 17:00-18:00 ET hour between the
+    // 1800-1700 day stamp and its session open, where OANDA stamps the daily
+    // bar: the stamp covers the session about to open.
+    const int64_t open = session_day_open_real_ms(d, tz, session);
+    if (ms < open) return open;
     // Inside the session-day (before its exclusive close): covered as-is.
     // ""/24x7 sessions close exactly at the next open, so the gap is empty
     // and every timestamp takes this branch.
@@ -434,8 +511,9 @@ int64_t session_period_close_ms(int64_t ms, const std::string& tz,
     if (period == CalendarPeriod::NONE) return ms;
     const int64_t d = session_day_index(ms, tz, session);
     if (period == CalendarPeriod::DAY) return session_day_close_real_ms(d, tz, session);
-    return session_day_open_real_ms(session_period_next_first_day(d, session, period),
-                                    tz, session);
+    // W/M close on the next period's first D bar open -- its day stamp.
+    return session_day_stamp_real_ms(session_period_next_first_day(d, session, period),
+                                     tz, session);
 }
 
 /// True when the run declares a real exchange session (equities RTH, forex
@@ -1004,18 +1082,12 @@ int64_t TimeframeAggregator::bucket_open_ms(int64_t ms) const {
         case Mode::CALENDAR:
             return session_period_open_ms(ms, anchor_tz_, anchor_session_,
                                           cal_period_);
-        case Mode::RATIO: {
-            if (target_seconds_ <= 0) return ms;   // count-only ratio: no grid
-            // Same grid feed_ratio_mode keys on: exchange-tz ms since
-            // local-midnight + session-open, floored to the bucket width.
-            // Floor (not truncate) so the open never lands after `ms` on a
-            // negative clock; for every real feed the two agree.
-            const int64_t bucket_ms = target_seconds_ * 1000;
-            const int64_t clock = intraday_clock_ms(ms, anchor_tz_, anchor_session_);
-            int64_t open_clock = (clock / bucket_ms) * bucket_ms;
-            if (clock < 0 && clock % bucket_ms != 0) open_clock -= bucket_ms;
-            return ms - (clock - open_clock);
-        }
+        case Mode::RATIO:
+            // Same grid feed_ratio_mode keys on (and time("<intraday tf>")
+            // reads): exchange-tz ms since local-midnight + day stamp,
+            // floored to the bucket width. Count-only ratio: no grid.
+            return session_intraday_bucket_open_ms(ms, target_seconds_,
+                                                   anchor_tz_, anchor_session_);
         case Mode::PASSTHROUGH:
             return ms;
     }
@@ -1032,8 +1104,10 @@ int64_t TimeframeAggregator::bar_label_ms(int64_t ms) const {
             // The D/W/M bar is dated by its first TRADED session-day (a
             // holiday-Monday equity week is Tuesday's bar, exactly as the
             // first-present sub-bar already implied), but within that
-            // session-day by the session OPEN: the forex daily / weekly bar
-            // whose tape starts at 17:04 ET is still the 17:00 ET bar.
+            // session-day by the DAY STAMP: the forex daily / weekly bar
+            // whose tape starts at 17:04 ET is still the 17:00 ET bar, and
+            // the 1800-1700 day that trades from 18:00 ET is its 17:00 ET
+            // stamped bar (session_day_stamp_offset_minutes).
             return session_period_open_ms(ms, anchor_tz_, anchor_session_,
                                           CalendarPeriod::DAY);
         case Mode::PASSTHROUGH:
