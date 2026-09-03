@@ -34,6 +34,15 @@ namespace ta {
 // does not run every bar) keep stale values in the slots they did not rewrite,
 // skip never-written slots, and are na iff bar_index < length - 1 — pinned
 // 2026-09-03 on NYSE:F 1D (cadence-7 39/39, cadence-9 30/30 entry sizes).
+// The slots are read through a cached extremum with an implied bar: a src
+// that strictly beats the cache takes it without reading the slots (aged or
+// not); otherwise an aged-out cache (by bars, not calls) rescans the slots
+// oldest first and re-caches (best, bar - k_best); otherwise the cache is
+// kept, leaving aliased stale slots unread — pinned 2026-09-04 on NYSE:F 1D
+// (8 tapes 696/696: t382 `m = bar_index % 49; m < 4 or 37 <= m < 47 or
+// m == 48`, ta.lowest(low, 10) -> bars 48..51 keep 9.88 over bar 3's
+// aliased 9.20, bar 52 rescans to 9.20), BINANCE:ETHUSDT.P 15 (82/82) and
+// the jayentriken BBWP ETH replay (593/593; the plain ring 587).
 
 BarContext& bar_context() {
     // Thread-local so parallel in-process engines never cross-contaminate;
@@ -94,26 +103,64 @@ ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max)
     written_[cur] = 1;
     has_written_ = true;
 
+    // The cached extremum {cval_, cbar_} is maintained on every call, warmup
+    // included (r5g8: bar 13 answers bar 4's 9.00 cached while still na).
+    // A recompute() on the bar the cache was last touched restores the
+    // pre-bar cache first, so every tick of one bar re-applies from the same
+    // starting point (magnifier compute -> recompute).
+    if (bar != cache_seen_bar_) {
+        cache_seen_bar_ = bar;
+        saved_cached_ = cached_;
+        saved_cval_ = cval_;
+        saved_cbar_ = cbar_;
+    } else {
+        cached_ = saved_cached_;
+        cval_ = saved_cval_;
+        cbar_ = saved_cbar_;
+    }
+    const auto rescan = [&]() {
+        // Oldest slot first with a strict comparison: ties resolve to the
+        // oldest member, exactly as the deque scan did (only the *Bars
+        // offsets can tell). Never-written slots are skipped, not zero: the
+        // campaign grades against UI-scraped tapes whose chart carried
+        // pre-range writes (TradingView's deep-backtest export reads them
+        // as 0 -- a documented, deliberate deviation).
+        double best = na<double>();
+        int best_k = 0;
+        for (int k = length_ - 1; k >= 0; --k) {
+            const std::size_t i = ring_slot(bar - k, K);
+            if (!written_[i]) continue;          // never written: skipped, not na
+            const double v = values_[i];
+            if (is_na(v)) continue;              // written gap: skipped
+            if (is_na(best) || (want_max ? v > best : v < best)) {
+                best = v;
+                best_k = k;
+            }
+        }
+        cval_ = best;
+        cbar_ = bar - best_k;    // the implied bar of an aliased slot
+    };
+    if (!cached_) {
+        cached_ = true;
+        cval_ = src;
+        cbar_ = bar;
+    } else if (!is_na(src) && (is_na(cval_) || (want_max ? src > cval_ : src < cval_))) {
+        // A strictly new extremum takes the cache without reading the slots,
+        // aged-out cache or not (ETH bar 4990). Ties never displace it.
+        cval_ = src;
+        cbar_ = bar;
+    } else if (bar - cbar_ >= static_cast<long long>(length_)) {
+        // The cached extremum has aged out of the window (by bars, not
+        // calls): rescan the slots, aliasing included.
+        rescan();
+    }
+    // else: the cache is younger than `length` bars and src did not beat it.
+
     // na until the context has seen `length` bars (TV: bar_index < length - 1;
     // `origin` keeps a range-truncated feed warming up over its own bars).
     if (bar - origin < static_cast<long long>(length_) - 1) return out;
-
-    double best = na<double>();
-    int best_k = 0;
-    // Oldest slot first with a strict comparison: ties resolve to the oldest
-    // member, exactly as the deque scan did (only the *Bars offsets can tell).
-    for (int k = length_ - 1; k >= 0; --k) {
-        const std::size_t i = ring_slot(bar - k, K);
-        if (!written_[i]) continue;          // never written: skipped, not na
-        const double v = values_[i];
-        if (is_na(v)) continue;              // written gap: skipped
-        if (is_na(best) || (want_max ? v > best : v < best)) {
-            best = v;
-            best_k = k;
-        }
-    }
-    out.value = best;
-    out.bars_back = best_k;
+    out.value = cval_;
+    out.bars_back = static_cast<int>(bar - cbar_);
     return out;
 }
 

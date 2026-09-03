@@ -506,6 +506,70 @@ static void test_htf_context_sanity() {
     CHECK(!ta::bar_context().installed);
 }
 
+
+// --- Cached extremum with an implied bar (pinned 2026-09-04: 8 NYSE:F 1D
+// alias tapes 696/696, BINANCE:ETHUSDT.P 15 geometry pin 82/82, jayentriken
+// BBWP ETH replay 593/593) ------------------------------------------------
+
+// t382 geometry (`m = bar_index % 49; exec = m < 4 or 37 <= m < 47 or m == 48`,
+// ta.lowest(low, 10)): bar 3's stale 9.20 aliases one slot behind bar 48, yet
+// TV answers the cached 9.88 (from bar 42) on bars 48..51 and only rescans to
+// 9.20 on bar 52, once the cache has aged `length` bars.
+static void test_cached_extremum_keeps_over_aliased_slot_until_expiry() {
+    std::printf("test_cached_extremum_keeps_over_aliased_slot_until_expiry\n");
+    ta::Lowest lo(10);
+    auto low_at = [](int b) {
+        if (b == 3) return 9.20;
+        if (b < 4) return 9.50;
+        if (b == 42) return 9.88;
+        if (b >= 37 && b <= 46) return 10.00;
+        return 10.50;                       // bars 48..52
+    };
+    auto executes = [](int b) {
+        const int m = b % 49;
+        return m < 4 || (m >= 37 && m < 47) || m == 48 || (b >= 49 && b <= 52);
+    };
+    for (int b = 0; b <= 52; ++b) {
+        ta::BarContextScope scope(b, 0);
+        if (!executes(b)) continue;
+        const double v = lo.compute(low_at(b));
+        if (b < 9) CHECK(is_na(v));                       // bar_index < length - 1
+        if (b == 46) CHECK(near(v, 9.88));                // fresh window minimum, bar 42
+        if (b >= 48 && b <= 51) CHECK(near(v, 9.88));     // cache (9.88, 42) younger than 10 bars: slot 3 unread
+        if (b == 52) CHECK(near(v, 9.20));                // aged out: rescan reads the aliased slot
+    }
+}
+
+// ETH #88 geometry (ta.lowest(low, 10) inside `if strategy.position_size > 0`):
+// a 17-bar run whose 7th bar leaves 2641.73 in the slot that aliases k=6
+// behind the next run's first bar, then a 50-bar gap. TV answers the run-start
+// bar's own low 2648.62 because it beats the expired cache (2650.47) — the
+// new-extremum test comes before the rescan. The control run-start (r17g50 @
+// bar 67: own low above the cache) rescans and reads the aliased slot.
+static void run_eth88_geometry(double run_start_low, double expected) {
+    ta::Lowest lo(10);
+    for (int b = 0; b <= 87; ++b) {
+        ta::BarContextScope scope(b, 0);
+        const bool in_run = b >= 20 && b <= 36;
+        if (!in_run && b != 87) continue;
+        double src;
+        if (b == 26) src = 2641.73;                       // the 7th bar of the run: slot 26 % 11 = 4
+        else if (in_run) src = 2650.47 + (b % 3) * 0.5;   // minimum 2650.47 at bars 21, 24, ...
+        else src = run_start_low;                          // bar 87: 87 - 6 = 81, 81 % 11 = 4 -> the aliased slot
+        const double v = lo.compute(src);
+        if (b == 35) CHECK(near(v, 2641.73));             // cache (2641.73, 26) still 9 bars young
+        if (b == 36) CHECK(near(v, 2650.47));             // aged out at 10 bars: rescan of 27..36
+        if (b == 87) CHECK(near(v, expected));
+    }
+}
+
+static void test_new_extremum_precedes_expiry_rescan() {
+    std::printf("test_new_extremum_precedes_expiry_rescan\n");
+    run_eth88_geometry(2648.62, 2648.62);   // ETH #88: below the expired cache -> own low, no rescan
+    run_eth88_geometry(2652.00, 2641.73);   // r17g50 @67: above the cache -> rescan reads the aliased slot
+    CHECK(!ta::bar_context().installed);
+}
+
 int main() {
     test_cadence7_pin();
     test_cadence9_pin();
@@ -514,6 +578,8 @@ int main() {
     test_bars_variants_ring();
     test_every_bar_identity();
     test_htf_context_sanity();
+    test_cached_extremum_keeps_over_aliased_slot_until_expiry();
+    test_new_extremum_precedes_expiry_rescan();
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
