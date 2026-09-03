@@ -530,6 +530,69 @@ struct PendingOrder {
     // ADVERSE gap beyond the slip can decline. NaN = no snapshot.
     double explicit_slipped_signal_close =
         std::numeric_limits<double>::quiet_NaN();
+    // design-market-entry-affordability: TradingView's broker admission for a
+    // MARKET entry, pinned 2026-09-03 with `lab tv` on CME_MINI:NQ1! 15
+    // (default fixed qty 1, margin 100: 10,212 flat-entry + reversal
+    // decisions, 0 mismatches — pin-afford-{flat,reverse,gapup,gapdown,
+    // gapup-ctl}) and on OANDA:XAUUSD 15 / NYSE:F 15 (explicit
+    // qty = strategy.equity / close, commission 0.05% — pin-admit-allin-{xau,f},
+    // 1279/1279 and 352/352 exact):
+    //
+    //   admit iff lot_floored(resulting_position_qty)
+    //               * max(tick(close(S)), tick(fill)) * pv * fx * margin/100
+    //             <= placement_equity + max(1e-9, |placement_equity| * 1e-12)
+    //
+    // evaluated TWICE: at placement on tick(close(S)) against MARK-TO-MARKET
+    // equity (initial + net_profit + open_profit at close(S) — the NQ short
+    // reversal at 2025-05-06 14:15Z filled with realized 396,625 < cost 397,995
+    // but MTM 398,455 >= cost), and again at fill on tick(fill) against the
+    // SAME placement snapshot (capital 380,000: signal close 18,820.50 =
+    // 376,410 admitted, fill 19,225 = 384,500 -> NOT filled; capital 345,000:
+    // signal close 17,483.25 = 349,665 -> rejected at placement although the
+    // 17,100 fill would have cost 342,000; control capital 1e6 fills). The
+    // "resulting position" is the new side's quantity on a reversal (the
+    // closing leg's notional is not counted) and held + add on a
+    // same-direction add (masayanfx NQ1 2025-07-30 20:15Z: 2 * 23,667.75 * 20
+    // = 946,710 > MTM 945,225 -> TV dropped the add), with "held" frozen AT
+    // PLACEMENT: a same-source-bar sibling that fills first does not enter
+    // the later order's fill check (thula INR non-POOC short pair, TV rows
+    // pinned in test_margin_call: both 2-lot shorts fill from flat and the
+    // over-notional 4-lot position is then margin-called 2.6088, not
+    // declined). Commission is NOT in
+    // the notional and there is no max(equity, signal_notional) admission
+    // floor: the rounded signal close is only a second decline trigger
+    // (NYSE:F half-cent close 10.225 -> fill 10.23: floor(E/10.225) * 10.23 > E
+    // declines; XAUUSD 2025-04-08 13:30Z: 662.968 -> 662.96 lots * 3013.75 <=
+    // 1,998,000.02 admits where the raw 662.968 * 3013.745 would not).
+    // A rejected reversal drops the ENTRY leg only — its closing leg still
+    // executes (rampatel BTC 2025-05-12 07:15Z: TV closed the short by "Buy"
+    // @105,600 and opened no long, equity 103,572 < 105,600; the engine used
+    // to open it and cascade 4x-shortfall margin calls, 23,605 trades vs 1,486).
+    //
+    // Scope: high-level MARKET strategy.entry with an explicit qty OR default
+    // FIXED / CASH sizing. Default percent_of_equity entries keep their own
+    // pinned KI-54 / gap-reject / gross-admission family (not provably the
+    // same rule: their reversal decline is atomic and holds the position).
+    // NaN = no snapshot (out of scope, margin_pct == 0, non-finite close).
+    double affordability_placement_equity =
+        std::numeric_limits<double>::quiet_NaN();
+    // tick(close(S)): the on-tick signal close the placement check costed,
+    // and the floor of the fill-time admission price (max with tick(fill)).
+    // Slippage ticks are NOT in either basis — the pinned rule is stated on
+    // the rounded bar prices (all pins at slippage 0; the KI-65 explicit pair
+    // and the percent_of_equity family keep their own slipped conventions).
+    double affordability_signal_price =
+        std::numeric_limits<double>::quiet_NaN();
+    // The same-direction quantity held when the order was placed (net of a
+    // strategy.close issued earlier in the same on_bar); 0 for a flat open or
+    // a reversal. The fill check costs held + own with THIS value.
+    double affordability_held_qty = 0.0;
+    // The entry leg was declined (at placement or at fill) while an OPPOSITE
+    // position was live: the order survives only as the reversal's closing
+    // leg — apply_market_order_fill closes the opposite position and opens
+    // nothing. Inert (consumed, no broker effect) when the account is flat or
+    // same-side at the fill.
+    bool affordability_close_only = false;
     std::string comment;       // order comment for trade reporting
     bool requested_partial = false;         // true iff caller passed qty_percent < 100
     // Narrow POOC global-full-exit candidate. ``qty`` deliberately keeps the
@@ -1833,6 +1896,16 @@ protected:
                     round_to_mintick(current_bar_.close));
             }
             o.sizing_fx = active_account_currency_fx();
+        }
+        // design-market-entry-affordability: the placement-equity snapshot of
+        // THIS bar's affordability-gated market entries must see the same
+        // post-liquidation state.
+        for (auto& o : pending_orders_) {
+            if (o.type != OrderType::MARKET) continue;
+            if (o.created_bar != bar_index_) continue;
+            if (!std::isfinite(o.affordability_placement_equity)) continue;
+            o.affordability_placement_equity =
+                current_equity() + open_profit(current_bar_.close);
         }
     }
 

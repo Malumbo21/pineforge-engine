@@ -1277,10 +1277,15 @@ public:
     void on_bar(const Bar& /*bar*/) override {
         if (bar_index_ != 0) return;
 
+        // Both calls are placed from FLAT within one on_bar and fill at the
+        // POOC close in sequence — the real process_orders_on_close flow.
+        // (The fixture used to force a fill between the two placements; under
+        // design-market-entry-affordability an ADD placed while already
+        // holding the BASE is costed as held + add and declined at placement
+        // — masayanfx — whereas the same-source-bar pair placed from flat is
+        // admitted with "held" frozen at placement, then trimmed here.)
         strategy_entry("BASE", is_long_, kNaN, kNaN, /*qty=*/2.0);
-        process_pending_orders(current_bar_);
         strategy_entry("ADD", is_long_, kNaN, kNaN, /*qty=*/2.0);
-        process_pending_orders(current_bar_);
     }
 
 private:
@@ -1355,10 +1360,14 @@ static void test_same_bar_explicit_pair_fx1_direction_symmetry() {
         /*is_long=*/false, account_fx, initial_capital);
 }
 
-// The add fills above the base short. Marking required margin at the VWAP
-// (105) reports an exact 4*105 == 420 tie and incorrectly does nothing;
-// TradingView marks the whole position at the latest raw fill (110), including
-// the carried short's open loss, and immediately restores margin there.
+// The add would fill above the base short. RE-PIN (2026-09-03, design-market-
+// entry-affordability): an add placed while already HOLDING the base is
+// costed as the resulting position at the signal close — held 2 + add 2 =
+// 4 * 110 = 440 > MTM 420 - (110-100)*2 = 400 — and DECLINED at placement
+// (masayanfx NQ1 2025-07-30 20:15Z: TV drops an over-notional pyramiding
+// add). The base short stands (2 * 110 = 220 <= 400) and no margin call
+// fires. (This fixture used to assert admit-then-4x-trim marked at the latest
+// raw fill; that shape was never TV-pinned.)
 class UnequalFillShortAddProbe : public MCEngine {
 public:
     UnequalFillShortAddProbe() {
@@ -1389,16 +1398,12 @@ static void test_short_add_opening_margin_marks_latest_raw_fill() {
     UnequalFillShortAddProbe eng;
     eng.run(bars.data(), (int)bars.size());
 
-    // At the latest fill, equity is 420 - (110-100)*2 = 400 and required
-    // margin is 4*110=440. The 4x restore closes 4*(4-400/110).
-    const double expected_qty = 4.0 * (4.0 - 400.0 / 110.0);
-    CHECK(eng.trade_count() == 1);
-    CHECK(margin_call_rows(eng) == 1);
-    CHECK(eng.exit_comment(0) == std::string("Margin call"));
-    CHECK(near(eng.entry_price(0), 100.0));
-    CHECK(near(eng.exit_price(0), 110.0));
-    CHECK(near(eng.trade_size(0), expected_qty));
-    CHECK(near(eng.position_size(), -(4.0 - expected_qty)));
+    // At the add's signal close, MTM equity is 420 - (110-100)*2 = 400 and
+    // the resulting position would need 4*110 = 440: the add is declined,
+    // the base short (2 * 110 = 220) stands, no margin call.
+    CHECK(eng.trade_count() == 0);
+    CHECK(margin_call_rows(eng) == 0);
+    CHECK(near(eng.position_size(), -2.0));
 }
 
 // Literal non-POOC geometry from the Thula margin fork. The effective fixed FX
@@ -2189,10 +2194,14 @@ private:
 
 static void test_commissioned_default_short_lifecycle_mutations() {
     std::printf("test_commissioned_default_short_lifecycle_mutations\n");
+    // Bar 1 closes at 90 so the explicit 1-lot add is affordable as held + add
+    // (design-market-entry-affordability): the all-in short is in profit,
+    // MTM ~1,099 >= (9.99 + 1) * 90. At the former close of 100 the all-in
+    // position had no free equity and the add was (correctly) dropped.
     std::vector<Bar> bars = {
         mk_bar(1000, 100.0, 100.0, 100.0, 100.0, 1.0),
-        mk_bar(2000, 100.0, 100.0, 100.0, 100.0, 1.0),
-        mk_bar(3000, 100.0, 100.0, 100.0, 100.0, 1.0),
+        mk_bar(2000, 100.0, 100.0,  90.0,  90.0, 1.0),
+        mk_bar(3000,  90.0,  90.0,  90.0,  90.0, 1.0),
     };
     CommissionedDefaultShortLifecycleMutationProbe add(
         CommissionedDefaultShortLifecycleMutationProbe::Mutation::AcceptedAdd);
@@ -2601,9 +2610,13 @@ static void test_flat_clears_and_raw_fresh_reuses_state() {
     CHECK(near(eng.position_size(), 4.0));
 }
 
-// Reversal is a fresh position cycle. The closing short's realized loss must
-// be in the new long's opening-equity basis, and the raw reversal match must be
-// captured for the broker-generated closing leg.
+// Reversal is a fresh position cycle. RE-PIN (2026-09-03, design-market-entry-
+// affordability): the 10-lot long is admitted at placement (10 * 100 = 1,000
+// == MTM 1,000) but the fill gaps to 120 (1,200 > 1,000), so TV drops the
+// ENTRY leg and executes only the reversal's closing leg (pin-afford-gapup;
+// rampatel BTC 2025-05-12 07:15Z). No long opens, so no opening-affordability
+// nibble fires and the opening state stays clear. (This fixture used to
+// assert admit-then-nibble 4 of 10 at 120; that shape was never TV-pinned.)
 class ReversalOpeningProbe : public MCEngine {
 public:
     ReversalOpeningProbe() {
@@ -2636,13 +2649,11 @@ static void test_reversal_captures_fresh_opening_state() {
     ReversalOpeningProbe eng;
     eng.run(bars.data(), (int)bars.size());
 
-    CHECK(eng.trade_count() == 2);  // short reversal close + long MC nibble
-    CHECK(margin_call_rows(eng) == 1);
-    CHECK(eng.exit_comment(1) == std::string("Margin call"));
-    CHECK(near(eng.entry_price(1), 120.0));
-    CHECK(near(eng.exit_price(1), 120.0));
-    CHECK(near(eng.trade_size(1), 4.0));
-    CHECK(near(eng.position_size(), 6.0));
+    CHECK(eng.trade_count() == 1);  // the short, closed by "L"'s closing leg
+    CHECK(margin_call_rows(eng) == 0);
+    CHECK(near(eng.exit_price(0), 120.0));
+    CHECK(near(eng.trade_size(0), 1.0));
+    CHECK(near(eng.position_size(), 0.0));
     CHECK(!eng.opening_pending());
     CHECK(!eng.opening_eligible());
     CHECK(std::isnan(eng.opening_raw_base()));

@@ -37,7 +37,9 @@
  * GREEN-E margin>100 characterization + margin==0 inertness.
  * GREEN-F priced (stop=) entry adverse gap + RAW strategy.order -> unaffected.
  * GREEN-G POOC=true with slippage>0                         -> no spurious decline.
- * GREEN-H same-bar close-then-explicit-reentry (after-close) -> NOT declined.
+ * H       same-bar close-then-explicit-reentry (after-close), adverse gap ->
+ *         DECLINED (re-pinned 2026-09-03 under design-market-entry-
+ *         affordability: the rule has no after-close carve-out).
  * GREEN-I strategy.exit bracket bound to a declined entry   -> inert, no crash.
  */
 
@@ -376,14 +378,19 @@ void test_greenG_pooc_slippage_no_op() {
     CHECK_NEAR(eng.position_size(), 100.0, 1e-9);
 }
 
-// GREEN-H. Same-bar close-then-explicit-reentry. Bar0 opens a small long (qty
-// 1); bar1 immediately closes it AND places an all-in explicit reentry "R2"
-// from the now-flat position (created_after_position_close_in_bar == true).
-// Bar2 gaps +1 mintick adverse. Because the reentry is NOT created true-flat
-// (the after-close flag is set), it is EXCLUDED from the fill gate and fills
-// despite the adverse gap. A true-flat all-in here would be declined (RED-1).
-void test_greenH_close_reentry_not_declined() {
-    std::printf("-- GREEN-H: same-bar close-then-reentry not declined --\n");
+// H. Same-bar close-then-explicit-reentry. Bar0 opens a small long (qty 1);
+// bar1 immediately closes it AND places an all-in explicit reentry "R2"
+// (created_after_position_close_in_bar == true). Bar2 gaps +1 mintick
+// adverse: 100 * 100.01 = 10,001 > the placement equity 10,000 -> DECLINED.
+//
+// RE-PIN (2026-09-03, design-market-entry-affordability): this used to be
+// GREEN ("not declined") because the original fill gate was scoped to
+// true-flat placements only — a scope carve-out, never a TV observation. The
+// unified rule pinned by pin-afford-{gapup,gapdown} / pin-admit-allin-{xau,f}
+// has no after-close exemption: at fill the account is flat and the notional
+// at tick(fill) overshoots the placement snapshot, exactly RED-1's shape.
+void test_H_close_reentry_declined() {
+    std::printf("-- H: same-bar close-then-reentry declined on adverse gap --\n");
     Probe eng(/*capital=*/10000.0, /*comm=*/0.0, /*slip=*/0, /*margin=*/100.0,
               /*pooc=*/false, /*enable_mc=*/false);
     eng.entry_qty_ = 1.0;          // bar0 'L' small long
@@ -392,12 +399,13 @@ void test_greenH_close_reentry_not_declined() {
     std::vector<Bar> bars = {
         mk_bar(1000, 100,    100,    100,    100),      // L placed (qty 1)
         mk_bar(2000, 100,    100,    100,    100),       // L fills @100; then close+reentry
-        mk_bar(3000, 100.01, 100.02, 100.00, 100.01),   // R2 fills adverse -> NOT declined
+        mk_bar(3000, 100.01, 100.02, 100.00, 100.01),   // R2 adverse -> DECLINED
         mk_bar(4000, 100.01, 100.01, 100.01, 100.01),
     };
     eng.run(bars.data(), (int)bars.size());
-    CHECK(eng.position_side_ == PositionSide::LONG);       // reentry filled
-    CHECK_NEAR(eng.position_size(), 100.0, 1e-9);
+    CHECK(eng.position_side_ == PositionSide::FLAT);       // reentry declined
+    CHECK_NEAR(eng.position_size(), 0.0, 1e-9);
+    CHECK(eng.trade_count() == 1);                         // the qty-1 round trip
 }
 
 // GREEN-I. Dangling-exit safety. A strategy.exit bracket ("EX", from_entry
@@ -436,7 +444,7 @@ int main() {
     test_greenE_margin_variants();
     test_greenF_priced_and_raw_unaffected();
     test_greenG_pooc_slippage_no_op();
-    test_greenH_close_reentry_not_declined();
+    test_H_close_reentry_declined();
     test_greenI_dangling_exit_inert();
     std::printf("\n=== Results: %d passed, %d failed ===\n",
                 tests_passed, tests_failed);

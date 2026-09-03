@@ -94,6 +94,7 @@ set(TEST_SOURCES
     test_stop_decline_continue_path
     test_frozen_flat_gap_reject
     test_explicit_qty_fill_admission
+    test_market_entry_affordability
     test_zero_lot_entry_decline
     test_pooc_coof_reversal_gross_admission
     test_limit_fill_slippage

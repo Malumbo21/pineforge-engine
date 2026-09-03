@@ -341,7 +341,11 @@ static void test_deferred_close_suppression_recredits_retired_remainder() {
     //       suppressed and the ledger re-credited: 60 + 40 = 100 (without
     //       the retired term: 60). Position holds LONG 60.
     // bar3: entry M 50 (fixed qty, a different id) -> fills bar4 open:
-    //       position 110; ledger L untouched.
+    //       position 110; ledger L untouched. Bar3 closes at 79 so the add is
+    //       affordable as held + add (design-market-entry-affordability):
+    //       MTM 10,000 - 60*21 = 8,740 >= 110 * 79 = 8,690. (At the former
+    //       close of 111 the all-in position had no free equity and TV's
+    //       rule drops the add.)
     // bar4: close(L): target = min(ledger, 110) = 100 with the full
     //       re-credit (60 without it) -> fills bar5 open.
     p.steps = {
@@ -364,10 +368,10 @@ static void test_deferred_close_suppression_recredits_retired_remainder() {
         mk(0, 100, 100, 100, 100),   // bar0: place L
         mk(1, 100, 100, 100, 100),   // bar1: L fills @100; explicit partial placed
         mk(2, 100, 112,  99, 110),   // bar2: partial fills @100; S + close(L) placed
-        mk(3, 111, 112, 110, 111),   // bar3: S declines (+1 tick), close suppressed
-        mk(4, 111, 111, 111, 111),   // bar4: M fills; close(L) placed
-        mk(5, 111, 111, 111, 111),   // bar5: close(L) fills
-        mk(6, 111, 111, 111, 111),
+        mk(3, 111, 112,  79,  79),   // bar3: S declines (+1 tick), close suppressed
+        mk(4,  79,  79,  79,  79),   // bar4: M fills; close(L) placed
+        mk(5,  79,  79,  79,  79),   // bar5: close(L) fills
+        mk(6,  79,  79,  79,  79),
     };
     p.run(bars.data(), (int)bars.size());
     CHECK(p.ledger_l35_after_bar.size() == 1);
