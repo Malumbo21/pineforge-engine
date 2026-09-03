@@ -543,7 +543,11 @@ PF_API void strategy_set_trade_start_time(pf_strategy_t s, int64_t timestamp_ms)
  *  provenance, not as a stable cross-run identifier.
  *
  *  @param s            Strategy handle whose most recent run filled a report.
- *  @param trade_index  Zero-based closed-trade index in that report.
+ *  @param trade_index  Zero-based row index into that report's `trades`
+ *                      array — the script's closed trades followed by the
+ *                      range-end rows (`open_at_end`, ABI v3), which carry
+ *                      the incarnation of the lot they mark like any other
+ *                      close.
  *  @return Non-zero physical-entry identity, or 0 for an invalid index or a
  *          legacy/synthetic trade without PendingOrder provenance. */
 PF_API uint64_t strategy_closed_trade_entry_incarnation(

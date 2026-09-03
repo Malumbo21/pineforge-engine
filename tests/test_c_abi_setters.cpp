@@ -91,6 +91,14 @@ public:
         trade.entry_incarnation = entry_incarnation;
         trades_.push_back(trade);
     }
+    // A range-end row (the position still open after the final bar) lives
+    // in range_end_trades_, which the report appends BEHIND trades_.
+    void append_range_end_trade(uint64_t entry_incarnation) {
+        pineforge::Trade trade{};
+        trade.entry_incarnation = entry_incarnation;
+        trade.open_at_end = true;
+        range_end_trades_.push_back(trade);
+    }
 };
 }
 
@@ -155,6 +163,20 @@ int main() {
     CHECK(strategy_closed_trade_entry_incarnation(h, 1)
           == UINT64_C(0x123456789abcdef0));
     CHECK(strategy_closed_trade_entry_incarnation(h, 2) == 0);
+
+    // round-4b F3: the index is a REPORT row index — trades_ followed by
+    // range_end_trades_ (fill_trades_section) — so the range-end row at
+    // index trade_count() reads its own incarnation. Pre-fix the accessor
+    // bounded by trade_count() and returned 0 for every range-end row.
+    eng.append_range_end_trade(UINT64_C(0x0fedcba987654321));
+    CHECK(eng.trade_count() == 2);                       // Pine-visible count unchanged
+    CHECK(eng.report_trade_count() == 3);
+    CHECK(strategy_closed_trade_entry_incarnation(h, 2)
+          == UINT64_C(0x0fedcba987654321));             // pre-fix: 0
+    CHECK(strategy_closed_trade_entry_incarnation(h, 3) == 0);
+    CHECK(strategy_closed_trade_entry_incarnation(h, 0) == 0);
+    CHECK(strategy_closed_trade_entry_incarnation(h, 1)
+          == UINT64_C(0x123456789abcdef0));
 
     // trace_enabled: default false → 1/non-zero maps to true, 0 to false.
     CHECK(eng.trace_on() == false);

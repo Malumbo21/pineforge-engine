@@ -746,6 +746,34 @@ class RangeEndRowSymmetryTests(unittest.TestCase):
             self.assertIn("feed bounded at TV's range end 2026-05-01 00:00 UTC "
                           "(metrics.json wsProvenance.requestedRange.to)", printed)
 
+    def test_ws_tape_range_end_rows_carry_their_entry_incarnation(self) -> None:
+        # CSV-writer pin (round-4b F3 companion, NOT the F3 pin itself):
+        # given a populated entry_incarnation on an open_at_end trade row,
+        # the writer carries it to the "Engine entry incarnation" column on
+        # that row's Entry line exactly as it does for a closed row. This
+        # harness stubs the engine (_FakeStrategy), so it never calls the C
+        # ABI accessor strategy_closed_trade_entry_incarnation and passes on
+        # the unpatched engine; the accessor fix — range-end rows indexing
+        # the report's row space instead of trade_count() — is pinned in
+        # tests/test_c_abi_setters.cpp and tests/test_range_end_close.cpp
+        # (pin I), and reaches the CSV only through Strategy.run against a
+        # built strategy.so (scripts/check_c_abi_runtime.py).
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            feed, out = self._probe(d, WS_OPEN_TAPE, WS_METRICS_ETH)
+            trades = [dict(t) for t in ENGINE_TRADES]
+            for n, t in enumerate(trades, 1):
+                t["entry_incarnation"] = 100 + n
+            _run_main(d, feed, out, trades=trades)
+            rows = _csv_trades(out)
+            by_row = {(r["Trade #"], r["Type"]): r["Engine entry incarnation"]
+                      for r in rows}
+            self.assertEqual(by_row[("1", "Entry long")], "101")   # the closed trade
+            self.assertEqual(by_row[("2", "Entry long")], "102")   # range-end rows
+            self.assertEqual(by_row[("3", "Entry long")], "103")
+            for n in ("1", "2", "3"):
+                self.assertEqual(by_row[(n, "Exit long")], "")
+
     def test_unmarked_tape_with_browser_metrics_is_bounded_at_the_to_date(self) -> None:
         # A tape with no Open rows beside a dates-only metrics.json (no
         # wsProvenance): unmarked, so bounded at `to` as UTC midnight and

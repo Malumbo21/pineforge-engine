@@ -3052,6 +3052,20 @@ public:
 
     int trade_count() const { return (int)trades_.size(); }
     const Trade& get_trade(int i) const { return trades_[i]; }
+    // The REPORT's row space: trades_ followed by range_end_trades_, in the
+    // order fill_trades_section lays pf_report_t::trades out. trade_count()
+    // / get_trade() stay the Pine-visible closed trades (strategy.closedtrades
+    // never sees a range-end row); the report-indexed C ABI accessors
+    // (strategy_closed_trade_entry_incarnation) must index THIS space, or
+    // every range-end row reads as index-out-of-range (round-4b F3).
+    int report_trade_count() const {
+        return (int)(trades_.size() + range_end_trades_.size());
+    }
+    const Trade& get_report_trade(int i) const {
+        const int n_closed = (int)trades_.size();
+        return i < n_closed ? trades_[(size_t)i]
+                            : range_end_trades_[(size_t)(i - n_closed)];
+    }
 
     // --- Position-size extremes (strategy.max_contracts_held_*) ---
     double max_contracts_held_all() const { return max_contracts_held_all_; }

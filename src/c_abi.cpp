@@ -149,12 +149,27 @@ static_assert(static_cast<int>(pineforge::MagnifierDistribution::BACK_LOADED)  =
 
 extern "C" {
 
+/* trade_index is a REPORT row index: pf_report_t::trades is trades_ followed
+ * by range_end_trades_ (fill_trades_section, engine_report.cpp), so the
+ * accessor indexes that same row space (report_trade_count /
+ * get_report_trade).
+ *
+ * round-4b F3: this bounded the index by trade_count() == trades_.size(),
+ * so every range-end row (the position still open after the final bar,
+ * ABI v3's open_at_end) read as out of range and returned 0 — an empty
+ * "Engine entry incarnation" on the run_strategy.py CSV. The grader then
+ * failed closed on the identity gate and the verifier ladder rejected the
+ * TV-identical trim candidate for ena-grid (XAUUSD 1D), even though the
+ * engine's per-lot range-end rows themselves matched TV (xau-grid 6/6,
+ * silicon 9/9 rows). The row is built by build_close_trade from the open
+ * pyramid lot, so it carries that lot's entry_incarnation like any other
+ * close. No struct changed: PF_ABI_VERSION stays 3. */
 PF_API uint64_t strategy_closed_trade_entry_incarnation(
         pf_strategy_t s, int trade_index) {
     if (!s) return 0;
     const auto* engine = static_cast<const pineforge::BacktestEngine*>(s);
-    if (trade_index < 0 || trade_index >= engine->trade_count()) return 0;
-    return engine->get_trade(trade_index).entry_incarnation;
+    if (trade_index < 0 || trade_index >= engine->report_trade_count()) return 0;
+    return engine->get_report_trade(trade_index).entry_incarnation;
 }
 
 /* Toggle per-bar trace recording on a live strategy. Default off; the

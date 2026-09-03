@@ -49,6 +49,15 @@
  *   H. Aggregated path (1m input -> 5m script): the exit is dated on the
  *      script bar's LABEL (the equity curve's time_ms) and indexed by the
  *      script bar, not the last input minute.
+ *   I. Identity (round-4b F3): the range-end row carries the open lot's
+ *      entry_incarnation like any other close, and the C ABI accessor
+ *      strategy_closed_trade_entry_incarnation reads it at the row's REPORT
+ *      index (behind the script's closed trades). Pre-fix the accessor
+ *      bounded the index by trade_count() == trades_.size() and returned 0
+ *      for every range-end row; run_strategy.py then wrote an empty
+ *      "Engine entry incarnation" for the row, the grader failed closed on
+ *      the identity gate and the verifier ladder rejected the TV-identical
+ *      trim candidate for ena-grid (XAUUSD 1D).
  */
 
 #include <cmath>
@@ -57,6 +66,9 @@
 #include <string>
 #include <vector>
 
+// Include order is load-bearing: pineforge.h BEFORE engine.hpp keeps the
+// per-strategy declarations visible (engine.hpp defines PINEFORGE_NO_STRATEGY_DECLS).
+#include <pineforge/pineforge.h>   // strategy_closed_trade_entry_incarnation (pin I)
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
 
@@ -397,6 +409,39 @@ static void test_closed_then_open_rows_ordered() {
     BacktestEngine::free_report(&rep);
 }
 
+// I. The range-end row's entry incarnation is reachable through the C ABI
+//    at its report index (behind the script's closed trades).
+static void test_range_end_row_incarnation_through_c_abi() {
+    std::printf("-- I: range-end row exposes its entry incarnation via the C ABI --\n");
+    Probe eng;
+    eng.script = "L.C.L...";
+    auto bars = daily_bars(8, 12.08);
+    eng.run(bars.data(), (int)bars.size());
+    CHECK(eng.trade_count() == 1);
+    CHECK(eng.range_end_rows().size() == 1);
+    CHECK(eng.report_trade_count() == 2);
+    ReportC rep{};
+    eng.fill_report(&rep);
+    CHECK(rep.total_trades == 2);
+    pf_strategy_t h = static_cast<pf_strategy_t>(&eng);
+    const uint64_t closed_inc = strategy_closed_trade_entry_incarnation(h, 0);
+    const uint64_t range_end_inc = strategy_closed_trade_entry_incarnation(h, 1);
+    // Both rows come from a real broker entry, so both carry provenance.
+    CHECK(closed_inc != 0);
+    CHECK(range_end_inc != 0);                                   // pre-fix: 0
+    if (eng.trade_count() == 1 && eng.range_end_rows().size() == 1) {
+        CHECK(closed_inc == eng.all_trades()[0].entry_incarnation);
+        CHECK(range_end_inc == eng.range_end_rows()[0].entry_incarnation);
+        // Distinct physical entries (the same Pine id "L" re-used) get
+        // distinct, increasing incarnations — the identity the grader keys on.
+        CHECK(range_end_inc > closed_inc);
+    }
+    // One past the last report row is still out of range.
+    CHECK(strategy_closed_trade_entry_incarnation(h, 2) == 0);
+    CHECK(strategy_closed_trade_entry_incarnation(h, -1) == 0);
+    BacktestEngine::free_report(&rep);
+}
+
 // H. Aggregated path: the exit is dated on the script bar's label.
 static void test_aggregated_path_exit_on_script_label() {
     std::printf("-- H: 1m -> 5m script bars, exit dated on the last script label --\n");
@@ -501,6 +546,7 @@ int main() {
     test_equity_curve_earlier_points_unchanged();
     test_pyramiding_two_rows();
     test_closed_then_open_rows_ordered();
+    test_range_end_row_incarnation_through_c_abi();
     test_aggregated_path_exit_on_script_label();
     test_rerun_clears_rows();
     test_walk_reproduces_scalar_extremes_at_the_end();
