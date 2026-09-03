@@ -283,6 +283,13 @@ class TradePair:
     pnl_pct: float = 0.0
     mfe: float = 0.0
     mae: float = 0.0
+    # The exit leg is a mark of a position still open at the range's end,
+    # not a fill: TradingView's browser export says so with Signal "Open"
+    # on the exit row; the engine says so in the exit row's trailing
+    # ``Engine range-end`` column (ENGINE_RANGE_END_COLUMN; its range-end
+    # close, ``open_at_end``). pair_range_end_marks pairs the two marks of
+    # one lot before any other comparison sees them.
+    open_mark: bool = False
 
 
 @dataclass
@@ -332,10 +339,15 @@ class VerificationResult:
     distinct_entry_identity_ok: bool = True
     distinct_entry_mismatches: int = 0
     unmatched_in_window: int = 0
-    # Matched pairs whose TV row is a browser export's "Open" snapshot and
-    # whose engine exit sits on the same bar: counted and covered, entry
-    # compared, exit/pnl not (a mark against a fill). Report-only.
+    # Range-end mark pairs (pair_range_end_marks): a TV "Open" row and the
+    # engine's marked range-end row of the same lot. Each pair is a matched
+    # trade — it counts, it covers, its entry is gated — but its exit and
+    # P&L are a mark against a mark and never enter a gated statistic or a
+    # percentile. The P&L agreement is reported at TradingView's precision
+    # (cents): how many pairs agree, and the largest miss in USD.
     open_mark_pairs: int = 0
+    open_mark_pnl_cent_exact: int = 0
+    open_mark_pnl_max_abs_usd: float = 0.0
     entry_p100: float = 0.0
     exit_p100: float = 0.0
     pnl_p100: float = 0.0
@@ -344,6 +356,7 @@ class VerificationResult:
     mfe_p90: float = 0.0
     mae_p90: float = 0.0
     matched: list[tuple[TradePair, TradePair]] = field(default_factory=list, repr=False)
+    open_mark_matched: list[tuple[TradePair, TradePair]] = field(default_factory=list, repr=False)
     entry_deltas: list[float] = field(default_factory=list, repr=False)
     exit_deltas: list[float] = field(default_factory=list, repr=False)
     pnl_deltas: list[float] = field(default_factory=list, repr=False)
@@ -406,22 +419,19 @@ def parse_dt(s: str, tz) -> int:
     return int(datetime.strptime(s, "%Y-%m-%d %H:%M").replace(tzinfo=tz).timestamp())
 
 
-def still_open_trade_nums(csv_path: Path) -> set:
-    """Trade numbers whose EXIT row carries Signal=='Open' (a position still
-    open at TV's export-window end; a mark-to-market snapshot, not a close)."""
-    import csv as _csv
-    nums = set()
-    try:
-        with csv_path.open(encoding="utf-8-sig") as f:
-            for r in _csv.DictReader(f):
-                if (r.get("Type") or "").lower().startswith("exit") \
-                        and (r.get("Signal") or "").strip().lower() == "open":
-                    n = r.get("Trade #") or r.get("Trade number")
-                    if n is not None:
-                        nums.add(int(n))
-    except Exception:
-        pass
-    return nums
+# The engine's mark of a range-end close: the trailing column of
+# engine_trades.csv (run_strategy.py write_engine_trades_csv), "open" on the
+# exit row of a trade the engine booked as its range-end close of a position
+# still open after the final bar (pf_trade_t::open_at_end), empty elsewhere.
+# TradingView's browser export marks the same row Signal "Open"; its
+# ws-report-v1 export marks nothing and prices the row at the last bar's
+# close, which is exactly the engine's row, so an unmarked tape pairs the
+# engine's row as an ordinary closed trade and never sees this column.
+ENGINE_RANGE_END_COLUMN = "Engine range-end"
+
+
+def _is_open_mark(value) -> bool:
+    return str(value or "").strip().lower() == "open"
 
 
 def parse_trades(csv_path: Path, *, tz) -> list[TradePair]:
@@ -502,6 +512,8 @@ def parse_trades(csv_path: Path, *, tz) -> list[TradePair]:
             else:
                 r["exit_time"] = parse_dt(time_field, tz)
                 r["exit_price"] = price
+                r["open_mark"] = (_is_open_mark(row.get("Signal"))
+                                  or _is_open_mark(row.get(ENGINE_RANGE_END_COLUMN)))
 
     pairs: list[TradePair] = []
     for n in sorted(by_num):
@@ -522,9 +534,71 @@ def parse_trades(csv_path: Path, *, tz) -> list[TradePair]:
             pnl_pct=r.get("pnl_pct", 0.0),
             mfe=r.get("mfe", 0.0),
             mae=r.get("mae", 0.0),
+            open_mark=bool(r.get("open_mark", False)),
         ))
     pairs.sort(key=lambda t: t.entry_time)
     return pairs
+
+
+def pair_range_end_marks(
+    tv: list[TradePair],
+    eng: list[TradePair],
+) -> tuple[list[tuple[TradePair, TradePair]], list[TradePair], list[TradePair]]:
+    """Pair the two marks of each lot still open at the range's end, and
+    return ``(pairs, tv_rest, eng_rest)`` — the raw rows of both sides with
+    the paired marks taken out.
+
+    A browser export prints a position still open at the range's end as a
+    trade whose exit row is Signal "Open", priced at the range end's last
+    close and netted of commission on both legs, to the cent (3commas-xlm
+    #615: qty 0.0912, entry 2189.13, mark 2261.44 -> 6.3511, TV 6.35). The
+    engine, fed to TradingView's range end, books the same lot as its
+    range-end close (open_at_end) — 6.351137 for that lot — and marks the
+    exit row in ENGINE_RANGE_END_COLUMN. The two rows are one lot marked
+    twice, so they are paired here, lot for lot, by the alignment every
+    other trade gets (:func:`align_by_time`: same direction, entry within
+    the match window and the entry-price gate; closest entry first) — and
+    only marks pair with marks: the tape's Open row is not a fill, and
+    neither is the engine's row.
+
+    What a pair means downstream (analyze_strategy): a matched trade — it
+    counts on both sides, it covers, its entry is gated like any other —
+    whose exit and P&L are compared nowhere that is gated. The engine's
+    P&L is exact and TradingView's is rounded to cents, and on a grid bot
+    with 22 open lots that rounding, summed into the schedule aggregate
+    that scores pnlP90 on such probes, moved the metric by itself (round
+    3, 2026-09-02: 0.5536 -> 0.6675 on 3commas-xlm). So the pairs leave
+    both raw lists before consolidation, alignment, the trim window, the
+    schedule path and every report-only percentile, and their P&L
+    agreement is reported at TradingView's own precision instead
+    (open_mark_pnl_cent_exact / open_mark_pnl_max_abs_usd).
+
+    Unpaired marks stay ordinary rows: a TV Open row the engine never
+    opened, or closed for real before the range end, keeps its place in
+    the coverage and the exit/pnl gates as before; an engine range-end row
+    for a lot the tape closed, or never opened, is an ordinary engine
+    trade — matched by entry with its deltas, or unmatched. A tape with no
+    Open rows, or an engine CSV without a marked row, pairs nothing and
+    passes through untouched.
+
+    >>> mk = lambda n, et, xt, xp, p, m: TradePair("long", et, 10.0, xt, xp, 1.0, p, n, open_mark=m)
+    >>> tv = [mk(1, 100, 200, 12.0, 2.0, False), mk(2, 300, 900, 13.0, 3.0, True)]
+    >>> eng = [mk(1, 100, 200, 12.0, 2.0, False), mk(2, 300, 900, 13.0, 3.0004, True)]
+    >>> pairs, tv_rest, eng_rest = pair_range_end_marks(tv, eng)
+    >>> [(t.trade_num, e.trade_num) for t, e in pairs], len(tv_rest), len(eng_rest)
+    ([(2, 2)], 1, 1)
+    >>> pair_range_end_marks(tv[:1], eng[:1]) == ([], tv[:1], eng[:1])
+    True
+    """
+    tv_marks = [t for t in tv if t.open_mark]
+    eng_marks = [e for e in eng if e.open_mark]
+    if not tv_marks or not eng_marks:
+        return [], tv, eng
+    pairs = align_by_time(tv_marks, eng_marks)
+    paired = {id(t) for t, _ in pairs} | {id(e) for _, e in pairs}
+    return (pairs,
+            [t for t in tv if id(t) not in paired],
+            [e for e in eng if id(e) not in paired])
 
 
 EntryFillKey = tuple[int, float, str]
@@ -1033,23 +1107,44 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
 
     tv_raw_all = parse_trades(tv_path, tz=tv_tzinfo(meta))
     eng_raw_all = parse_trades(eng_path, tz=timezone.utc)
+    # The entry keys TradingView proves to hold two or more physical entries
+    # (distinct non-empty Signals at one time/price/direction) are read from
+    # the tape as exported, BEFORE the marks pair off below: an Open row's
+    # entry is a fill with a Signal like any other, and a key it helps prove
+    # stays proven when its lot leaves the list as a mark pair. The same
+    # pre-pairing keys steer consolidation, as they did before pairing
+    # existed, so a preserved key's remaining fragments are not reunited
+    # merely because the lot that proved it is now a pair.
+    distinct_tv_entry_keys = distinct_entry_fill_keys(tv_raw_all)
+    # A lot still open at the range's end is marked twice — TV's "Open" row
+    # and the engine's range-end row — and the two marks pair lot for lot
+    # BEFORE anything else looks at the rows (pair_range_end_marks). Each
+    # pair is a matched trade with a gated entry and nothing else gated; the
+    # rows themselves leave both sides here, so no consolidation, alignment,
+    # trim, schedule aggregate or percentile ever sees a mark's cent-rounded
+    # P&L or its exit. Nothing pairs on a tape without Open rows or an
+    # engine CSV without a marked row, and the lists pass through as read.
+    mark_pairs, tv_raw_all, eng_raw_all = pair_range_end_marks(tv_raw_all, eng_raw_all)
     tv = list(tv_raw_all)
     eng = list(eng_raw_all)
     # Reunite TradingView/engine fragment rows (qty_step rounding remainders or
     # FIFO partial-close lots of one fill) into a single logical trade BEFORE
     # pairing, symmetrically on both sides, so the entry-time matcher does not
     # cross-pair same-entry lots. No-op for un-fragmented strategies.
-    distinct_tv_entry_keys = distinct_entry_fill_keys(tv_raw_all)
     tv = consolidate_fragments(
         tv, preserve_entry_keys=distinct_tv_entry_keys)
     eng = consolidate_fragments(
         eng, preserve_entry_keys=distinct_tv_entry_keys,
         identity_field="entry_identity")
     matched = align_by_time(tv, eng)
-    tv_cmp, eng_cmp = trim_to_common_match_window(tv, eng, matched)
+    # A mark pair anchors the common window like any other match: the lots
+    # open at the range's end are its trailing edge, and a TV trade closed
+    # between the last interior match and those lots stays in the window,
+    # unmatched, as it did when the marks paired through the matcher.
+    tv_cmp, eng_cmp = trim_to_common_match_window(tv, eng, matched + mark_pairs)
     matched = align_by_time(tv_cmp, eng_cmp)
 
-    if not matched:
+    if not matched and not mark_pairs:
         label = "excellent" if len(tv_cmp) == 0 and len(eng_cmp) == 0 else "minimal"
         # The historical both-empty Excellent branch returned before reading
         # override metadata. Keep that exact behavior while fixing declared
@@ -1098,44 +1193,46 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
         eng_gate = [e for e in eng_cmp if is_interior(e.entry_time * 1000, bounds)]
     else:
         tv_gate, eng_gate = tv_cmp, eng_cmp
+    # The mark pairs are matched trades on both sides of every count: the
+    # gate pools, the gated matches, the coverage numerator and denominator.
+    # Their rows left the lists above, so they are added back as a number —
+    # the same number on each side, interior-trimmed like the pools.
+    gate_marks = _split_interior(mark_pairs)
+    n_gate_marks = len(gate_marks)
+    tv_gate_n = len(tv_gate) + n_gate_marks
+    eng_gate_n = len(eng_gate) + n_gate_marks
+    gating_matched_n = len(gating_matched) + n_gate_marks
 
-    count_abs_delta = abs(len(tv_gate) - len(eng_gate))
-    count_delta = relative_max(len(tv_gate), len(eng_gate))
+    count_abs_delta = abs(tv_gate_n - eng_gate_n)
+    count_delta = relative_max(tv_gate_n, eng_gate_n)
+    # A mark pair's entry is a fill on both sides, so the identity gate
+    # sees it with the others: the engine's range-end row must carry an
+    # entry incarnation at a TV-proven multi-entry key exactly as any
+    # closed trade's entry must. The pairs are added back to the gate
+    # pools they left, trimmed like them.
     distinct_entry_mismatches = distinct_entry_fill_mismatches(
-        tv_gate, eng_gate, distinct_tv_entry_keys)
+        tv_gate + [t for t, _ in gate_marks],
+        eng_gate + [e for _, e in gate_marks],
+        distinct_tv_entry_keys)
     distinct_entry_identity_ok = distinct_entry_mismatches == 0
-    entry_deltas = [relative_max(t.entry_price, e.entry_price) for t, e in gating_matched]
-    # A TV row whose exit Signal is "Open" is a browser export's snapshot of
-    # a position still open at the range's end, and its exit price is the
-    # quote at EXPORT time, not a bar's print: all 12 sampled OANDA:EURUSD
-    # registry tapes end with such rows at 2026-05-01 08:00 (+8) @ 1.17256
-    # while the feed's last bar (05-01 00:00 UTC) is o 1.17289 h 1.17299
-    # l 1.17282 c 1.1729 — 1.17256 lies outside that bar entirely (246 of
-    # 358 EURUSD tapes end with an Open row; AAPL's happen to print the last
-    # close, 271, because the market was closed at export). The engine now
-    # closes the same position on its final bar at that bar's close
-    # (open_at_end; TradingView's range-end accounting). When the engine's
-    # exit sits on the SAME bar as TV's Open row, the pair is a matched
-    # trade — it counts, it covers, its entry is compared — but its exit
-    # price and PnL are a mark against a fill, so they carry no parity
-    # information and are left out of the exit / pnl gates. An engine exit
-    # on a DIFFERENT bar keeps its deltas: TV held the position to the end
-    # and the engine did not, which is a real divergence. The ws-report-v1
-    # tapes write that row with no Signal at all and its exit at the last
-    # bar's close, so they never take this path.
-    _open_nums = still_open_trade_nums(tv_path)
+    # The entry of a mark pair is a fill on both sides and is gated with the
+    # others; appended after the matched pairs so the diagnostic display
+    # (zip with ``matched``) keeps its alignment.
+    entry_deltas = ([relative_max(t.entry_price, e.entry_price) for t, e in gating_matched]
+                    + [relative_max(t.entry_price, e.entry_price) for t, e in gate_marks])
+    # A TV Open row with no engine mark to pair with (the engine never
+    # opened the lot, or closed it for real before the range's end) is an
+    # ordinary row from here on: matched by entry, it carries its exit and
+    # P&L deltas — TV held the position to the end and the engine did not,
+    # which is a real divergence; unmatched, it leaves the coverage
+    # denominator below, as it always has.
     _open_keys = {(t.entry_time, t.entry_price, t.direction)
-                  for t in tv_raw_all if t.trade_num in _open_nums}
-    def _is_open_mark_pair(t, e):
-        return ((t.entry_time, t.entry_price, t.direction) in _open_keys
-                and t.exit_time == e.exit_time)
-    priced_matched = [(t, e) for t, e in gating_matched if not _is_open_mark_pair(t, e)]
-    open_mark_pairs = len(gating_matched) - len(priced_matched)
-    exit_deltas  = [relative_max(t.exit_price,  e.exit_price)  for t, e in priced_matched]
+                  for t in tv_raw_all if t.open_mark}
+    exit_deltas  = [relative_max(t.exit_price,  e.exit_price)  for t, e in gating_matched]
     # PnL p90 uses *relative-to-tv_pnl*, with near-zero trades excluded so
     # scratch trades don't blow up the ratio. Mirrors canonical line ~1136.
     pnl_deltas: list[float] = []
-    for t, e in priced_matched:
+    for t, e in gating_matched:
         if abs(t.pnl) < PNL_NEAR_ZERO_USD:
             continue
         abs_diff = abs(t.pnl - e.pnl)
@@ -1197,9 +1294,17 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
     # Extends the historical 4-dimension gate (count/entry/exit/pnl) to qty,
     # pnl_pct, MFE, MAE, plus p100 worst-case and an unmatched-in-window count,
     # so tail / masked divergences are surfaced rather than absorbed. These do
-    # NOT affect the tier label (report-only field coverage).
-    qty_deltas    = [relative_max(t.qty, e.qty) for t, e in gating_matched]
+    # NOT affect the tier label (report-only field coverage). A mark pair's
+    # qty is a fill's and is compared; its pnl_pct / MFE / MAE are the mark's
+    # and stay out, like its P&L, which is reported at TradingView's precision
+    # below: the engine's exact P&L rounded to cents against TV's cents.
+    qty_deltas    = ([relative_max(t.qty, e.qty) for t, e in gating_matched]
+                     + [relative_max(t.qty, e.qty) for t, e in gate_marks])
     pnlpct_deltas = [abs(t.pnl_pct - e.pnl_pct) for t, e in gating_matched]  # pct-points
+    open_mark_pnl_misses = [abs(round(e.pnl, 2) - t.pnl) for t, e in mark_pairs]
+    open_mark_pnl_cent_exact = sum(
+        1 for miss in open_mark_pnl_misses if miss < TV_PNL_ROUNDING_EPSILON_USD)
+    open_mark_pnl_max_abs_usd = max(open_mark_pnl_misses, default=0.0)
     mfe_deltas    = [relative_max(t.mfe, e.mfe) for t, e in gating_matched if abs(t.mfe) > 1e-9]
     mae_deltas    = [relative_max(t.mae, e.mae) for t, e in gating_matched if abs(t.mae) > 1e-9]
     entry_p100  = max(entry_deltas)  if entry_deltas  else 0.0
@@ -1209,7 +1314,7 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
     pnlpct_p100 = max(pnlpct_deltas) if pnlpct_deltas else 0.0
     mfe_p90     = percentile(mfe_deltas, 0.90) if mfe_deltas else 0.0
     mae_p90     = percentile(mae_deltas, 0.90) if mae_deltas else 0.0
-    unmatched_in_window = max(len(tv_gate), len(eng_gate)) - len(gating_matched)
+    unmatched_in_window = max(tv_gate_n, eng_gate_n) - gating_matched_n
 
     entry_ok = entry_p90  < thresh["entry"]
     # Count mismatch is a primary reproduction signal. Percent thresholds can
@@ -1244,7 +1349,8 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
     # open row (engine opened AND closed the position for real past window) is
     # a legitimate matched trade and is kept. This never touches the matcher,
     # the count gate, or entry/exit/pnl -- only the coverage denominator.
-    # (_open_nums / _open_keys are resolved above, with the exit/pnl deltas.)
+    # (_open_keys — the UNPAIRED Open rows — is resolved above, with the
+    # exit/pnl deltas; a paired mark is a matched trade on both sides.)
     _matched_tv_ids = {id(t) for t, _ in matched}
     def _is_dropped_open(t):
         return ((t.entry_time, t.entry_price, t.direction) in _open_keys
@@ -1252,12 +1358,14 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
     if bounds is not None:
         tv_cov_denom = [t for t in tv
                         if is_interior(t.entry_time * 1000, bounds) and not _is_dropped_open(t)]
-        cov_matched = len(gating_matched)
+        cov_matched = gating_matched_n
+        cov_denom_n = len(tv_cov_denom) + n_gate_marks
     else:
         tv_cov_denom = [t for t in tv if not _is_dropped_open(t)]
-        cov_matched = len(matched)
-    unmatched_total = max(len(tv_cov_denom) - cov_matched, 0)
-    coverage = (cov_matched / len(tv_cov_denom)) if tv_cov_denom else 1.0
+        cov_matched = len(matched) + len(mark_pairs)
+        cov_denom_n = len(tv_cov_denom) + len(mark_pairs)
+    unmatched_total = max(cov_denom_n - cov_matched, 0)
+    coverage = (cov_matched / cov_denom_n) if cov_denom_n else 1.0
     cov_excellent = coverage >= COVERAGE_EXCELLENT or unmatched_total <= 1
     cov_strong    = coverage >= COVERAGE_STRONG or unmatched_total <= 1
     cov_moderate  = coverage >= COVERAGE_MODERATE
@@ -1280,9 +1388,9 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
         and pnl_p90 < STRONG_PNL_DELTA
     ):
         label = "strong"
-    elif cov_moderate and len(gating_matched) / max(len(tv_gate), 1) >= 0.90:
+    elif cov_moderate and gating_matched_n / max(tv_gate_n, 1) >= 0.90:
         label = "moderate"
-    elif gating_matched:
+    elif gating_matched_n:
         label = "weak"
     else:
         label = "minimal"
@@ -1321,14 +1429,14 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
         notes=notes,
         tv_path=tv_path,
         eng_path=eng_path,
-        tv_count=len(tv_cmp),
-        eng_count=len(eng_cmp),
-        tv_raw_count=len(tv),
-        eng_raw_count=len(eng),
-        matched_count=len(matched),
-        gating_matched_count=len(gating_matched),
-        tv_gate_count=len(tv_gate),
-        eng_gate_count=len(eng_gate),
+        tv_count=len(tv_cmp) + len(mark_pairs),
+        eng_count=len(eng_cmp) + len(mark_pairs),
+        tv_raw_count=len(tv) + len(mark_pairs),
+        eng_raw_count=len(eng) + len(mark_pairs),
+        matched_count=len(matched) + len(mark_pairs),
+        gating_matched_count=gating_matched_n,
+        tv_gate_count=tv_gate_n,
+        eng_gate_count=eng_gate_n,
         count_delta=count_delta,
         count_abs_delta=count_abs_delta,
         entry_p90=entry_p90,
@@ -1336,7 +1444,7 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
         pnl_p90=pnl_p90,
         coverage=coverage,
         unmatched_total=unmatched_total,
-        coverage_tv_count=len(tv_cov_denom),
+        coverage_tv_count=cov_denom_n,
         trim_bars=trim_bars,
         warmup_bars=warmup_bars,
         bounds=bounds,
@@ -1348,7 +1456,9 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
         distinct_entry_identity_ok=distinct_entry_identity_ok,
         distinct_entry_mismatches=distinct_entry_mismatches,
         unmatched_in_window=unmatched_in_window,
-        open_mark_pairs=open_mark_pairs,
+        open_mark_pairs=len(mark_pairs),
+        open_mark_pnl_cent_exact=open_mark_pnl_cent_exact,
+        open_mark_pnl_max_abs_usd=open_mark_pnl_max_abs_usd,
         entry_p100=entry_p100,
         exit_p100=exit_p100,
         pnl_p100=pnl_p100,
@@ -1357,6 +1467,7 @@ def analyze_strategy(strategy_dir: Path) -> VerificationResult:
         mfe_p90=mfe_p90,
         mae_p90=mae_p90,
         matched=matched,
+        open_mark_matched=mark_pairs,
         entry_deltas=entry_deltas,
         exit_deltas=exit_deltas,
         pnl_deltas=pnl_deltas,
@@ -1407,7 +1518,9 @@ def _print_verification(result: VerificationResult, *, show_diffs: int = 0) -> N
         f"  PnL%  p90/p100 (pts):  {percentile(result.pnlpct_deltas,0.90):.4f} / {result.pnlpct_p100:.4f}\n"
         f"  MFE/MAE p90 delta:     {result.mfe_p90*100:.4f}% / {result.mae_p90*100:.4f}%\n"
         f"  Unmatched-in-window:   {result.unmatched_in_window}\n"
-        f"  Open-mark pairs:       {result.open_mark_pairs}  (TV 'Open' row closed by the engine on the same bar; exit/pnl not gated)\n"
+        f"  Range-end mark pairs:  {result.open_mark_pairs}  (TV 'Open' row <-> engine range-end row of one lot; "
+        f"matched, entry gated, exit/pnl not; P&L at cents: {result.open_mark_pnl_cent_exact}/{result.open_mark_pairs} exact, "
+        f"max miss ${result.open_mark_pnl_max_abs_usd:.2f})\n"
         f"  -> {result.label}"
     )
     if show_diffs > 0:

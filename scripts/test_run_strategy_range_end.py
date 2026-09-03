@@ -10,13 +10,12 @@ to 2026-05-04 15:00 UTC while every ETH tape's range ends 2026-05-01 (228 of
 15:00 @ 2365.09, a different bar ~4.6% off TV's, and fail exit/pnl against
 TV's Open row where it was previously simply absent.
 
-For an UNMARKED tape (the ws-report-v1 shape: the range-end position is an
-ordinary closed trade with an empty Signal — every 1D lane, most 15m)
 run_strategy.py therefore bounds the feed (``ohlcv_end_ms``) to
 TradingView's RANGE END, read from the tape's metrics.json — the bars
 opening at or before ``to`` as 00:00 UTC (``wsProvenance.requestedRange.to``
 when the ws exporter recorded it, else the ``to`` date) — and writes the
-range-end close rows. Not the tape's last trade row: a first cut did that
+range-end close rows, each marked "open" in the CSV's trailing ``Engine
+range-end`` column. Not the tape's last trade row: a first cut did that
 and the full-population gate failed hard.regression on
 waranyutrkm-asian-box-breakout-eda-tuned (110 -> 109 trades) — its last
 trade closes 04-29 18:00 UTC, the feed was cut mid-day, and the strategy
@@ -27,19 +26,20 @@ the fallback for a metrics.json with no range. Under this (v2) behaviour
 every unmarked lane measured was clean: f-1d 10/10 engine-0 -> excellent,
 waranyutrkm 110/110 at 100%, the 8 unmarked range-end ETH tapes unchanged.
 
-For a MARKED tape (the browser export writes the same row with Signal
-"Open"; 227 of the 396 scraped ETH tapes) run_strategy.py keeps the
-BASELINE behaviour: no bound — the feed as exported, three days past the
-range — and the open_at_end rows withheld from the CSV. The baseline traded
-past TV's range end and the canonical grader (scripts/verify_corpus.py)
-pairs those post-range closes with TV's Open rows on entry time; v2 (bound
-+ emit) paired the marks exactly but moved pnlP90 on the three 3commas
-grid bots by the cent-rounding of TV's Net PnL (22/22/28 open lots each;
-gate v2 4gfpn), which the hard gate counts as a regression, and v3 (bound +
-withhold) lost the pairing on ~186 marked probes (3commas-xlm 94.3 -> 93.7,
-alexgrover 100 -> 99.8; spark pre-check, 2026-09-02). Until
-verify_corpus.py pairs the marks itself, a marked tape is measured exactly
-as the baseline measured it. main() logs which regime applied and why.
+The same for every tape. The ws-report-v1 exporter prints the range-end
+position as an ordinary closed trade with an empty Signal (every 1D lane,
+most 15m); the browser export prints the same row with Signal "Open" (227
+of the 396 scraped ETH tapes). Under v4 a marked tape was measured as the
+baseline had measured it — unbounded, the marks withheld — because the
+canonical grader paired the baseline's post-range closes with TV's Open
+rows on entry time, and v2 (bound + emit) moved pnlP90 on the three
+3commas grid bots by the cent rounding of TV's Net PnL summed into the
+schedule aggregate (22/22/28 open lots each; round 3, 2026-09-02). The
+grader now pairs the engine's marked rows with the tape's Open rows lot
+for lot and keeps both out of every aggregate (verify_corpus.py
+pair_range_end_marks, test_verify_corpus_open_mark.py), so the marker in
+the CSV is what lets one regime serve both tapes. main() logs the bound,
+its source, and how the tape spells its row.
 """
 
 from __future__ import annotations
@@ -58,6 +58,8 @@ from unittest import mock
 
 import run_strategy
 from run_strategy import (
+    ENGINE_RANGE_END_COLUMN,
+    ENGINE_RANGE_END_OPEN,
     EXPECTED_PF_ABI,
     TradeC,
     _apply_range_end_regime,
@@ -68,7 +70,7 @@ from run_strategy import (
     _tv_metrics_range_end,
     _tv_metrics_range_end_ms,
     _tv_tape_marks_open_rows,
-    _withhold_open_at_end_trades,
+    write_engine_trades_csv,
 )
 
 FIFTEEN_MIN = 15 * 60 * 1000
@@ -557,63 +559,84 @@ class TapeMarksOpenRowsTests(unittest.TestCase):
             self.assertFalse(_tv_tape_marks_open_rows(d, TZ8))
 
 
-class WithholdOpenAtEndTests(unittest.TestCase):
-    def test_drops_only_the_flagged_rows_in_order(self) -> None:
-        kept, withheld = _withhold_open_at_end_trades(ENGINE_TRADES)
-        self.assertEqual(withheld, 2)
-        self.assertEqual(kept, [ENGINE_TRADES[0]])
-        # Rows without the key (an older report dict) are closed trades.
-        legacy = [{k: v for k, v in t.items() if k != "open_at_end"} for t in ENGINE_TRADES]
-        self.assertEqual(_withhold_open_at_end_trades(legacy), (legacy, 0))
-        self.assertEqual(_withhold_open_at_end_trades([]), ([], 0))
+class RangeEndMarkerColumnTests(unittest.TestCase):
+    """write_engine_trades_csv: the trailing ``Engine range-end`` column
+    says "open" on the exit row of a range-end close and nothing anywhere
+    else; every existing column keeps its place; the grader reads it."""
 
+    def test_the_exit_row_of_a_range_end_close_is_marked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "engine_trades.csv"
+            write_engine_trades_csv(ENGINE_TRADES, out)
+            with out.open(encoding="utf-8") as f:
+                header = f.readline().rstrip("\r\n").split(",")
+            self.assertEqual(header, [
+                "Trade #", "Type", "Date and time", "Price", "Qty",
+                "Net PnL", "Net PnL %",
+                "Favorable excursion USD", "Adverse excursion USD",
+                "Cumulative PnL", "Engine entry incarnation",
+                ENGINE_RANGE_END_COLUMN,
+            ])
+            self.assertEqual(ENGINE_RANGE_END_COLUMN, "Engine range-end")
+            self.assertEqual(ENGINE_RANGE_END_OPEN, "open")
+            rows = _csv_trades(out)
+            self.assertEqual(
+                [(r["Trade #"], r["Type"], r[ENGINE_RANGE_END_COLUMN]) for r in rows],
+                [("3", "Exit long", "open"), ("3", "Entry long", ""),
+                 ("2", "Exit long", "open"), ("2", "Entry long", ""),
+                 ("1", "Exit long", ""), ("1", "Entry long", "")])
+            # Every row has every column, the marker last.
+            with out.open(encoding="utf-8") as f:
+                lines = f.read().splitlines()
+            self.assertTrue(all(len(line.split(",")) == 12 for line in lines))
+            self.assertTrue(lines[1].endswith(",open"))
+            # A report dict without the flag (an older report) is a close.
+            legacy = [{k: v for k, v in t.items() if k != "open_at_end"} for t in ENGINE_TRADES]
+            write_engine_trades_csv(legacy, out)
+            self.assertEqual({r[ENGINE_RANGE_END_COLUMN] for r in _csv_trades(out)}, {""})
 
-# The marked regime's engine shape: the feed ran unbounded to 05-04 15:00
-# UTC, so lot 2 CLOSED for real past the range (the row the grader pairs
-# with TV's Open row on entry time) and lot 3 is still open at the FEED's
-# end and marked there.
-ENGINE_TRADES_UNBOUNDED = [
-    ENGINE_TRADES[0],
-    _trade(_utc_ms(2026, 4, 30, 10, 0), _utc_ms(2026, 5, 2, 6, 30), 2200.0, 2330.0, 0.0912,
-           open_at_end=False),
-    _trade(_utc_ms(2026, 4, 30, 12, 45), FEED_END, 2189.13, 2365.09, 0.0912,
-           open_at_end=True),
-]
+    def test_the_grader_reads_the_marker(self) -> None:
+        import verify_corpus
+        self.assertEqual(verify_corpus.ENGINE_RANGE_END_COLUMN, ENGINE_RANGE_END_COLUMN)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "engine_trades.csv"
+            write_engine_trades_csv(ENGINE_TRADES, out)
+            pairs = verify_corpus.parse_trades(out, tz=timezone.utc)
+            self.assertEqual([(t.trade_num, t.open_mark) for t in pairs],
+                             [(1, False), (2, True), (3, True)])
 
 
 class RangeEndRegimeTests(unittest.TestCase):
-    """_apply_range_end_regime: the marker picks the regime, the bound is
-    set only for an unmarked tape, and the reason names its source."""
+    """_apply_range_end_regime: the bound is TV's range end for every tape,
+    the reason names its source and how the tape spells its row."""
 
     def _probe(self, d: Path, tape, metrics=None) -> None:
         _write_tape(d / "tv_trades.csv", tape)
         if metrics is not None:
             _write_metrics(d / "metrics.json", metrics)
 
-    def test_marked_tape_is_the_baseline_regime(self) -> None:
+    def test_marked_tape_is_bounded_like_any_other(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             self._probe(d, BROWSER_OPEN_TAPE, BROWSER_METRICS)
             kwargs: dict = {}
-            marks, why = _apply_range_end_regime(d, TZ8, kwargs)
-            self.assertTrue(marks)
-            self.assertEqual(kwargs, {})
-            self.assertIn("baseline regime", why)
-            self.assertIn("feed unbounded", why)
-            self.assertIn("open_at_end rows kept out of the CSV", why)
-            # A probe's own bound is left alone too.
-            kwargs = {"ohlcv_end_ms": LAST_EXIT}
-            _apply_range_end_regime(d, TZ8, kwargs)
-            self.assertEqual(kwargs, {"ohlcv_end_ms": LAST_EXIT})
+            why = _apply_range_end_regime(d, TZ8, kwargs)
+            self.assertEqual(kwargs, {"ohlcv_end_ms": RANGE_TO_MS})
+            self.assertIn("tape marks its open rows (Signal 'Open')", why)
+            self.assertIn("range-end regime", why)
+            self.assertIn("2026-05-01 00:00 UTC (metrics.json to)", why)
+            self.assertIn("marked in the 'Engine range-end' column", why)
+            self.assertNotIn("baseline", why)
+            self.assertNotIn("unbounded", why)
 
     def test_unmarked_ws_tape_is_bounded_at_the_requested_to(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             self._probe(d, WS_OPEN_TAPE, WS_METRICS_ETH)
             kwargs: dict = {}
-            marks, why = _apply_range_end_regime(d, TZ8, kwargs)
-            self.assertFalse(marks)
+            why = _apply_range_end_regime(d, TZ8, kwargs)
             self.assertEqual(kwargs, {"ohlcv_end_ms": RANGE_TO_MS})
+            self.assertIn("tape unmarked (ws-report-v1 shape)", why)
             self.assertIn("range-end regime", why)
             self.assertIn("2026-05-01 00:00 UTC", why)
             self.assertIn("wsProvenance.requestedRange.to", why)
@@ -621,36 +644,53 @@ class RangeEndRegimeTests(unittest.TestCase):
 
     def test_unmarked_browser_metrics_tape_is_bounded_at_the_to_date(self) -> None:
         # A browser-export metrics.json (dates only) beside a tape with no
-        # Open rows: unmarked, so bounded — at `to` as UTC midnight.
+        # Open rows: bounded at `to` as UTC midnight.
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             self._probe(d, ASIAN_BOX_TAPE, BROWSER_METRICS)
             kwargs: dict = {}
-            marks, why = _apply_range_end_regime(d, TZ8, kwargs)
-            self.assertFalse(marks)
+            why = _apply_range_end_regime(d, TZ8, kwargs)
             self.assertEqual(kwargs, {"ohlcv_end_ms": RANGE_TO_MS})
             self.assertIn("(metrics.json to)", why)
 
-    def test_unmarked_tape_without_a_range_falls_back_to_its_last_row(self) -> None:
+    def test_tape_without_a_range_falls_back_to_its_last_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             self._probe(d, ASIAN_BOX_TAPE)
             kwargs: dict = {}
-            marks, why = _apply_range_end_regime(d, TZ8, kwargs)
-            self.assertFalse(marks)
+            why = _apply_range_end_regime(d, TZ8, kwargs)
             self.assertEqual(kwargs, {"ohlcv_end_ms": LAST_EXIT})
             self.assertIn("the tape's last row", why)
+            # A marked tape without metrics.json: its last row IS the
+            # range-end row.
+            self._probe(d, BROWSER_OPEN_TAPE)
+            kwargs = {}
+            why = _apply_range_end_regime(d, TZ8, kwargs)
+            self.assertEqual(kwargs, {"ohlcv_end_ms": TV_LAST_BAR})
+            self.assertIn("tape marks its open rows", why)
+            self.assertIn("the tape's last row", why)
 
-    def test_unmarked_tape_keeps_the_probes_own_bound(self) -> None:
+    def test_the_probes_own_bound_is_kept(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
-            self._probe(d, WS_OPEN_TAPE, WS_METRICS_ETH)
-            kwargs = {"ohlcv_end_ms": LAST_EXIT}
-            marks, why = _apply_range_end_regime(d, TZ8, kwargs)
-            self.assertFalse(marks)
-            self.assertEqual(kwargs, {"ohlcv_end_ms": LAST_EXIT})
-            self.assertIn("probe's own ohlcv_end_ms", why)
-            self.assertIn("2026-04-29 18:00 UTC", why)
+            for tape in (WS_OPEN_TAPE, BROWSER_OPEN_TAPE):
+                self._probe(d, tape, WS_METRICS_ETH)
+                kwargs = {"ohlcv_end_ms": LAST_EXIT}
+                why = _apply_range_end_regime(d, TZ8, kwargs)
+                self.assertEqual(kwargs, {"ohlcv_end_ms": LAST_EXIT})
+                self.assertIn("probe's own ohlcv_end_ms", why)
+                self.assertIn("2026-04-29 18:00 UTC", why)
+                self.assertIn("rows written", why)
+
+    def test_no_range_and_no_rows_leaves_the_feed_as_given(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            self._probe(d, [])
+            kwargs: dict = {}
+            why = _apply_range_end_regime(d, TZ8, kwargs)
+            self.assertEqual(kwargs, {})
+            self.assertIn("feed unbounded", why)
+            self.assertIn("rows written", why)
 
     def test_sources_are_named(self) -> None:
         self.assertEqual(_tv_metrics_range_end(WS_METRICS_ETH),
@@ -669,11 +709,10 @@ class RangeEndRegimeTests(unittest.TestCase):
 
 
 class RangeEndRowSymmetryTests(unittest.TestCase):
-    """main(): an unmarked tape bounds the feed at the range end and writes
-    the range-end rows; a marked tape runs the feed unbounded, withholds the
-    open_at_end rows and keeps the closed rows; a header-only tape (no TV
-    window) is measured as given with every row written; and one log line
-    says which regime applied and why."""
+    """main(): every tape bounds the feed at the range end and writes the
+    range-end rows marked; a header-only tape (no TV window) is measured
+    as given with every row written; and one log line says where the
+    bound came from and how the tape spells its row."""
 
     def _probe(self, d: Path, tape, metrics) -> tuple[Path, Path]:
         _write_eth_feed(d / "feed.csv")
@@ -682,65 +721,42 @@ class RangeEndRowSymmetryTests(unittest.TestCase):
         (d / "inputs.json").write_text(json.dumps(TZ8), encoding="utf-8")
         return d / "feed.csv", d / "engine_trades.csv"
 
-    def test_browser_tape_withholds_the_open_at_end_rows(self) -> None:
+    def _assert_rows_written_marked(self, rows: list[dict]) -> None:
+        self.assertEqual([(r["Trade #"], r["Type"]) for r in rows],
+                         [("3", "Exit long"), ("3", "Entry long"),
+                          ("2", "Exit long"), ("2", "Entry long"),
+                          ("1", "Exit long"), ("1", "Entry long")])
+        # The range-end rows are ordinary exits on TV's last bar, marked.
+        self.assertEqual(rows[0]["Date and time"], "2026-05-01 00:00")
+        self.assertEqual(rows[0]["Price"], "2261.440000")
+        self.assertEqual(rows[2]["Date and time"], "2026-05-01 00:00")
+        self.assertEqual([r[ENGINE_RANGE_END_COLUMN] for r in rows],
+                         ["open", "", "open", "", "", ""])
+        self.assertEqual(rows[4]["Price"], "2310.500000")
+        self.assertEqual(rows[4]["Net PnL"], f"{20.5 * 0.1:.6f}")
+
+    def test_browser_tape_writes_the_rows_marked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             feed, out = self._probe(d, BROWSER_OPEN_TAPE, BROWSER_METRICS)
             printed = _run_main(d, feed, out)
-            rows = _csv_trades(out)
-            # The closed trade is intact, renumbered from 1, exit then entry.
-            self.assertEqual([(r["Trade #"], r["Type"]) for r in rows],
-                             [("1", "Exit long"), ("1", "Entry long")])
-            self.assertEqual(rows[0]["Price"], "2310.500000")
-            self.assertEqual(rows[1]["Price"], "2290.000000")
-            self.assertEqual(rows[0]["Net PnL"], f"{20.5 * 0.1:.6f}")
-            self.assertEqual(rows[0]["Cumulative PnL"], f"{20.5 * 0.1:.6f}")
-            # The count and the reason are logged, once.
-            self.assertEqual(printed.count("withheld 2 open_at_end trade(s)"), 1)
-            self.assertIn("Signal 'Open'", printed)
-            self.assertIn("1 trades (3 raw) (2 open_at_end withheld)", printed)
-            # The marked regime: NO feed bound — the baseline's measurement.
-            self.assertIsNone(_FakeStrategy.calls[0].get("ohlcv_end_ms"))
+            self._assert_rows_written_marked(_csv_trades(out))
+            self.assertIn("3 trades (2 range-end),", printed)
+            # Bounded at TV's range end, the source named, the tape's
+            # spelling named — once.
+            self.assertEqual(_FakeStrategy.calls[0]["ohlcv_end_ms"], RANGE_TO_MS)
             self.assertEqual(printed.count("range-end: tape marks its open rows"), 1)
-            self.assertIn("baseline regime", printed)
+            self.assertIn("feed bounded at TV's range end 2026-05-01 00:00 UTC "
+                          "(metrics.json to)", printed)
+            self.assertNotIn("baseline", printed)
 
-    def test_browser_tape_keeps_the_post_range_close_and_withholds_the_feed_end_mark(self) -> None:
-        # The realistic marked shape on the unbounded ETH feed: lot 2 closed
-        # for real on 05-02 (past TV's range; written, as the baseline wrote
-        # it — the grader pairs it with TV's Open row on entry time) and lot
-        # 3 marked at the FEED's last bar 05-04 15:00 (withheld).
-        with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp)
-            feed, out = self._probe(d, BROWSER_OPEN_TAPE, BROWSER_METRICS)
-            printed = _run_main(d, feed, out, trades=ENGINE_TRADES_UNBOUNDED)
-            rows = _csv_trades(out)
-            self.assertEqual([(r["Trade #"], r["Type"], r["Date and time"]) for r in rows],
-                             [("2", "Exit long", "2026-05-02 06:30"),
-                              ("2", "Entry long", "2026-04-30 10:00"),
-                              ("1", "Exit long", "2026-04-29 02:15"),
-                              ("1", "Entry long", "2026-04-28 01:00")])
-            self.assertNotIn("2026-05-04", "".join(r["Date and time"] for r in rows))
-            self.assertIn("withheld 1 open_at_end trade(s)", printed)
-            self.assertIn("2 trades (3 raw) (1 open_at_end withheld)", printed)
-            self.assertIsNone(_FakeStrategy.calls[0].get("ohlcv_end_ms"))
-
-    def test_ws_tape_writes_the_rows(self) -> None:
+    def test_ws_tape_writes_the_rows_marked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             feed, out = self._probe(d, WS_OPEN_TAPE, WS_METRICS_ETH)
             printed = _run_main(d, feed, out)
-            rows = _csv_trades(out)
-            self.assertEqual([(r["Trade #"], r["Type"]) for r in rows],
-                             [("3", "Exit long"), ("3", "Entry long"),
-                              ("2", "Exit long"), ("2", "Entry long"),
-                              ("1", "Exit long"), ("1", "Entry long")])
-            # The range-end rows are ordinary exits on TV's last bar.
-            self.assertEqual(rows[0]["Date and time"], "2026-05-01 00:00")
-            self.assertEqual(rows[0]["Price"], "2261.440000")
-            self.assertEqual(rows[2]["Date and time"], "2026-05-01 00:00")
-            self.assertNotIn("withheld", printed)
-            self.assertIn("3 trades,", printed)
-            # The unmarked regime: bounded at TV's range end, source named.
+            self._assert_rows_written_marked(_csv_trades(out))
+            self.assertIn("3 trades (2 range-end),", printed)
             self.assertEqual(_FakeStrategy.calls[0]["ohlcv_end_ms"], RANGE_TO_MS)
             self.assertEqual(printed.count("range-end: tape unmarked"), 1)
             self.assertIn("feed bounded at TV's range end 2026-05-01 00:00 UTC "
@@ -774,17 +790,25 @@ class RangeEndRowSymmetryTests(unittest.TestCase):
             for n in ("1", "2", "3"):
                 self.assertEqual(by_row[(n, "Exit long")], "")
 
+    def test_both_tapes_get_the_same_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            feed, out = self._probe(d, BROWSER_OPEN_TAPE, BROWSER_METRICS)
+            _run_main(d, feed, out)
+            marked = out.read_bytes()
+            feed, out = self._probe(d, WS_OPEN_TAPE, WS_METRICS_ETH)
+            _run_main(d, feed, out)
+            self.assertEqual(out.read_bytes(), marked)
+
     def test_unmarked_tape_with_browser_metrics_is_bounded_at_the_to_date(self) -> None:
         # A tape with no Open rows beside a dates-only metrics.json (no
-        # wsProvenance): unmarked, so bounded at `to` as UTC midnight and
-        # the rows written.
+        # wsProvenance): bounded at `to` as UTC midnight, the rows written.
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             feed, out = self._probe(d, WS_OPEN_TAPE, BROWSER_METRICS)
             printed = _run_main(d, feed, out)
             self.assertEqual(_FakeStrategy.calls[0]["ohlcv_end_ms"], RANGE_TO_MS)
             self.assertIn("(metrics.json to)", printed)
-            self.assertNotIn("withheld", printed)
             rows = _csv_trades(out)
             # Every engine trade entered inside the window is written, the
             # two range-end rows as ordinary exits on TV's last bar.
@@ -792,9 +816,9 @@ class RangeEndRowSymmetryTests(unittest.TestCase):
                              ["2026-05-01 00:00", "2026-05-01 00:00", "2026-04-29 02:15"])
 
     def test_tape_without_rows_is_unchanged(self) -> None:
-        # Header only: no TV window, so no regime, no bound, nothing
-        # withheld — the run measures the feed it was given and writes
-        # every trade.
+        # Header only: no TV window, so no regime, no bound — the run
+        # measures the feed it was given and writes every trade, the
+        # range-end rows marked like any other run's.
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             feed, out = self._probe(d, [], BROWSER_METRICS)
@@ -803,25 +827,27 @@ class RangeEndRowSymmetryTests(unittest.TestCase):
             # The emit window falls back to the reference feed's span (the
             # feed here starts 04-29, so the 04-28 entry is outside it, as
             # before); both range-end rows are written as ordinary exits.
-            self.assertEqual([(r["Trade #"], r["Type"], r["Date and time"]) for r in rows],
-                             [("2", "Exit long", "2026-05-01 00:00"),
-                              ("2", "Entry long", "2026-04-30 12:45"),
-                              ("1", "Exit long", "2026-05-01 00:00"),
-                              ("1", "Entry long", "2026-04-30 10:00")])
-            self.assertNotIn("withheld", printed)
+            self.assertEqual([(r["Trade #"], r["Type"], r["Date and time"], r[ENGINE_RANGE_END_COLUMN])
+                              for r in rows],
+                             [("2", "Exit long", "2026-05-01 00:00", "open"),
+                              ("2", "Entry long", "2026-04-30 12:45", ""),
+                              ("1", "Exit long", "2026-05-01 00:00", "open"),
+                              ("1", "Entry long", "2026-04-30 10:00", "")])
             self.assertNotIn("range-end:", printed)
+            self.assertIn("2 trades (3 raw) (2 range-end),", printed)
             self.assertIsNone(_FakeStrategy.calls[0].get("ohlcv_end_ms"))
 
-    def test_browser_tape_with_a_flat_engine_logs_nothing(self) -> None:
+    def test_a_flat_engine_counts_no_range_end_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)
             feed, out = self._probe(d, BROWSER_OPEN_TAPE, BROWSER_METRICS)
             with mock.patch.object(run_strategy, "_filter_trades_to_window",
                                    lambda trades, window: [ENGINE_TRADES[0]]):
                 printed = _run_main(d, feed, out)
-            self.assertEqual(len(_csv_trades(out)), 2)
-            self.assertNotIn("withheld", printed)
-            # The regime line is still logged; only the withhold line is not.
+            rows = _csv_trades(out)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual({r[ENGINE_RANGE_END_COLUMN] for r in rows}, {""})
+            self.assertNotIn("range-end)", printed)
             self.assertEqual(printed.count("range-end:"), 1)
 
 
