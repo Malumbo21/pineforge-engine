@@ -183,8 +183,20 @@ static void test_forex_pine_time_symbol_clock() {
                 utc_ms(2025, 6, 9, 4, 0));
     CHECK_EQ_MS(pine_time_close(utc_ms(2025, 6, 10, 1, 0), "D", "0000-2359", NY, "15", UTC, "24x7"),
                 pine_time_close(utc_ms(2025, 6, 10, 1, 0), "D", "0000-2359", NY, "15"));
-    // Intraday tfs keep the epoch grid.
+    // Intraday tfs sit on the symbol's day-stamp-anchored HTF grid, the one
+    // request.security aggregates on. (Re-pinned: the rule "intraday tfs
+    // keep the epoch grid" arrived with b1449c3 as a design statement with
+    // no tape behind it, and this "60" check on 1700-1700 never told the two
+    // grids apart -- 17:00 ET is on the hour in EDT and EST. pin-time-hours
+    // on NYSE:F / NSE:NIFTY / OANDA:XAUUSD 15, 2025-04-01..07-01, reads the
+    // session-anchored grid on every session symbol; see
+    // test_pine_time_day_stamp_grid.) On forex "60" still coincides with
+    // the epoch hour; "240" is the 17:00-ET-anchored grid: Tue 03:00 EDT
+    // sits in the 01:00-05:00 EDT bucket, not the epoch 04:00Z-08:00Z one.
     CHECK_EQ_MS(pine_time(bar, "60", "", "", "15", NY, FX), pine_time(bar, "60", "", "", "15"));
+    CHECK_EQ_MS(pine_time(bar, "240", "", "", "15", NY, FX), utc_ms(2025, 6, 10, 5, 0));
+    CHECK_EQ_MS(pine_time_close(bar, "240", "", "", "15", NY, FX), utc_ms(2025, 6, 10, 9, 0));
+    CHECK_EQ_MS(pine_time(bar, "240", "", "", "15"), utc_ms(2025, 6, 10, 4, 0));
     // Empty tf falls back to the chart tf.
     CHECK_EQ_MS(pine_time(bar, "", "", "", "D", NY, FX), utc_ms(2025, 6, 9, 21, 0));
 }
@@ -328,14 +340,21 @@ static void test_session_length_edge_cases() {
                 utc_ms(2025, 6, 11, 0, 0));
     CHECK_EQ_MS(session_period_open_ms(utc_ms(2025, 6, 10, 7, 0), UTC, ALLDAY, CalendarPeriod::WEEK),
                 utc_ms(2025, 6, 9, 0, 0));
-    // CME-style 1800-1700 wraps midnight like forex: trading date == close date.
+    // A 1800-1700 session wraps midnight like forex: trading date == close
+    // date, the day closing 17:00 ET. (Re-pinned: b1449c3 wrote this parser
+    // edge case as "CME-style" with the New York zone, which makes it
+    // OANDA's 1800-1700 metals session -- whose D bar is stamped at the
+    // 17:00 ET roll an hour before it trades, so its D / W open is the
+    // stamp: pin-time-hours on OANDA:XAUUSD, see test_pine_time_day_stamp_grid.
+    // A real CME session is 1700-1600 America/Chicago, whose open IS its
+    // stamp; test_pine_time_day_stamp_grid rule E pins that grid.)
     const std::string CME = "1800-1700";
     CHECK_EQ_MS(session_period_open_ms(utc_ms(2025, 6, 10, 7, 0), NY, CME, CalendarPeriod::DAY),
-                utc_ms(2025, 6, 9, 22, 0));
+                utc_ms(2025, 6, 9, 21, 0));
     CHECK_EQ_MS(session_period_close_ms(utc_ms(2025, 6, 10, 7, 0), NY, CME, CalendarPeriod::DAY),
                 utc_ms(2025, 6, 10, 21, 0));
     CHECK_EQ_MS(session_period_open_ms(utc_ms(2025, 6, 10, 7, 0), NY, CME, CalendarPeriod::WEEK),
-                utc_ms(2025, 6, 8, 22, 0));
+                utc_ms(2025, 6, 8, 21, 0));
     // Day-of-week suffix does not disturb parsing.
     CHECK_EQ_MS(session_period_open_ms(utc_ms(2025, 6, 10, 14, 0), NY, "0930-1600:23456", CalendarPeriod::DAY),
                 utc_ms(2025, 6, 10, 13, 30));

@@ -28,12 +28,17 @@
 //   B. "45": buckets 21:00Z / 21:45Z / 22:30Z / 23:15Z / 00:00Z ...; the first
 //      traded bar 22:00Z sits in the 21:45Z bucket;
 //   C. the same in EST (17:00 EST = 22:00Z; first traded bar 23:00Z);
-//   D. the 1800-1700 SESSION-DAY model is unchanged: the D bar still opens on
-//      the 18:00 ET session open and closes 17:00 ET, the week on Sunday
-//      18:00 ET, the day ordinal rolls between 16:45 and 18:00 and not at UTC
-//      midnight, and OANDA's 17:00-ET-stamped native daily bars still route
-//      to the session they cover; the D bucket completes on the session's
-//      last chart bar (16:45 ET), as it does on 1700-1700;
+//   D. the 1800-1700 SESSION-DAY model: the D bar OPENS at the 17:00 ET stamp
+//      (pin-time-hours, OANDA:XAUUSD 15, 2025-04-01..07-01: time("D") is
+//      17:00 ET on 147/147 entries -- see test_pine_time_day_stamp_grid) and
+//      closes at the next 17:00 ET; the week opens on the Sunday stamp and
+//      the month on its first session-day's stamp (extrapolated from the D
+//      pin: a period opens where its first D bar does, as 1700-1700 already
+//      does -- no W/M tape); the day ordinal rolls between 16:45 and 18:00
+//      and not at UTC midnight, and OANDA's 17:00-ET-stamped native daily
+//      bars still route to the session they cover; the D bucket is labelled
+//      by the stamp and completes on the session's last chart bar (16:45
+//      ET), as it does on 1700-1700;
 //   E. sessions whose open IS the stamp keep their grid: OANDA 1700-1700 (the
 //      same grid as XAUUSD), CME 1700-1600 CT, NYSE 0930-1600, NSE 0915-1530,
 //      24x7 UTC.
@@ -242,18 +247,27 @@ void test_xau_240_grid_est() {
 // ─── D. The 1800-1700 session-day model is untouched ─────────────────────────
 
 void test_xau_session_day_model_unchanged() {
-    std::printf("D. 1800-1700 session-day anchors unchanged; D completes on 16:45 ET\n");
+    std::printf("D. 1800-1700 session-day anchors: D opens on the 17:00 ET stamp, completes on 16:45 ET\n");
     const int64_t tue_0300 = utc_ms(2025, 4, 1, 7, 0);   // Tue 03:00 EDT
+    // The D bar opens at the stamp (pin-time-hours: time("D") == 17:00 ET),
+    // an hour before the 18:00 ET session open, and closes at the next stamp.
     CHECK_EQ_MS(session_period_open_ms(tue_0300, NY, XAU, CalendarPeriod::DAY),
-                utc_ms(2025, 3, 31, 22, 0));                // Mon 18:00 EDT
+                utc_ms(2025, 3, 31, 21, 0));                // Mon 17:00 EDT
     CHECK_EQ_MS(session_period_close_ms(tue_0300, NY, XAU, CalendarPeriod::DAY),
                 utc_ms(2025, 4, 1, 21, 0));                 // Tue 17:00 EDT
+    // W / M open on their first session-day's stamp (extrapolated from the D
+    // pin, the 1700-1700 relation; no W/M tape) and close on the next one's.
     CHECK_EQ_MS(session_period_open_ms(tue_0300, NY, XAU, CalendarPeriod::WEEK),
-                utc_ms(2025, 3, 30, 22, 0));                // Sun 18:00 EDT
+                utc_ms(2025, 3, 30, 21, 0));                // Sun 17:00 EDT
     CHECK_EQ_MS(session_period_close_ms(tue_0300, NY, XAU, CalendarPeriod::WEEK),
-                utc_ms(2025, 4, 6, 22, 0));
+                utc_ms(2025, 4, 6, 21, 0));
     CHECK_EQ_MS(session_period_open_ms(tue_0300, NY, XAU, CalendarPeriod::MONTH),
-                utc_ms(2025, 3, 31, 22, 0));                // April's first session
+                utc_ms(2025, 3, 31, 21, 0));                // April's first session
+    CHECK_EQ_MS(session_period_close_ms(tue_0300, NY, XAU, CalendarPeriod::MONTH),
+                utc_ms(2025, 4, 30, 21, 0));                // May 1 is a Thursday
+    // The week's last traded close is still Friday 17:00 ET.
+    CHECK_EQ_MS(session_period_last_traded_close_ms(tue_0300, NY, XAU, CalendarPeriod::WEEK),
+                utc_ms(2025, 4, 4, 21, 0));
     // The day ordinal rolls between 16:45 and 18:00 ET, not at UTC midnight.
     CHECK(session_day_index(utc_ms(2025, 4, 1, 20, 45), NY, XAU)
           != session_day_index(utc_ms(2025, 4, 1, 22, 0), NY, XAU));
@@ -270,33 +284,39 @@ void test_xau_session_day_model_unchanged() {
     // break.
     for (int mi : {0, 30, 59}) {
         const int64_t stamp = utc_ms(2025, 3, 31, 21, mi);
+        CHECK_EQ_MS(session_covered_instant_ms(stamp, NY, XAU), utc_ms(2025, 3, 31, 22, 0));
         CHECK_EQ_MS(session_period_open_ms(session_covered_instant_ms(stamp, NY, XAU),
                                            NY, XAU, CalendarPeriod::DAY),
-                    utc_ms(2025, 3, 31, 22, 0));
+                    utc_ms(2025, 3, 31, 21, 0));
         CHECK_EQ_MS(session_period_open_ms(session_covered_instant_ms(stamp, NY, XAU),
                                            NY, XAU, CalendarPeriod::WEEK),
-                    utc_ms(2025, 3, 30, 22, 0));
+                    utc_ms(2025, 3, 30, 21, 0));
+        // The same key the 1m content bars of that session resolve to.
+        CHECK_EQ_MS(session_period_open_ms(utc_ms(2025, 4, 1, 12, 0), NY, XAU, CalendarPeriod::DAY),
+                    utc_ms(2025, 3, 31, 21, 0));
     }
     // A stamp past the close still rolls to the next session's open.
     CHECK_EQ_MS(session_covered_instant_ms(utc_ms(2025, 4, 1, 21, 0), NY, XAU),
                 utc_ms(2025, 4, 1, 22, 0));
     CHECK_EQ_MS(session_covered_instant_ms(utc_ms(2025, 4, 1, 12, 0), NY, XAU),
                 utc_ms(2025, 4, 1, 12, 0));
-    // The D bucket is labelled by the session open and completes on the
-    // session's last chart bar (16:45 ET, whose close is the 17:00 stamp),
-    // exactly as the 1700-1700 forex day does — not a session late.
+    // The D bucket is labelled by the 17:00 ET stamp (TradingView's D bar
+    // time, which time("D") reads) and completes on the session's last
+    // chart bar (16:45 ET, whose close is the next stamp), exactly as the
+    // 1700-1700 forex day does — not a session late.
     TimeframeAggregator d("D", "15", NY, XAU);
-    CHECK_EQ_MS(d.bar_label_ms(utc_ms(2025, 3, 31, 22, 0)), utc_ms(2025, 3, 31, 22, 0));
+    CHECK_EQ_MS(d.bar_label_ms(utc_ms(2025, 3, 31, 22, 0)), utc_ms(2025, 3, 31, 21, 0));
+    CHECK_EQ_MS(d.bucket_open_ms(utc_ms(2025, 3, 31, 22, 0)), utc_ms(2025, 3, 31, 21, 0));
     std::vector<int64_t> ts;
     xau_session(ts, utc_ms(2025, 3, 31, 22, 0));
     xau_session(ts, utc_ms(2025, 4, 1, 22, 0));
     auto c = drive(d, ts);
     CHECK(c.size() == 2);
     if (c.size() == 2) {
-        CHECK_EQ_MS(c[0].bucket_ts, utc_ms(2025, 3, 31, 22, 0));
+        CHECK_EQ_MS(c[0].bucket_ts, utc_ms(2025, 3, 31, 21, 0));
         CHECK_EQ_MS(c[0].at, utc_ms(2025, 4, 1, 20, 45));
         CHECK(c[0].subs == 92);
-        CHECK_EQ_MS(c[1].bucket_ts, utc_ms(2025, 4, 1, 22, 0));
+        CHECK_EQ_MS(c[1].bucket_ts, utc_ms(2025, 4, 1, 21, 0));
         CHECK_EQ_MS(c[1].at, utc_ms(2025, 4, 2, 20, 45));
     }
     TimeframeAggregator dfx("D", "15", NY, FX);

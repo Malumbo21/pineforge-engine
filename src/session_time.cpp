@@ -159,18 +159,6 @@ static bool minute_in_window(int mod, int start, int end) {
     return mod >= start || mod < end;
 }
 
-static int64_t utc_bucket_open_ms(int64_t bar_ms, int period_sec) {
-    if (period_sec <= 0)
-        return bar_ms;
-    int64_t period_ms = static_cast<int64_t>(period_sec) * 1000;
-    if (bar_ms >= 0)
-        return (bar_ms / period_ms) * period_ms;
-    int64_t q = bar_ms / period_ms;
-    if (bar_ms % period_ms != 0 && bar_ms < 0)
-        --q;
-    return q * period_ms;
-}
-
 static int64_t calendar_week_open_local_ms_tz(int64_t bar_ms, const std::string& tz);
 
 static int64_t calendar_week_open_local_ms(int64_t bar_ms, const std::string& tz) {
@@ -248,9 +236,15 @@ static int64_t calendar_month_open_local_ms_tz(int64_t bar_ms, const std::string
     return static_cast<int64_t>(m0) * 1000;
 }
 
+// D/W/M open on the `tz` calendar; an intraday tf on the SYMBOL's
+// day-stamp-anchored HTF grid (session_intraday_bucket_open_ms — the grid
+// request.security aggregates on), which with sym_tz "UTC" and no
+// sym_session is the epoch grid the five-argument forms keep.
 static int64_t compute_tf_open_ms(int64_t bar_ms,
                                   const std::string& tf,
-                                  const std::string& tz) {
+                                  const std::string& tz,
+                                  const std::string& sym_tz,
+                                  const std::string& sym_session) {
     if (tf.empty())
         return bar_ms;
 
@@ -264,7 +258,7 @@ static int64_t compute_tf_open_ms(int64_t bar_ms,
 
     int sec = tf_to_seconds(tf);
     if (sec > 0 && sec < kSecPerDay)
-        return utc_bucket_open_ms(bar_ms, sec);
+        return session_intraday_bucket_open_ms(bar_ms, sec, sym_tz, sym_session);
     return bar_ms;
 }
 
@@ -586,8 +580,9 @@ static bool session_arg_is_timezone(const std::string& s) {
 //     deliberately left exactly as before: explicit tz argument, else UTC.
 //     The D/W/M calendar path of compute_tf_open_ms is owned elsewhere and
 //     must not silently start rolling at syminfo.timezone just because a
-//     session was supplied; intraday timeframes are UTC-bucketed and never
-//     depended on tz anyway.
+//     session was supplied; intraday timeframes sit on the symbol's own
+//     HTF grid (the seven-argument forms) or the epoch grid (these) and
+//     never depended on tz.
 //
 // When a 2-arg call passes a timezone-looking string in the session slot (and
 // no explicit tz), TV treats it as an invalid session and ignores it: drop the
@@ -630,7 +625,7 @@ int64_t pine_time(int64_t bar_ms,
     if (!sess.empty() && !passes_session_filter(sess, session_tz, bar_ms))
         return na<int64_t>();
 
-    return compute_tf_open_ms(bar_ms, tf, tf_tz);
+    return compute_tf_open_ms(bar_ms, tf, tf_tz, "UTC", "");
 }
 
 int64_t pine_time_close(int64_t bar_ms,
@@ -649,7 +644,7 @@ int64_t pine_time_close(int64_t bar_ms,
     if (!sess.empty() && !passes_session_filter(sess, session_tz, bar_ms))
         return na<int64_t>();
 
-    int64_t t_open = compute_tf_open_ms(bar_ms, tf, tf_tz);
+    int64_t t_open = compute_tf_open_ms(bar_ms, tf, tf_tz, "UTC", "");
     return compute_tf_close_ms(t_open, tf, tf_tz);
 }
 
@@ -664,7 +659,13 @@ int64_t pine_time_close(int64_t bar_ms,
 // roll, 18% with the symbol's UTC roll), so that path keeps the tz-only
 // calendar floor of the five-argument forms. A timezone-looking string in the
 // session slot is an invalid session (dropped by resolve_session_tz) and
-// falls back to the symbol clock. Intraday tfs keep the epoch-grid bucket.
+// falls back to the symbol clock. An intraday tf is the symbol's
+// day-stamp-anchored HTF grid bucket whatever the session argument (it
+// only filters): TradingView's time("60") on NYSE:F 15 is 09:30 / 10:30 /
+// .. / 15:30 ET, time("240") on NSE:NIFTY 09:15 / 13:15 IST and on
+// OANDA:XAUUSD 17:00 ET + 4h*k, 00:00 UTC + 4h*k only on 24x7 UTC
+// (pin-time-hours, 2025-04-01..07-01) — the very grid request.security
+// aggregates on (session_intraday_bucket_open_ms), one grid in one place.
 static bool symbol_clock_applies(const std::string& resolved_session,
                                  CalendarPeriod cp) {
     return cp != CalendarPeriod::NONE && resolved_session.empty();
@@ -694,7 +695,7 @@ int64_t pine_time(int64_t bar_ms,
     const CalendarPeriod cp = calendar_period_for(tf);
     if (symbol_clock_applies(sess, cp))
         return session_period_open_ms(bar_ms, sym_tz, sym_session, cp);
-    return compute_tf_open_ms(bar_ms, tf, tf_tz);
+    return compute_tf_open_ms(bar_ms, tf, tf_tz, sym_tz, sym_session);
 }
 
 int64_t pine_time_close(int64_t bar_ms,
@@ -720,7 +721,7 @@ int64_t pine_time_close(int64_t bar_ms,
         // tz-only forms above; intraday closes stay the exact boundary.
         return session_period_close_ms(bar_ms, sym_tz, sym_session, cp) - 1;
     }
-    int64_t t_open = compute_tf_open_ms(bar_ms, tf, tf_tz);
+    int64_t t_open = compute_tf_open_ms(bar_ms, tf, tf_tz, sym_tz, sym_session);
     return compute_tf_close_ms(t_open, tf, tf_tz);
 }
 

@@ -73,6 +73,7 @@ set(TEST_SOURCES
     test_chart_bar_bucket_label
     test_htf_bucket_real_end
     test_oanda_day_stamp_grid
+    test_pine_time_day_stamp_grid
     test_adversarial_ohlcv
     test_report_trace
     test_path_resolve_extra

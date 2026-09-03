@@ -55,7 +55,13 @@ int64_t pine_time_close(int64_t bar_ms,
 // (TradingView rolls `time("D", "0000-2359", "America/New_York")` at New
 // York midnight on a UTC symbol — measured), and its window is read in the
 // explicit `tz`, else `sym_tz` (the syminfo default above), else UTC.
-// Intraday tfs are unchanged.
+// An intraday `tf` (with or without a session argument, which only
+// filters) is the symbol's day-stamp-anchored HTF grid bucket
+// (session_intraday_bucket_open_ms in timeframe.hpp — the grid
+// request.security aggregates on): time("60") on NYSE:F is 09:30 / 10:30 /
+// .. / 15:30 ET, time("240") on NSE:NIFTY 09:15 / 13:15 IST and on
+// OANDA:XAUUSD the 17:00-ET-anchored 4h grid (pin-time-hours tapes,
+// 2025-04-01..07-01); the five-argument forms stay on the epoch grid.
 // With sym_tz="UTC" and an empty / "24x7" sym_session these are
 // bit-identical to the five-argument forms above.
 //
