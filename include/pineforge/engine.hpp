@@ -467,7 +467,9 @@ struct PendingOrder {
     // (apply_qty_step returns qty UNFLOORED for qty <= 0, so |qty|*price ==
     // |sizing_equity| while free_funds < 0 — every order, flat opens
     // included, would be declined forever). The re-check is restricted
-    // accordingly; orders outside it carry the snapshot and are admitted.
+    // accordingly; orders outside it carry the snapshot and are admitted
+    // here — CASH and pct > 100 MARKET entries by the unified
+    // design-market-entry-affordability gate instead (affordability_* below).
     // NaN = no snapshot, no re-check.
     double sizing_equity = std::numeric_limits<double>::quiet_NaN();
     double sizing_price = std::numeric_limits<double>::quiet_NaN();
@@ -570,9 +572,14 @@ struct PendingOrder {
     // to open it and cascade 4x-shortfall margin calls, 23,605 trades vs 1,486).
     //
     // Scope: high-level MARKET strategy.entry with an explicit qty OR default
-    // FIXED / CASH sizing. Default percent_of_equity entries keep their own
+    // FIXED / CASH sizing OR default percent_of_equity sizing ABOVE 100%
+    // (round 6, pin-pct-afford 2026-09-04: NYSE:F 15, percent_of_equity 200
+    // on 10,000 at margin 100 -> TV filled 0 entries, the same tape shape as
+    // strategy.cash 20,000 — pin-cash-afford-m100 0 entries, -m50 filled).
+    // Default percent_of_equity entries at or below 100% keep their own
     // pinned KI-54 / gap-reject / gross-admission family (not provably the
-    // same rule: their reversal decline is atomic and holds the position).
+    // same rule: their reversal decline is atomic and holds the position);
+    // the >100% regime had no admission at all (KI-54 requires pct <= 100).
     // NaN = no snapshot (out of scope, margin_pct == 0, non-finite close).
     double affordability_placement_equity =
         std::numeric_limits<double>::quiet_NaN();
