@@ -969,7 +969,27 @@ static void test_pivot_point_levels() {
 // Driver
 // ============================================================================
 
+
+// ta.stdev holds its last full-window value on an na input (pinned 2026-09-04,
+// OANDA:XAUUSD 15: stdev(z2, 20) with z2 na on every 5th bar, 310/310 with the
+// hold; the engine used to answer na on those bars).
+static void test_stdev_holds_on_na_input() {
+    std::printf("test_stdev_holds_on_na_input\n");
+    ta::StdDev sd(3);
+    CHECK(is_na(sd.compute(na<double>())));      // before seeding: na
+    CHECK(is_na(sd.compute(1.0)));
+    CHECK(is_na(sd.compute(na<double>())));      // still seeding: na, state untouched
+    CHECK(is_na(sd.compute(2.0)));
+    const double full = sd.compute(3.0);         // window {1,2,3}: population stdev sqrt(2/3)
+    CHECK(!is_na(full) && std::fabs(full - std::sqrt(2.0 / 3.0)) < 1e-12);
+    const double held = sd.compute(na<double>()); // na input: held, window untouched
+    CHECK(!is_na(held) && std::fabs(held - full) < 1e-12);
+    const double next = sd.compute(4.0);         // window {2,3,4}: the na never entered
+    CHECK(!is_na(next) && std::fabs(next - std::sqrt(2.0 / 3.0)) < 1e-12);
+}
+
 int main() {
+    test_stdev_holds_on_na_input();
     test_wma();
     test_hma();
     test_alma();

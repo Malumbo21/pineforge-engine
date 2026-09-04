@@ -87,9 +87,30 @@ double ATR::compute(double high, double low, double close) {
 
 StdDev::StdDev(int length, bool biased) : length_(length), biased_(biased) {}
 
+double StdDev::held_stdev() const {
+    double sum = 0.0;
+    for (double v : buffer_) sum += v;
+    const double mean = sum / length_;
+    double sq_sum = 0.0;
+    for (double v : buffer_) {
+        const double diff = v - mean;
+        sq_sum += diff * diff;
+    }
+    const int denom = biased_ ? length_ : (length_ - 1);
+    return denom > 0 ? std::sqrt(sq_sum / denom) : na<double>();
+}
+
 double StdDev::compute(double src) {
     if (is_na(src)) {
-        return na<double>();
+        // Pine ta.stdev, like ta.sma (KI-66): an na input never enters the
+        // compact last-N-valid window; once `length` valid values have been
+        // seen the window's population stdev is HELD and re-emitted on the
+        // na-input bar; before seeding it is still na. State untouched.
+        // Pinned 2026-09-04 on OANDA:XAUUSD 15 (ta.stdev(z2, 20) with z2 na
+        // on every 5th bar: 310/310 with hold + population, 248/310 without
+        // the hold; ta.sma(z2, 20) 310/310 likewise).
+        if ((int)buffer_.size() < length_) return na<double>();
+        return held_stdev();
     }
 
     buffer_.push_back(src);

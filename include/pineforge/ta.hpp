@@ -387,6 +387,9 @@ public:
     explicit StdDev(int length, bool biased = true);
     double compute(double src);
     double recompute(double src);
+
+private:
+    double held_stdev() const;
 };
 
 // --- Supertrend ---
