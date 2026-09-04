@@ -78,6 +78,7 @@ _VALIDATION_META_KEYS = frozenset({
     "ohlcv_csv",
     "aux_security_ohlcv_csv",
     "aux_security_input_tf",
+    "native_security_feeds",
     "ohlcv_start_ms",
     "script_tf",
     "input_tf",
@@ -619,6 +620,19 @@ def build_runtime_provenance(run_kwargs: dict, trade_start_ms: int | None) -> di
             "source_values_sha256": run_kwargs.get(
                 "aux_security_source_feed_sha256") or "",
         }
+    native_feeds = run_kwargs.get("native_security_feeds")
+    if native_feeds:
+        # One entry per requested timeframe served by the exchange's own bars
+        # (strategy_set_native_security_feed): the file identity resolved at
+        # inputs time and, when the run supplied it, the parsed-values digest.
+        runtime["native_security_feeds"] = {
+            str(tf): {
+                "source_path": str(Path(entry["path"]).resolve()),
+                "source_file_sha256": entry.get("source_file_sha256") or "",
+                "source_values_sha256": entry.get("source_values_sha256") or "",
+            }
+            for tf, entry in sorted(native_feeds.items())
+        }
     return runtime
 
 
@@ -992,6 +1006,44 @@ def inputs_run_kwargs(params, strategy_dir: Path, default_ohlcv: Path,
             raise OSError(
                 "cannot hash auxiliary request.security OHLCV export: "
                 f"{aux_security_ohlcv_csv}")
+    # ``native_security_feeds``: {"D": "<csv>", ...} -- the exchange's own
+    # bars of one higher timeframe each, served to the request.security
+    # evaluators that request exactly that timeframe (TradingView's daily bar
+    # on an intraday CME / NASDAQ / NSE chart is the settlement or official
+    # close, which no aggregate of the chart feed reproduces). Paths resolve
+    # like ``aux_security_ohlcv_csv``; each file is hashed here so the run can
+    # refuse a file that changed between metadata resolution and execution.
+    native_security_feeds = None
+    if "native_security_feeds" in params:
+        raw_feeds = params.get("native_security_feeds")
+        if raw_feeds in (None, "", {}):
+            raw_feeds = {}
+        if not isinstance(raw_feeds, dict):
+            raise ValueError(
+                "native_security_feeds must map a timeframe to an OHLCV export path")
+        native_security_feeds = {}
+        for raw_tf, raw_path in raw_feeds.items():
+            tf = str(raw_tf or "").strip()
+            path_value = str(raw_path or "")
+            if not tf or not path_value:
+                raise ValueError(
+                    "native_security_feeds entries need a timeframe and a path")
+            feed_path = (
+                Path(path_value) if path_value.startswith("/")
+                else strategy_dir / path_value
+            ).resolve()
+            if not feed_path.is_file():
+                raise FileNotFoundError(
+                    f"native request.security OHLCV export not found for {tf}: "
+                    f"{feed_path}")
+            feed_sha = _sha256_file(feed_path)
+            if feed_sha is None:
+                raise OSError(
+                    f"cannot hash native request.security OHLCV export: {feed_path}")
+            native_security_feeds[tf] = {
+                "path": feed_path,
+                "source_file_sha256": feed_sha,
+            }
     # Per-probe chart tz override wins over the caller default. Empty
     # string is honoured (engine UTC fast path).
     if "chart_timezone" in params:
@@ -1093,6 +1145,8 @@ def inputs_run_kwargs(params, strategy_dir: Path, default_ohlcv: Path,
         kwargs["aux_security_input_tf"] = aux_security_input_tf
         kwargs["aux_security_source_file_sha256"] = \
             aux_security_source_file_sha256
+    if native_security_feeds:
+        kwargs["native_security_feeds"] = native_security_feeds
     return ohlcv_path, kwargs
 
 
@@ -1210,6 +1264,11 @@ class Strategy:
                 ctypes.c_void_p, ctypes.POINTER(BarC), ctypes.c_int,
                 ctypes.c_char_p]
             L.strategy_set_aux_security_feed.restype = ctypes.c_int
+        if hasattr(L, "strategy_set_native_security_feed"):
+            L.strategy_set_native_security_feed.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(BarC),
+                ctypes.c_int]
+            L.strategy_set_native_security_feed.restype = ctypes.c_int
         if hasattr(L, "strategy_set_syminfo_mintick"):
             L.strategy_set_syminfo_mintick.argtypes = [ctypes.c_void_p, ctypes.c_double]
             L.strategy_set_syminfo_mintick.restype = None
@@ -1238,6 +1297,7 @@ class Strategy:
             aux_security_ohlcv_csv: Path | None = None,
             aux_security_input_tf: str | None = None,
             aux_security_source_file_sha256: str | None = None,
+            native_security_feeds: dict | None = None,
             ohlcv_start_ms: int | None = None,
             ohlcv_end_ms: int | None = None,
             bar_magnifier: bool = False,
@@ -1313,6 +1373,30 @@ class Strategy:
             if aux_n <= 0:
                 raise ValueError(
                     "auxiliary request.security OHLCV export contains no bars")
+        native_feed_arrays = []
+        native_feed_report = {}
+        if native_security_feeds:
+            if not hasattr(self.lib, "strategy_set_native_security_feed"):
+                raise RuntimeError(
+                    "strategy library lacks native request.security feed support; rebuild it")
+            for tf, entry in sorted(native_security_feeds.items()):
+                feed_path = Path(entry["path"])
+                (feed_bars, feed_n, feed_values_sha256,
+                 feed_file_sha256) = _load_aux_bars_snapshot(feed_path)
+                expected_sha = entry.get("source_file_sha256")
+                if expected_sha is not None and expected_sha != feed_file_sha256:
+                    raise RuntimeError(
+                        "native request.security OHLCV export changed after "
+                        f"metadata resolution: {tf}")
+                if feed_n <= 0:
+                    raise ValueError(
+                        f"native request.security OHLCV export for {tf} contains no bars")
+                native_feed_arrays.append((str(tf), feed_bars, feed_n))
+                native_feed_report[str(tf)] = {
+                    "path": str(feed_path.resolve()),
+                    "source_file_sha256": feed_file_sha256,
+                    "source_values_sha256": feed_values_sha256,
+                }
         params = params or {}
         params_json = json.dumps(params).encode()
 
@@ -1439,6 +1523,18 @@ class Strategy:
                     raise RuntimeError(
                         "engine rejected auxiliary request.security feed"
                         + (f": {detail}" if detail else ""))
+            for feed_tf, feed_bars, feed_n in native_feed_arrays:
+                rc = self.lib.strategy_set_native_security_feed(
+                    state, feed_tf.encode(), feed_bars, feed_n)
+                if rc != 0:
+                    detail = ""
+                    if hasattr(self.lib, "strategy_get_last_error"):
+                        err_ptr = self.lib.strategy_get_last_error(state)
+                        if err_ptr:
+                            detail = err_ptr.decode("utf-8", "replace")
+                    raise RuntimeError(
+                        f"engine rejected native request.security feed {feed_tf}"
+                        + (f": {detail}" if detail else ""))
             self.lib.run_backtest_full(
                 state, bars, n,
                 input_tf_b, script_tf_b,  # empty -> auto-detect input_tf, default script_tf=input_tf
@@ -1474,6 +1570,8 @@ class Strategy:
                     aux_source_file_sha256 or "")
                 result["aux_security_source_feed_sha256"] = (
                     aux_source_feed_sha256 or "")
+            if native_feed_report:
+                result["native_security_feeds"] = native_feed_report
             return result
         finally:
             self.lib.report_free(ctypes.byref(report))
@@ -2391,6 +2489,11 @@ def main() -> int:
                 "error: --runner docker does not support an auxiliary "
                 "request.security feed; use --runner ctypes with a freshly "
                 "built strategy library.")
+        if run_kwargs.get("native_security_feeds"):
+            sys.exit(
+                "error: --runner docker does not support native "
+                "request.security feeds; use --runner ctypes with a freshly "
+                "built strategy library.")
         strat = None
         report = _run_via_docker(strategy_dir, ohlcv_path, params, run_kwargs,
                                  trade_start_ms, args.image)
@@ -2434,6 +2537,9 @@ def main() -> int:
             if report.get("aux_security_source_feed_sha256"):
                 runtime_kwargs["aux_security_source_feed_sha256"] = \
                     report["aux_security_source_feed_sha256"]
+            if report.get("native_security_feeds"):
+                runtime_kwargs["native_security_feeds"] = \
+                    report["native_security_feeds"]
             runtime = build_runtime_provenance(
                 runtime_kwargs, trade_start_ms)
             fp = build_fingerprint(build_provenance(

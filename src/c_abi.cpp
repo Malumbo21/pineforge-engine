@@ -343,6 +343,19 @@ PF_API int strategy_set_aux_security_feed(pf_strategy_t s,
 }
 #endif
 
+#ifdef PINEFORGE_HAS_NATIVE_SECURITY_FEED_V1
+PF_API int strategy_set_native_security_feed(pf_strategy_t s,
+                                             const char* timeframe,
+                                             const pf_bar_t* bars,
+                                             int n) {
+    if (!s || !timeframe || n < 0 || (n > 0 && !bars)) return -1;
+    const auto* native = reinterpret_cast<const pineforge::Bar*>(bars);
+    return static_cast<pineforge::BacktestEngine*>(s)
+                   ->set_native_security_feed(std::string(timeframe), native, n)
+        ? 0 : -1;
+}
+#endif
+
 /* See PF_ABI_VERSION doc in pineforge.h. */
 PF_API int pf_abi_version(void) { return PF_ABI_VERSION; }
 

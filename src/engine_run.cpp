@@ -1307,6 +1307,7 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
     validate_security_timeframes(security_input_tf_);
 
     init_security_eval_states_for_run(security_input_tf_);
+    prepare_native_security_feeds();
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
     if (aux_security_feed_enabled()) {
         prepare_aux_security_chart_ranges(input_bars, n_input,
@@ -1386,6 +1387,8 @@ void BacktestEngine::init_security_eval_states_for_run(
         state.historical_projections.clear();
         state.historical_projection_cursor = 0;
         state.historical_projection_feed_index = 0;
+        state.native_feed_index = -1;
+        state.native_bars_by_label.clear();
         state.aggregator = TimeframeAggregator();
         if (state.lower_tf_emulation || state.lower_tf_use_input) {
             continue;

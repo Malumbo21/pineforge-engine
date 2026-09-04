@@ -289,4 +289,130 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
 
 #endif  // PINEFORGE_HAS_AUX_SECURITY_FEED_V1
 
+
+// ---- native higher-timeframe request.security feeds -------------------------
+//
+// TradingView's request.security(syminfo.tickerid, "D", close) on an intraday
+// chart of CME_MINI:ES1! returns the 15:00 CT settlement, on NASDAQ:AAPL the
+// official closing print, on NSE:NIFTY the exchange's official OHLC -- values
+// no aggregation of the intraday feed produces (pinned 2026-09-04 by lab tv
+// limit-fill probes: 9/9 ES1!, 5/5 AAPL and 2/2 NIFTY fills equal the 1D
+// feed's close and none the last 15m close). The campaign holds those daily
+// bars; this path lets a completed daily bucket carry them while the
+// aggregator keeps deciding WHEN the bucket completes.
+
+bool BacktestEngine::set_native_security_feed(const std::string& timeframe,
+                                              const Bar* bars, int n) {
+    int seconds = 0;
+    try {
+        seconds = tf_to_seconds(timeframe);
+    } catch (...) {
+        seconds = 0;
+    }
+    if (timeframe.empty() || seconds == 0) {
+        last_error_ =
+            "native request.security feed requires a parseable timeframe";
+        return false;
+    }
+    auto existing = native_security_feeds_.begin();
+    while (existing != native_security_feeds_.end()
+           && existing->seconds != seconds) {
+        ++existing;
+    }
+    if (n == 0) {
+        if (existing != native_security_feeds_.end()) {
+            native_security_feeds_.erase(existing);
+        }
+        last_error_.clear();
+        return true;
+    }
+    if (n < 0 || bars == nullptr) {
+        last_error_ =
+            "native request.security feed requires bars and a positive count";
+        return false;
+    }
+    for (int i = 1; i < n; ++i) {
+        if (bars[i].timestamp <= bars[i - 1].timestamp) {
+            last_error_ =
+                "native request.security feed timestamps must be strictly increasing";
+            return false;
+        }
+    }
+    NativeSecurityFeed feed;
+    feed.tf = timeframe;
+    feed.seconds = seconds;
+    feed.bars.assign(bars, bars + n);
+    if (existing != native_security_feeds_.end()) {
+        *existing = std::move(feed);
+    } else {
+        native_security_feeds_.push_back(std::move(feed));
+    }
+    last_error_.clear();
+    return true;
+}
+
+
+void BacktestEngine::prepare_native_security_feeds() {
+    diag_native_security_substitutions_ = 0;
+    diag_native_security_misses_ = 0;
+    for (auto& state : security_eval_states_) {
+        state.native_feed_index = -1;
+        state.native_bars_by_label.clear();
+        if (native_security_feeds_.empty()) continue;
+        // Only an aggregating (coarser-than-input) request has buckets to
+        // substitute; passthrough, lower-TF emulation and input passthrough
+        // read the feed itself.
+        if (state.lower_tf_emulation || state.lower_tf_use_input
+            || !state.aggregator.is_active()) {
+            continue;
+        }
+        int requested_seconds = 0;
+        try {
+            requested_seconds = tf_to_seconds(state.tf);
+        } catch (...) {
+            requested_seconds = 0;
+        }
+        if (requested_seconds == 0) continue;
+        for (std::size_t i = 0; i < native_security_feeds_.size(); ++i) {
+            if (native_security_feeds_[i].seconds != requested_seconds) continue;
+            state.native_feed_index = static_cast<int>(i);
+            const auto& bars = native_security_feeds_[i].bars;
+            state.native_bars_by_label.reserve(bars.size());
+            for (const Bar& bar : bars) {
+                // Key by the label the aggregate carries: the covered session
+                // instant (OANDA's 17:00 stamp covers the 18:00 session, see
+                // session_covered_instant_ms) labelled exactly as this
+                // state's aggregator labels its own buckets.
+                const int64_t label = state.aggregator.bar_label_ms(
+                    session_covered_instant_ms(bar.timestamp,
+                                               syminfo_.timezone,
+                                               syminfo_.session));
+                // A later native bar under one label (a session the run's
+                // calendar coalesces) is the period's final print: keep it.
+                state.native_bars_by_label[label] = bar;
+            }
+            break;
+        }
+    }
+}
+
+
+bool BacktestEngine::substitute_native_security_bar(SecurityEvalState& state,
+                                                    Bar& bar) {
+    if (state.native_feed_index < 0) return false;
+    const auto found = state.native_bars_by_label.find(bar.timestamp);
+    if (found == state.native_bars_by_label.end()) {
+        ++diag_native_security_misses_;
+        return false;
+    }
+    const Bar& native = found->second;
+    bar.open = native.open;
+    bar.high = native.high;
+    bar.low = native.low;
+    bar.close = native.close;
+    bar.volume = native.volume;
+    ++diag_native_security_substitutions_;
+    return true;
+}
+
 }  // namespace pineforge

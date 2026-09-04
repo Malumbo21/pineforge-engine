@@ -544,6 +544,11 @@ void BacktestEngine::feed_security_eval_state(
         }
 
         Bar projected_bar = projection.bar;
+        // A projected bucket that reached its boundary is the exchange's
+        // bar wherever a native feed serves this timeframe.
+        if (projection.is_complete) {
+            substitute_native_security_bar(state, projected_bar);
+        }
         if (state.heikinashi) {
             apply_ha(projected_bar, projection.is_complete);
         }
@@ -568,6 +573,11 @@ void BacktestEngine::feed_security_eval_state(
     state.feed_count++;
     state.current_sub_bar_count = ab.sub_bar_count;
     if (ab.is_complete) {
+        // The aggregator decided WHEN the bucket completes; a native feed for
+        // this timeframe decides WHAT it closed at (the settlement / official
+        // print), before any Heikin-Ashi derivation. Partial (lookahead_on)
+        // peeks keep the running aggregate.
+        substitute_native_security_bar(state, ab.bar);
         if (state.heikinashi) apply_ha(ab.bar, /*commit=*/true);
         state.current_bar = ab.bar;
         state.eval_complete_count++;

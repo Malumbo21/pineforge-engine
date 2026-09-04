@@ -2432,6 +2432,16 @@ protected:
         std::vector<HistoricalSecurityProjection> historical_projections;
         std::size_t historical_projection_cursor = 0;
         std::size_t historical_projection_feed_index = 0;
+        // Native higher-timeframe feed routing, rebuilt per run by
+        // prepare_native_security_feeds(): the index into
+        // native_security_feeds_ serving this state's requested timeframe
+        // (-1: none, the aggregate stands), and that feed's bars keyed by
+        // the label this state's aggregator stamps on the same bucket --
+        // TimeframeAggregator::bar_label_ms of the native bar's covered
+        // session instant -- so a completed bucket finds its exchange bar by
+        // the timestamp the aggregate already carries.
+        int native_feed_index = -1;
+        std::unordered_map<int64_t, Bar> native_bars_by_label;
     };
 
     std::vector<SecurityEvalState> security_eval_states_;
@@ -2455,6 +2465,21 @@ protected:
     // The raw feed used by security aggregators in the active run. This is the
     // chart input TF on the legacy path and the auxiliary TF on the split path.
     std::string security_input_tf_;
+
+    // Native higher-timeframe request.security feeds: the exchange's own
+    // bars of one timeframe each (TradingView's "D" bar on an intraday chart
+    // is the settlement / official close, not the last intraday close). A
+    // completed request.security bucket of a fed timeframe takes the native
+    // bar's OHLCV; timing, other timeframes, chart and broker are untouched.
+    // Layout-unconditional like the aux feed's siblings above.
+    struct NativeSecurityFeed {
+        std::string tf;
+        int seconds = 0;
+        std::vector<Bar> bars;
+    };
+    std::vector<NativeSecurityFeed> native_security_feeds_;
+    int64_t diag_native_security_substitutions_ = 0;
+    int64_t diag_native_security_misses_ = 0;
 
     // --- Runtime trace state ---
     // Gated by ``trace_enabled_`` (default false) so production strategies
@@ -3079,6 +3104,12 @@ private:
     int  count_expected_script_bars(const Bar* input_bars, int n_input,
                                     bool needs_aggregation) const;
     void init_security_eval_states_for_run(const std::string& effective_input_tf);
+    // Native HTF feed routing (engine_aux_security.cpp): per-state label maps
+    // built after the evaluators' aggregators exist for this run, and the
+    // substitution a completed bucket applies. Returns whether `bar` was
+    // replaced by its native sibling.
+    void prepare_native_security_feeds();
+    bool substitute_native_security_bar(SecurityEvalState& state, Bar& bar);
     void prepare_historical_security_lookahead_projections(
         const Bar* input_bars, int n_input,
         const std::string& effective_input_tf);
@@ -3180,6 +3211,24 @@ public:
     bool set_aux_security_feed(const Bar* bars, int n,
                                const std::string& input_tf);
 #endif
+
+    // Copies the exchange's own bars of one higher timeframe for the
+    // request.security evaluators that request exactly it (see
+    // strategy_set_native_security_feed in pineforge.h). n == 0 clears that
+    // timeframe's feed. Routing is built per run once the evaluators exist.
+    bool set_native_security_feed(const std::string& timeframe,
+                                  const Bar* bars, int n);
+    bool native_security_feed_enabled() const {
+        return !native_security_feeds_.empty();
+    }
+    // Per-run diagnostics: completed buckets that took a native bar, and
+    // completed buckets of a fed timeframe that found none (kept aggregate).
+    int64_t native_security_substitutions() const {
+        return diag_native_security_substitutions_;
+    }
+    int64_t native_security_misses() const {
+        return diag_native_security_misses_;
+    }
 
     // Execute confirmed historical bars, then keep this exact instance alive
     // for realtime trade updates. The warmup feed must contain at least one

@@ -35,6 +35,10 @@ bool BacktestEngine::stream_begin(const Bar* warmup_bars, int n_warmup,
                 "auxiliary request.security feed supports historical native-chart runs only");
         }
 #endif
+        if (native_security_feed_enabled()) {
+            throw std::runtime_error(
+                "native request.security feed supports historical runs only");
+        }
         if (stream_phase_ == StreamPhase::REALTIME) {
             throw std::runtime_error("stream is already realtime");
         }
