@@ -23,8 +23,11 @@
  * 10.70, 10.70, 10.65, 10.87, 11.85 ... (call 6 = 10.65: a per-call buffer
  * would still hold 10.70 — only the bar-addressed ring drops it).
  *
- * Every-bar callers must stay byte-identical to the previous positional deque
- * in every context; the deque is reproduced here as the reference.
+ * Every-bar callers must stay byte-identical to the positional deque in every
+ * context; the deque is reproduced here as the reference, with one re-pin:
+ * an na source answers na (NYSE:F 1D, every-bar ta.lowest over a source that
+ * is na on every 4th bar answers na on exactly those bars, 11/11), where the
+ * old deque skipped the na and answered the window's other members.
  *
  * NDEBUG-PROOF: self-rolled CHECK with a failure counter; main() returns
  * nonzero on any failure.
@@ -99,6 +102,7 @@ struct RefHighest {
         buffer.push_back(src);
         while ((int)buffer.size() > length) buffer.pop_front();
         if ((int)buffer.size() < length) return na<double>();
+        if (is_na(src)) return na<double>();   // pinned 2026-09-04 (NYSE:F 1D): an na source answers na
         double hi = na<double>();
         for (int i = 0; i < (int)buffer.size(); i++)
             if (!is_na(buffer[i]) && (is_na(hi) || buffer[i] > hi)) hi = buffer[i];
@@ -108,6 +112,7 @@ struct RefHighest {
         if (buffer.empty()) return compute(src);
         buffer.back() = src;
         if ((int)buffer.size() < length) return na<double>();
+        if (is_na(src)) return na<double>();
         double hi = na<double>();
         for (int i = 0; i < (int)buffer.size(); i++)
             if (!is_na(buffer[i]) && (is_na(hi) || buffer[i] > hi)) hi = buffer[i];
@@ -123,6 +128,7 @@ struct RefLowest {
         buffer.push_back(src);
         while ((int)buffer.size() > length) buffer.pop_front();
         if ((int)buffer.size() < length) return na<double>();
+        if (is_na(src)) return na<double>();   // pinned 2026-09-04 (NYSE:F 1D): an na source answers na
         double lo = na<double>();
         for (int i = 0; i < (int)buffer.size(); i++)
             if (!is_na(buffer[i]) && (is_na(lo) || buffer[i] < lo)) lo = buffer[i];
@@ -132,6 +138,7 @@ struct RefLowest {
         if (buffer.empty()) return compute(src);
         buffer.back() = src;
         if ((int)buffer.size() < length) return na<double>();
+        if (is_na(src)) return na<double>();
         double lo = na<double>();
         for (int i = 0; i < (int)buffer.size(); i++)
             if (!is_na(buffer[i]) && (is_na(lo) || buffer[i] < lo)) lo = buffer[i];
@@ -605,6 +612,32 @@ static void test_never_written_slots_read_as_zero() {
     CHECK(call == 16);
 }
 
+
+// --- An na source answers na and leaves the cache alone (pinned 2026-09-04,
+// OANDA:XAUUSD 15: `ta.lowest(bar_index % 13 == 6 ? na : z, 10)` answers na
+// on the na call and the next valid call continues from the previous cache).
+static void test_na_source_answers_na_without_touching_the_cache() {
+    std::printf("test_na_source_answers_na_without_touching_the_cache\n");
+    ta::Lowest lo(10);
+    double last_valid = na<double>();
+    for (int b = 0; b <= 120; ++b) {
+        ta::BarContextScope scope(b, 0);
+        const bool valid_call = b % 13 == 5;
+        const bool na_call = b >= 100 && b % 13 == 6;
+        if (!valid_call && !na_call) continue;
+        if (na_call) {
+            CHECK(is_na(lo.compute(na<double>())));
+            continue;
+        }
+        const double src = 3000.0 - b;                  // falling: every valid call is a new minimum -> cache path
+        const double v = lo.compute(src);
+        if (b >= 9) { CHECK(near(v, src)); }
+        last_valid = v;
+    }
+    CHECK(!is_na(last_valid));
+    CHECK(!ta::bar_context().installed);
+}
+
 int main() {
     test_cadence7_pin();
     test_cadence9_pin();
@@ -616,6 +649,7 @@ int main() {
     test_cached_extremum_keeps_over_aliased_slot_until_expiry();
     test_new_extremum_precedes_expiry_rescan();
     test_never_written_slots_read_as_zero();
+    test_na_source_answers_na_without_touching_the_cache();
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

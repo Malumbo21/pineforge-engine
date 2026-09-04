@@ -105,7 +105,13 @@ public:
         double value;   // na: window not formed yet, or no written non-na member
         int bars_back;  // k of the extremum slot (0 = the current bar)
     };
-    explicit ExtremeRing(int length);
+    // na_src_answers_na: a direct ta.highest/lowest call answers na on an na
+    // source (pinned 2026-09-04, NYSE:F 1D every-bar ta.lowest over a source
+    // na on every 4th bar: na on exactly those bars, 11/11; OANDA:XAUUSD 15
+    // conditional calls likewise); the composites (Stoch, WPR, Range) keep the
+    // finding-331 oracle instead -- their extrema stay live over the non-na
+    // members -- and construct with false.
+    explicit ExtremeRing(int length, bool na_src_answers_na = true);
     // advance = true  -> compute():   records src for the context's current bar
     // advance = false -> recompute(): rewrites the current bar's slot
     // An na src is recorded as a gap (skipped by the extremum, never a member).
@@ -129,6 +135,7 @@ private:
     bool saved_cached_ = false;
     double saved_cval_ = 0.0;
     long long saved_cbar_ = 0;
+    bool na_src_answers_na_ = true;
 };
 
 class RMA {
@@ -263,7 +270,7 @@ class Highest {
     ExtremeRing ring_;
 
 public:
-    explicit Highest(int length);
+    explicit Highest(int length, bool na_src_answers_na = true);
     double compute(double src);
     double recompute(double src);
 };
@@ -274,7 +281,7 @@ class Lowest {
     ExtremeRing ring_;
 
 public:
-    explicit Lowest(int length);
+    explicit Lowest(int length, bool na_src_answers_na = true);
     double compute(double src);
     double recompute(double src);
 };
@@ -700,7 +707,7 @@ class HighestBars {
     ExtremeRing ring_;
 
 public:
-    explicit HighestBars(int length);
+    explicit HighestBars(int length, bool na_src_answers_na = true);
     double compute(double src);
     double recompute(double src);
 };
@@ -711,7 +718,7 @@ class LowestBars {
     ExtremeRing ring_;
 
 public:
-    explicit LowestBars(int length);
+    explicit LowestBars(int length, bool na_src_answers_na = true);
     double compute(double src);
     double recompute(double src);
 };
@@ -1126,7 +1133,7 @@ class Range {
     Highest highest_;
     Lowest lowest_;
 public:
-    explicit Range(int length) : highest_(length), lowest_(length) {}
+    explicit Range(int length) : highest_(length, false), lowest_(length, false) {}
     double compute(double src);
     double recompute(double src);
 };

@@ -64,9 +64,13 @@ static void test_highest_warmup_evict_na() {
     CHECK(near(hi.compute(1.0), 2.0));  // window {2,1,1} -> 9 evicted, max 2
     CHECK(near(hi.compute(1.0), 1.0));  // window {1,1,1} -> all evicted, max 1
 
-    // na input advances the positional window as a gap (TV semantics, pinned
-    // by the finding-331 oracle: extrema stay live over the non-na members).
-    CHECK(near(hi.compute(na<double>()), 1.0));  // window {1,1,na} -> max 1
+    // A direct ta.highest answers na on an na source (pinned 2026-09-04,
+    // NYSE:F 1D every-bar ta.lowest over a source na on every 4th bar: na on
+    // exactly those bars, 11/11); the slot stays a gap the next bar skips.
+    // The finding-331 "stay live over the non-na members" reading survives
+    // inside the composites (Stoch, WPR, Range), which construct with
+    // na_src_answers_na = false.
+    CHECK(is_na(hi.compute(na<double>())));      // window {1,1,na} -> na on the na bar
     CHECK(near(hi.compute(0.5), 1.0));           // window {1,na,0.5} -> max 1
 }
 
@@ -87,7 +91,7 @@ static void test_lowest_warmup_evict_na() {
     CHECK(near(lo.compute(7.0), 7.0));   // {9,8,7} -> 1 evicted, min 7
     CHECK(near(lo.compute(6.0), 6.0));   // {8,7,6} -> min 6
 
-    CHECK(near(lo.compute(na<double>()), 6.0));  // {7,6,na} -> min 6 (gap)
+    CHECK(is_na(lo.compute(na<double>())));      // na source -> na (2026-09-04 pin)
     CHECK(near(lo.compute(10.0), 6.0));          // {6,na,10} -> min 6
 }
 

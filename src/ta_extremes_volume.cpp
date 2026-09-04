@@ -73,10 +73,11 @@ inline std::size_t ring_slot(long long bar, long long K) {
 
 }  // namespace
 
-ExtremeRing::ExtremeRing(int length)
+ExtremeRing::ExtremeRing(int length, bool na_src_answers_na)
     : length_(length),
       values_(length > 0 ? static_cast<std::size_t>(length) + 1 : 0, na<double>()),
-      written_(length > 0 ? static_cast<std::size_t>(length) + 1 : 0, 0) {}
+      written_(length > 0 ? static_cast<std::size_t>(length) + 1 : 0, 0),
+      na_src_answers_na_(na_src_answers_na) {}
 
 ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max) {
     Result out{na<double>(), 0};
@@ -148,6 +149,15 @@ ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max)
         cval_ = best;
         cbar_ = bar - best_k;    // the implied bar of an aliased slot
     };
+    if (is_na(src) && cached_ && na_src_answers_na_) {
+        // An na source answers na and leaves the cache alone (pinned
+        // 2026-09-04 on OANDA:XAUUSD 15: a `ta.lowest(na, 10)` call between
+        // two valid calls answers na and the next valid call continues from
+        // the previous cache); the slot keeps its written na, which later
+        // rescans skip.
+        if (bar - origin < static_cast<long long>(length_) - 1) return out;
+        return out;
+    }
     if (!cached_) {
         cached_ = true;
         cval_ = src;
@@ -174,8 +184,8 @@ ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max)
 
 // --- Highest ---
 
-Highest::Highest(int length)
-    : ring_(length) {}
+Highest::Highest(int length, bool na_src_answers_na)
+    : ring_(length, na_src_answers_na) {}
 
 double Highest::compute(double src) {
     return ring_.update(src, /*advance=*/true, /*want_max=*/true).value;
@@ -187,8 +197,8 @@ double Highest::recompute(double src) {
 
 // --- Lowest ---
 
-Lowest::Lowest(int length)
-    : ring_(length) {}
+Lowest::Lowest(int length, bool na_src_answers_na)
+    : ring_(length, na_src_answers_na) {}
 
 double Lowest::compute(double src) {
     return ring_.update(src, /*advance=*/true, /*want_max=*/false).value;
@@ -387,7 +397,7 @@ double Median::compute(double src) {
 // (0 = the current bar, negative offsets as TV reports them). An na input is
 // recorded as a positional gap and answers na on that bar.
 
-HighestBars::HighestBars(int length) : ring_(length) {}
+HighestBars::HighestBars(int length, bool na_src_answers_na) : ring_(length, na_src_answers_na) {}
 
 double HighestBars::compute(double src) {
     const ExtremeRing::Result r = ring_.update(src, /*advance=*/true, /*want_max=*/true);
@@ -403,7 +413,7 @@ double HighestBars::recompute(double src) {
 
 // --- LowestBars ---
 
-LowestBars::LowestBars(int length) : ring_(length) {}
+LowestBars::LowestBars(int length, bool na_src_answers_na) : ring_(length, na_src_answers_na) {}
 
 double LowestBars::compute(double src) {
     const ExtremeRing::Result r = ring_.update(src, /*advance=*/true, /*want_max=*/false);
