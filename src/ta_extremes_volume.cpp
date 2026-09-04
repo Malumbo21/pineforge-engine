@@ -129,8 +129,16 @@ ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max)
         int best_k = 0;
         for (int k = length_ - 1; k >= 0; --k) {
             const std::size_t i = ring_slot(bar - k, K);
-            if (!written_[i]) continue;          // never written: skipped, not na
-            const double v = values_[i];
+            // Never written reads as 0 -- pinned 2026-09-04 on BINANCE:BTCUSDT
+            // 1D (`if bar_index % 13 == 5: v = ta.lowest(low, 10)`: every call
+            // answers 0 while the window holds never-written slots; the same
+            // cadence's ta.highest(-close, 10) answers 0 too, ta.highest(high,
+            // 10) is unaffected). Every scraped tape in the population is a
+            // deep-backtest export that starts cold at the range start, so
+            // this is the rule the campaign grades against (the round-5
+            // "skip" reading was wrong: shiroi-qqe's stops on five 1D lanes
+            // are TV's SL = 0 from exactly these reads).
+            const double v = written_[i] ? values_[i] : 0.0;
             if (is_na(v)) continue;              // written gap: skipped
             if (is_na(best) || (want_max ? v > best : v < best)) {
                 best = v;

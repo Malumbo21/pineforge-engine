@@ -8,7 +8,8 @@
  * call site owns K = length + 1 slots addressed by bar_index % K; a call on
  * bar b writes slot[b % K] = src and returns the extremum over the WRITTEN
  * slots (b - k) % K, k in [0, length). Stale values from earlier executions
- * survive in slots not rewritten, never-written slots are skipped, and the
+ * survive in slots not rewritten, never-written slots read as 0 (pinned
+ * 2026-09-04 on BTCUSDT 1D at cadence 13), and the
  * result is na iff bar_index < length - 1 — NOT until `length` executions.
  *
  *   pin-ring-highest.pine:  if bar_index % 7 == 3
@@ -570,6 +571,40 @@ static void test_new_extremum_precedes_expiry_rescan() {
     CHECK(!ta::bar_context().installed);
 }
 
+
+// --- Never-written slots read as 0 (pinned 2026-09-04, BINANCE:BTCUSDT 1D,
+// `if bar_index % 13 == 5`, K = 11): ta.lowest(low, 10) answers na on the
+// first call (bar 5 < 9), 0 on calls 2..10 while a never-written slot sits
+// in the scanned window, then the stale positive minimum from call 11 on
+// once every residue has been written (TV: 77.3k, 84.5k); ta.highest(-close,
+// 10) mirrors it (0, then negative); ta.highest(high, 10) is unaffected. ----
+static void test_never_written_slots_read_as_zero() {
+    std::printf("test_never_written_slots_read_as_zero\n");
+    ta::Lowest lo(10);
+    ta::Highest hi(10);
+    ta::Highest hneg(10);
+    int call = 0;
+    for (int b = 0; b <= 200; ++b) {
+        ta::BarContextScope scope(b, 0);
+        if (b % 13 != 5) continue;
+        ++call;
+        const double price = 100000.0 + b;         // rising, so every call is a fresh high, never a new low
+        const double l = lo.compute(price);
+        const double h = hi.compute(price);
+        const double n = hneg.compute(-price);
+        if (call == 1) { CHECK(is_na(l)); CHECK(is_na(h)); CHECK(is_na(n)); continue; }
+        CHECK(near(h, price));                     // a rising series: the current high wins
+        if (call <= 10) {                          // residues 5,7,9,0,2,4,6,8,10,1 written so far: a slot in the window is still unwritten
+            CHECK(near(l, 0.0));
+            CHECK(near(n, 0.0));
+        } else {                                   // call 11 writes residue 3: every slot written, stale values return
+            CHECK(!is_na(l) && l > 0.0);
+            CHECK(!is_na(n) && n < 0.0);
+        }
+    }
+    CHECK(call == 16);
+}
+
 int main() {
     test_cadence7_pin();
     test_cadence9_pin();
@@ -580,6 +615,7 @@ int main() {
     test_htf_context_sanity();
     test_cached_extremum_keeps_over_aliased_slot_until_expiry();
     test_new_extremum_precedes_expiry_rescan();
+    test_never_written_slots_read_as_zero();
     std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
