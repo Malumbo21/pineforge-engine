@@ -83,6 +83,10 @@
  *  When defined, #strategy_set_aux_security_feed is available. */
 #define PINEFORGE_HAS_AUX_SECURITY_FEED_V1 1
 
+/** Feature probe for native higher-timeframe request.security feeds.
+ *  When defined, #strategy_set_native_security_feed is available. */
+#define PINEFORGE_HAS_NATIVE_SECURITY_FEED_V1 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -712,6 +716,32 @@ PF_API int strategy_set_aux_security_feed(pf_strategy_t s,
                                           const pf_bar_t* bars,
                                           int n,
                                           const char* input_tf);
+#endif
+
+#ifdef PINEFORGE_HAS_NATIVE_SECURITY_FEED_V1
+/** Copy the exchange's OWN bars of one higher timeframe for same-symbol
+ *  request.security calls that request exactly that timeframe.
+ *
+ *  On intraday charts of CME futures and US/Indian equities TradingView's
+ *  request.security(syminfo.tickerid, "D", close) returns the exchange's
+ *  daily bar -- the 15:00 CT settlement on ES1!/NQ1!, the official closing
+ *  print on NASDAQ/NYSE/NSE -- which no aggregation of the intraday feed can
+ *  reproduce. With a native feed installed for @p timeframe ("D", "1D", "W",
+ *  ...), every completed request.security bucket of that timeframe carries
+ *  the native bar's OHLCV (matched by the bucket's own label: the session-day
+ *  stamp for D/W/M, the grid open for intraday) instead of the aggregate;
+ *  bucket TIMING -- when the bar completes relative to the chart -- and every
+ *  other timeframe's request are unchanged, and so are chart OHLCV, broker
+ *  fills and bar_index. A completed bucket with no native bar keeps its
+ *  aggregate (counted, not fatal). Bars must be strictly increasing; arrays
+ *  are copied; pass @p n == 0 to clear the feed for @p timeframe. Historical
+ *  runs only: stream_begin() fails closed while a native feed is installed.
+ *
+ *  @return 0 on success, -1 for a null strategy or invalid input. */
+PF_API int strategy_set_native_security_feed(pf_strategy_t s,
+                                             const char* timeframe,
+                                             const pf_bar_t* bars,
+                                             int n);
 #endif
 
 /** Returns the error message captured by the most recent #run_backtest /
