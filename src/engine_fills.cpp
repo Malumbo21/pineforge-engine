@@ -3631,12 +3631,16 @@ void BacktestEngine::apply_filled_order_to_state(
     // sizing_equity and THIS gate's flat-open arm would decline ordinary
     // flat opens whenever cash_value > equity; pct > 100 (leveraged sizing)
     // breaks the invariant too. Frozen CASH / pct>100 orders keep their
-    // freeze and skip this gate. CASH (and FIXED) default MARKET entries are
-    // instead admitted by the unified design-market-entry-affordability gate
+    // freeze and skip this gate. CASH (and FIXED) default MARKET entries, and
+    // since round 6 the pct>100 percent_of_equity default MARKET entries as
+    // well, are instead admitted by the unified
+    // design-market-entry-affordability gate
     // below (resulting position costed at max(signal, fill) against the
     // placement MTM equity) — a cash 20k on 10k capital account at margin 100
     // is over-notional there and declines, exactly like a fixed-qty order of
-    // the same notional (pin-afford-gapdown).
+    // the same notional (pin-afford-gapdown), and so does percent_of_equity
+    // 200 on the same account (pin-pct-afford: TV 0 entries; at margin 50
+    // both size 1,982 F shares and fill).
     //
     // Frozen MARKET entries and frozen RAW market orders are checked; an
     // opposite-direction RAW fill only CLOSES the position
@@ -4017,8 +4021,9 @@ void BacktestEngine::apply_filled_order_to_state(
     // market-entry admission (rule, pins and evidence on
     // PendingOrder::affordability_placement_equity, engine.hpp; the placement
     // half is in strategy_entry). The quantity is exactly what the market
-    // kernel is about to dispatch (the frozen CASH default, the FIXED default,
-    // or the lot-floored explicit qty), a same-direction add is costed as
+    // kernel is about to dispatch (the frozen CASH or >100%-of-equity default,
+    // the FIXED default, or the lot-floored explicit qty), a same-direction
+    // add is costed as
     // held + add with "held" FROZEN AT PLACEMENT (a same-tick sibling that
     // filled first is not re-costed here — thula INR short pair, TV rows in
     // test_margin_call), a reversal as its own new side only, and the price is

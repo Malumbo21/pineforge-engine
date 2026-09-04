@@ -193,18 +193,31 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     // half in apply_filled_order_to_state costs the same quantity at
     // max(signal price, slipped fill) against the placement snapshot.
     //
-    // Scope: explicit-qty entries and DEFAULT FIXED / CASH sizing. Default
-    // percent_of_equity entries never reach it: their quantity is frozen at
+    // Scope: explicit-qty entries, DEFAULT FIXED / CASH sizing, and DEFAULT
+    // percent_of_equity sizing ABOVE 100% (round 6, pin-pct-afford: NYSE:F 15
+    // 2025-04-01..07-01, percent_of_equity 200 on 10,000 at margin 100 ->
+    // TV filled 0 of the every-50th-bar entries, exactly like strategy.cash
+    // 20,000 on the same account — pin-cash-afford-m100 0 entries, -m50
+    // 1,982 shares filled). A percent above 100/margin% sizes a notional the
+    // account cannot carry, and the broker declines it on the same rule as
+    // any other over-notional market entry. Default percent_of_equity
+    // entries at or below 100% never reach it: their quantity is frozen at
     // this bar's close further below (frozen_default_market_qty) and their
     // admission is the separately pinned KI-54 / gap-reject / gross-admission
-    // family in apply_filled_order_to_state. Priced (limit/stop) entries carry
+    // family in apply_filled_order_to_state, whose floor invariant
+    // (qty * sizing_price <= sizing_equity) makes this placement check a
+    // structural no-op there anyway. The two scopes partition on the same
+    // default_qty_value_ <= 100 test the KI-54 gate uses, so exactly 100%
+    // is byte-identical. Priced (limit/stop) entries carry
     // their own price and their own admission (KI-62). margin_pct == 0
     // disables the check, as it does in TradingView.
     const bool affordability_scope =
         std::isnan(limit_price) && std::isnan(stop_price)
         && (!std::isnan(qty)
             || default_qty_type_ == QtyType::FIXED
-            || default_qty_type_ == QtyType::CASH);
+            || default_qty_type_ == QtyType::CASH
+            || (default_qty_type_ == QtyType::PERCENT_OF_EQUITY
+                && default_qty_value_ > 100.0));
     bool affordability_close_only = false;
     double affordability_placement_equity =
         std::numeric_limits<double>::quiet_NaN();
@@ -223,8 +236,10 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             // The on-tick signal close is the price the rule is stated on
             // (slippage ticks are in neither basis). The quantity is exactly
             // the one the fill kernel dispatches: the lot-floored explicit
-            // contracts, the FIXED default, or the CASH default frozen at its
-            // slipped sizing basis (frozen_default_market_qty).
+            // contracts, the FIXED default, or the CASH / >100%
+            // percent_of_equity default frozen at its slipped sizing basis
+            // (frozen_default_market_qty — the same call that fills
+            // order.frozen_default_qty below).
             const double signal_price = round_to_mintick(current_bar_.close);
             const double own_qty = std::isnan(qty)
                 ? frozen_default_market_qty(/*is_buy=*/is_long)
