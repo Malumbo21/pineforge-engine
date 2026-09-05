@@ -601,6 +601,7 @@ struct ExitTrailState {
     double activation_level = std::numeric_limits<double>::quiet_NaN();
     double trail_offset_price = std::numeric_limits<double>::quiet_NaN();
     double best_price = std::numeric_limits<double>::quiet_NaN();
+    double mintick = std::numeric_limits<double>::quiet_NaN();
     bool has_trail = false;
     bool trail_active = false;
     bool exits_at_activation = false;
@@ -608,10 +609,13 @@ struct ExitTrailState {
 
 // Initialize per-bar trail state from the strategy.exit parameters.
 // trail_points is interpreted as ticks (TV ceils to next whole tick before
-// applying), so the activation level lands on a mintick boundary AWAY from
-// entry. The engine previously kept the raw float and rounded the activation
-// level to nearest mintick at fill time, which produced a 1-tick-toward-entry
-// bias on roughly 40% of community/scalping-strategy trades.
+// applying — with the kTrailPointsCeilEps tolerance, see engine_internal.hpp),
+// so the activation level lands on a mintick boundary AWAY from entry. The
+// engine previously kept the raw float and rounded the activation level to
+// nearest mintick at fill time, which produced a 1-tick-toward-entry bias
+// on roughly 40% of community/scalping-strategy trades. The level itself
+// is materialized on the tick grid (snap_trail_level_to_tick_grid) so a bar
+// extreme sitting exactly on it counts as reached.
 ExitTrailState compute_exit_trail_state(bool is_long, double trail_points,
                                         double trail_price,
                                         double trail_offset, double entry_price,
@@ -624,14 +628,16 @@ ExitTrailState compute_exit_trail_state(bool is_long, double trail_points,
     // level two different ways. trail_points takes precedence if both are set.
     s.has_trail = !std::isnan(trail_points) || !std::isnan(trail_price);
     s.best_price = trail_best_start;
+    s.mintick = syminfo_mintick;
     if (!s.has_trail) {
         return s;
     }
     if (!std::isnan(trail_points)) {
-        const double trail_ticks = std::ceil(trail_points);
-        s.activation_level = is_long
-            ? (entry_price + trail_ticks * syminfo_mintick)
-            : (entry_price - trail_ticks * syminfo_mintick);
+        const double trail_ticks = trail_points_to_ticks(trail_points);
+        s.activation_level = snap_trail_level_to_tick_grid(
+            is_long ? (entry_price + trail_ticks * syminfo_mintick)
+                    : (entry_price - trail_ticks * syminfo_mintick),
+            syminfo_mintick);
     } else {
         // Absolute activation price level (no entry-relative tick rounding).
         s.activation_level = trail_price;
@@ -664,7 +670,7 @@ ExitTrailState compute_exit_trail_state(bool is_long, double trail_points,
     // 2025-03-31 03:45Z @1.08330, atr*2 ~ 0.0006 "ticks" -> activation
     // ceil -> 1 tick = 1.08329, offset floor -> 0; exit bar O 1.08330
     // L 1.08314: TV 1.08329 (the activation), engine 1.08314 (the low).
-    const double trail_offset_ticks = std::floor(trail_offset);  // NaN stays NaN
+    const double trail_offset_ticks = trail_offset_to_ticks(trail_offset);  // NaN stays NaN
     const bool zero_tick_offset = (trail_offset_ticks == 0.0);   // explicit [0, 1)
     if (!std::isnan(trail_offset_ticks) && !zero_tick_offset) {
         s.trail_offset_price = trail_offset_ticks * syminfo_mintick;
@@ -716,8 +722,13 @@ double active_exit_trail_level(const ExitTrailState& s, bool is_long) {
     if (std::isnan(s.trail_offset_price)) {
         return s.activation_level;
     }
-    return is_long ? (s.best_price - s.trail_offset_price)
-                   : (s.best_price + s.trail_offset_price);
+    // best -/+ K ticks is a tick count too: 9.89 + 1 tick must equal the
+    // 9.90 high that touches it (NYSE:F 15m 2025-04-03 14:00Z, `lab tv`
+    // trail-eq-S-off1: TV fills @9.90 on that bar).
+    return snap_trail_level_to_tick_grid(
+        is_long ? (s.best_price - s.trail_offset_price)
+                : (s.best_price + s.trail_offset_price),
+        s.mintick);
 }
 
 // Open-bar gap shortcut for non-entry bars: if bar.open already breaches an
@@ -732,21 +743,33 @@ bool try_exit_open_gap_fill(const Bar& bar, double tick_open, bool is_long,
                             const ExitTrailState& trail,
                             ExitPathFill* out_fill) {
     const double trail_level = active_exit_trail_level(trail, is_long);
-    auto fill_at_open = [&](bool is_limit) {
+    auto fill_at_open = [&](bool is_limit, bool trail_level_at_open = false) {
         out_fill->should_fill = true;
         out_fill->fill_price = bar.open;
         out_fill->is_limit = is_limit;
         out_fill->at_bar_open = true;
+        out_fill->open_is_trail_level = trail_level_at_open;
         return true;
     };
+    // An exit-at-activation trail whose activation the open already sits
+    // past (in the favourable direction) ARMS at the open with best = open
+    // and fires at open -/+ 0: that price is the trail's LEVEL, not a print
+    // the order gapped through, so it is flagged for the directional level
+    // snap (sub-tick open 196.135 -> 196.13 for a long exit; the raw-print
+    // nearest rounding printed 196.14). A trail the open gaps through in the
+    // ADVERSE direction (first test) keeps the raw-print booking.
     if (is_long) {
         if (!std::isnan(trail_level) && bar.open <= trail_level) return fill_at_open(false);
-        if (trail.exits_at_activation && bar.open >= trail.activation_level) return fill_at_open(false);
+        if (trail.exits_at_activation && bar.open >= trail.activation_level) {
+            return fill_at_open(false, /*trail_level_at_open=*/true);
+        }
         if (has_stop && tick_open <= stop_price) return fill_at_open(false);
         if (has_limit && tick_open >= limit_price) return fill_at_open(true);
     } else {
         if (!std::isnan(trail_level) && bar.open >= trail_level) return fill_at_open(false);
-        if (trail.exits_at_activation && bar.open <= trail.activation_level) return fill_at_open(false);
+        if (trail.exits_at_activation && bar.open <= trail.activation_level) {
+            return fill_at_open(false, /*trail_level_at_open=*/true);
+        }
         if (has_stop && tick_open >= stop_price) return fill_at_open(false);
         if (has_limit && tick_open <= limit_price) return fill_at_open(true);
     }

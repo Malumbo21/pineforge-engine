@@ -4356,7 +4356,8 @@ void BacktestEngine::apply_filled_order_to_state(
         // closing trade that no bar-boundary sample ever sees.
         double off = std::isnan(order.trail_offset)
                          ? 0.0
-                         : std::floor(order.trail_offset) * syminfo_mintick_;
+                         : internal::trail_offset_to_ticks(order.trail_offset)
+                               * syminfo_mintick_;
         fold_exit_trail_peak_ = (position_side_ == PositionSide::LONG)
                                     ? fill_price + off
                                     : fill_price - off;
@@ -6239,7 +6240,11 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
         if (exit_fill.should_fill) {
             // finding-446: an open-gap fill is the raw bar open; a level
             // fill keeps its directional / limit-or-better snap downstream.
-            fill_price = exit_fill.at_bar_open
+            // A one-shot trail arming AT the open fills at its level
+            // open -/+ 0 (open_is_trail_level): a computed level, snapped
+            // directionally like every other trail fill (AAPL 196.135 ->
+            // 196.13 sell / 193.665 -> 193.67 buy, round 7 family G).
+            fill_price = exit_fill.at_bar_open && !exit_fill.open_is_trail_level
                 ? bar_fill_price(exit_fill.fill_price)
                 : exit_fill.fill_price;
             should_fill = true;
