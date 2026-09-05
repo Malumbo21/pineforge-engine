@@ -188,6 +188,36 @@ void BacktestEngine::prepare_aux_security_chart_ranges(
 }
 
 
+// The calling chart bar's nominal close -- TradingView's time_close of the
+// native bar this slice belongs to: a calendar chart bar closes at its
+// period's nominal (last traded session-day) close whatever the slice holds
+// -- Fri 17:00 ET for OANDA:XAUUSD's 07-03-stamped daily bar although its
+// data ends 12:45 -- and an intraday chart bar at its grid end. An OTC
+// calendar bucket the next auxiliary bar leaves completes on the slice's
+// last bar exactly when this close reaches the period's
+// (TimeframeAggregator::feed(bar, next_input_ms, calling_close_ms); lab tv
+// oanda1d pin, 2026-09-05). current_bar_ is the native chart bar the run
+// loop set before calling here.
+int64_t BacktestEngine::aux_security_calling_close_ms() const {
+    const CalendarPeriod chart_period = calendar_period_for(input_tf_);
+    if (chart_period != CalendarPeriod::NONE) {
+        return session_period_last_traded_close_ms(
+            session_covered_instant_ms(current_bar_.timestamp,
+                                       syminfo_.timezone, syminfo_.session),
+            syminfo_.timezone, syminfo_.session, chart_period);
+    }
+    int chart_seconds = 0;
+    try {
+        chart_seconds = tf_to_seconds(input_tf_);
+    } catch (...) {
+        chart_seconds = 0;
+    }
+    return chart_seconds > 0
+        ? current_bar_.timestamp + static_cast<int64_t>(chart_seconds) * 1000
+        : 0;
+}
+
+
 void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
     const std::size_t idx = static_cast<std::size_t>(chart_index);
     if (idx >= aux_security_chart_begin_.size()
@@ -198,35 +228,17 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
     const std::size_t begin = aux_security_chart_begin_[idx];
     const std::size_t end = aux_security_chart_end_[idx];
 
-    // The calling chart bar's nominal close -- TradingView's time_close of
-    // the native bar this slice belongs to: a calendar chart bar closes at
-    // its period's nominal (last traded session-day) close whatever the
-    // slice holds -- Fri 17:00 ET for OANDA:XAUUSD's 07-03-stamped daily
-    // bar although its data ends 12:45 -- and an intraday chart bar at its
-    // grid end. An OTC calendar bucket the next auxiliary bar leaves
-    // completes on the slice's last bar exactly when this close reaches the
-    // period's (TimeframeAggregator::feed(bar, next_input_ms,
-    // calling_close_ms); lab tv oanda1d pin, 2026-09-05). current_bar_ is
-    // the native chart bar the run loop set before calling here.
-    {
-        const CalendarPeriod chart_period = calendar_period_for(input_tf_);
-        if (chart_period != CalendarPeriod::NONE) {
-            security_calling_close_ms_ = session_period_last_traded_close_ms(
-                session_covered_instant_ms(current_bar_.timestamp,
-                                           syminfo_.timezone, syminfo_.session),
-                syminfo_.timezone, syminfo_.session, chart_period);
-        } else {
-            int chart_seconds = 0;
-            try {
-                chart_seconds = tf_to_seconds(input_tf_);
-            } catch (...) {
-                chart_seconds = 0;
-            }
-            security_calling_close_ms_ = chart_seconds > 0
-                ? current_bar_.timestamp
-                      + static_cast<int64_t>(chart_seconds) * 1000
-                : 0;
-        }
+    security_calling_close_ms_ = aux_security_calling_close_ms();
+
+    // A first-bucket-latched evaluator (calling_open_latches_first) starts
+    // every chart bar's slice live and is deferred once its first bucket of
+    // the slice has been published.
+    for (auto& state : security_eval_states_) {
+        state.first_bucket_published = false;
+        state.deferred_aux.clear();
+        state.slice_open_label = begin < end
+            ? state.aggregator.bucket_open_ms(aux_security_bars_[begin].timestamp)
+            : 0;
     }
 
     // Lower-TF arrays belong to the native chart slice, not a raw UTC bucket.
@@ -243,8 +255,31 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
             ? aux_security_bars_[i + 1].timestamp : 0;
         for (auto& state : security_eval_states_) {
             if (!state.lower_tf_array_requested) {
+                if (state.calling_open_latches_first
+                    && state.first_bucket_published) {
+                    // TradingView reads the calling bar's FIRST intrabar:
+                    // the chart body runs on the first bucket's
+                    // publication, the rest of the slice follows it
+                    // (feed_deferred_aux_security_for_chart_bar).
+                    state.deferred_aux.push_back(
+                        {aux_bar, security_next_input_ms_,
+                         calling_bar_complete});
+                    continue;
+                }
+                const int64_t published_before = state.eval_complete_count;
                 feed_security_at_calling_bar_boundary(
                     state, aux_bar, calling_bar_complete);
+                // The slice's first bucket is published: a completion
+                // labelled at or after the slice's first bucket open. An
+                // older label is the previous slice's pending tail emitted
+                // on this boundary (the Thanksgiving 21:57 singleton on
+                // Black Friday's first minute): it precedes this bar's
+                // first bucket in the requested series and does not latch.
+                if (state.calling_open_latches_first
+                    && state.eval_complete_count > published_before
+                    && state.last_published_label >= state.slice_open_label) {
+                    state.first_bucket_published = true;
+                }
                 continue;
             }
             if (security_input_precedes_range_start(state, aux_bar.timestamp)) {
@@ -323,6 +358,37 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
         }
         state.lower_tf_input_buffer.clear();
     }
+}
+
+
+void BacktestEngine::feed_deferred_aux_security_for_chart_bar(int chart_index) {
+    (void)chart_index;
+    bool any = false;
+    for (const auto& state : security_eval_states_) {
+        if (state.calling_open_latches_first && !state.deferred_aux.empty()) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return;
+    security_calling_close_ms_ = aux_security_calling_close_ms();
+    for (auto& state : security_eval_states_) {
+        if (!state.calling_open_latches_first || state.deferred_aux.empty()) {
+            continue;
+        }
+        // Move the slice out first: feeding never re-enters the deferral
+        // (first_bucket_published stays set until the next chart bar's
+        // slice resets it), but the buffer must not be appended to while
+        // it is walked.
+        std::vector<SecurityEvalState::DeferredAuxBar> held;
+        held.swap(state.deferred_aux);
+        for (const auto& d : held) {
+            security_next_input_ms_ = d.next_input_ms;
+            feed_security_at_calling_bar_boundary(state, d.bar,
+                                                  d.calling_bar_complete);
+        }
+    }
+    security_calling_close_ms_ = 0;
 }
 
 #endif  // PINEFORGE_HAS_AUX_SECURITY_FEED_V1

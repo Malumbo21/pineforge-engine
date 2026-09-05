@@ -213,8 +213,14 @@ static void test_change_cross_family() {
     CHECK(crossover.compute(3.0, 2.0));   // previous <=, current >
     CHECK(!crossover.recompute(2.0, 3.0));
 
+    // The first valid bar after na is NOT an edge: TradingView fires neither
+    // crossover nor crossunder there (lab tv cross-na-edge-btc1d, 2026-09-05;
+    // pinned bar by bar in tests/test_ltf_lookahead_first_bucket.cpp). The
+    // edge needs a valid previous value on the other side.
     ta::Crossover crossover_after_na;
     CHECK(!crossover_after_na.compute(na<double>(), 2.0));
+    CHECK(!crossover_after_na.compute(3.0, 2.0));
+    CHECK(!crossover_after_na.compute(1.0, 2.0));
     CHECK(crossover_after_na.compute(3.0, 2.0));
 
     ta::Crossunder crossunder;
@@ -224,6 +230,8 @@ static void test_change_cross_family() {
 
     ta::Crossunder crossunder_after_na;
     CHECK(!crossunder_after_na.compute(na<double>(), -2.0));
+    CHECK(!crossunder_after_na.compute(-3.0, -2.0));
+    CHECK(!crossunder_after_na.compute(-1.0, -2.0));
     CHECK(crossunder_after_na.compute(-3.0, -2.0));
 
     ta::Cross cross;

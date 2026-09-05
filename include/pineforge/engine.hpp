@@ -2544,6 +2544,53 @@ protected:
         // lookahead_off only), lower-TF arrays and calendar / same-TF
         // requests. False (the default) means "not applicable".
         bool calling_close_completes_partial = false;
+        // Plain ``request.security`` with a requested TF strictly finer than
+        // script_tf, served by the auxiliary finer feed (the split-feed
+        // path), under ``lookahead_on``: TradingView's merge takes the FIRST
+        // intrabar of the calling chart bar and holds it for the bar -- on
+        // the BINANCE:BTCUSDT 1D chart ``request.security(tickerid, "15",
+        // ta.rsi(close, 14)[1], lookahead_on)`` reads, on every daily bar,
+        // the 15m RSI of the previous day's LAST bucket, i.e. ``rsi[1]``
+        // evaluated on the day's first 15m bucket, na on the range's first
+        // bar (lab tv notrade-ltf-sample-btc1d, 2025-04-01..20, 18/18,
+        // 2026-09-05), so a plain ``expr`` reads the day's first bucket and
+        // ``expr[k]`` the k-th bucket before it, at the requested cadence.
+        // The legacy gate above (publish_gate_tf_seconds) publishes one
+        // bucket per calling bar -- the LAST one -- which reads right for
+        // ``expr[1]`` alone and one bucket late for ``expr``. When set, the
+        // evaluator publishes EVERY completed requested bucket (the exposed
+        // history advances per bucket, as under lookahead_off), and
+        // feed_aux_security_for_chart_bar feeds the calling bar's auxiliary
+        // bars only up to the one completing its FIRST bucket before the
+        // chart body runs; the rest of the slice is held in ``deferred_aux``
+        // and fed by feed_deferred_aux_security_for_chart_bar right after
+        // dispatch_bar, so the body reads the first-bucket evaluation while
+        // the TA state still sees every sub-bar, in order, before the next
+        // chart bar. publish_gate_tf_seconds stays 0 on this path; lanes
+        // without the auxiliary slice keep the gate. False (the default)
+        // means "not applicable".
+        bool calling_open_latches_first = false;
+        // Per calling chart bar: whether this state's first bucket of the
+        // slice has been published (the deferral point), and the auxiliary
+        // bars held back until after the chart body, each with the
+        // security_next_input_ms_ / calling_bar_complete it was fed with.
+        bool first_bucket_published = false;
+        // The label (bucket open) of the slice's first requested bucket:
+        // a completion published by this slice's first auxiliary bars that
+        // carries an OLDER label is the boundary emission of the previous
+        // slice's still-pending bucket (a tail the count / real-end /
+        // session-close rules left partial), not this bar's first bucket.
+        int64_t slice_open_label = 0;
+        // The label of the latest completed bucket this evaluator published
+        // through its aggregator (feed_security_eval_state), whatever the
+        // state's current bucket is afterwards.
+        int64_t last_published_label = 0;
+        struct DeferredAuxBar {
+            Bar bar;
+            int64_t next_input_ms = 0;
+            bool calling_bar_complete = false;
+        };
+        std::vector<DeferredAuxBar> deferred_aux;
         // One entry per projected HTF bucket, populated only for an explicitly
         // opted-in finite historical batch. Empty for every default/streaming
         // run and for sites outside the narrow HTF lookahead_on+gaps_off
@@ -3245,6 +3292,15 @@ private:
     void prepare_aux_security_chart_ranges(const Bar* chart_bars, int n_chart,
                                            const std::string& chart_tf);
     void feed_aux_security_for_chart_bar(int chart_index);
+    // The calling chart bar's nominal close on the split-feed path (the
+    // value feed_aux_security_for_chart_bar installs as
+    // security_calling_close_ms_ while the slice is fed).
+    int64_t aux_security_calling_close_ms() const;
+    // After dispatch_bar: feed the auxiliary bars a first-bucket-latched
+    // evaluator (calling_open_latches_first) held back from this chart
+    // bar's slice, in feed order, with the same next-input / calling-close
+    // context the slice loop would have given them.
+    void feed_deferred_aux_security_for_chart_bar(int chart_index);
     void clear_aux_security_chart_ranges();
 
     // Neutral capability bridge for independent factorial patches. The

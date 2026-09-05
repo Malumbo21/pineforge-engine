@@ -69,8 +69,9 @@ double RSI::compute(double src) {
 }
 
 // --- Crossover ---
-// Pine parity (TradingView / PineTS): prev1 <= prev2 && current1 > current2
-// Ref: pinets/src/namespaces/ta/methods/crossover.ts
+// Pine parity (TradingView): prev1 <= prev2 && current1 > current2, and only
+// when prev1 / prev2 are values -- the first valid bar after na is NOT an
+// edge (lab tv cross-na-edge-btc1d, 2026-09-05; see compute()).
 
 Crossover::Crossover()
     : prev_a(na<double>()), prev_b(na<double>()),
@@ -87,11 +88,16 @@ bool Crossover::compute(double a, double b) {
         return false;
     }
 
+    // A na previous value is no edge: TradingView fires neither
+    // ta.crossover nor ta.crossunder on the first valid bar after na, on a
+    // request.security series (na on the range's first bar, 53.24 next) or
+    // a chart series alike (lab tv cross-na-edge-btc1d, BINANCE:BTCUSDT 1D
+    // 2025-04-01..20, 2026-09-05: the only cross the tape carries is the
+    // real 27.53 -> 67.52 one). Pine's ``a[1] <= b[1]`` is simply false on
+    // na, and so is this.
     bool result = false;
     if (!is_na(prev_a) && !is_na(prev_b)) {
         result = (a > b) && (prev_a <= prev_b);
-    } else if (is_na(prev_a) && !is_na(prev_b)) {
-        result = a > b;
     }
     prev_a = a;
     prev_b = b;
@@ -117,11 +123,10 @@ bool Crossunder::compute(double a, double b) {
         return false;
     }
 
+    // No first-valid edge either -- see Crossover::compute.
     bool result = false;
     if (!is_na(prev_a) && !is_na(prev_b)) {
         result = (a < b) && (prev_a >= prev_b);
-    } else if (is_na(prev_a) && !is_na(prev_b)) {
-        result = a < b;
     }
     prev_a = a;
     prev_b = b;
