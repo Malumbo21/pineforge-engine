@@ -144,6 +144,7 @@ set(TEST_SOURCES
     test_margin_call_trail_exit_chronology
     test_margin_call_1x_long_entry_fill
     test_margin_call_gap_open
+    test_entry_bar_margin_path
     test_percent_equity_open_entry_fee
     test_streaming
     test_calc_on_order_fills

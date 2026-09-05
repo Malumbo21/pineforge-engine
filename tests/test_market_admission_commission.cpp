@@ -367,20 +367,18 @@ void test_ford_long_tape() {
 // ---------------------------------------------------------------------------
 // NYSE:F 1D short tape: the short side pays the same placement check — a
 // favourable gap-down fills, an over-equity gap-up drops — 44 filled / 24
-// dropped, every fill at TV's price and quantity. Pinned here at the
-// PLACEMENT level (which bars fill, at what price, how many shares, and that
-// a dropped placement never fills later) rather than row-for-row: the tape's
-// 55 "Margin call" rows are the short's ordinary entry-bar liquidation
-// cascade at the bar high, where the engine's slice sizes differ from TV's
-// on 8 of the 44 cycles (TV liquidates one lot AT THE OPEN for a fee-only
-// shortfall before cascading at the high — 2025-09-30 1 @ 12.11 + 40 @
-// 12.20 vs the engine's 44 @ 12.20 — and closes a whole position through a
-// pending close order at a gap-open the engine slices first, 2025-04-23 /
-// 2026-04-08). Those are short-cascade chronology residuals outside this
-// pin; their PnL knock-on moves three later quantities by one share each
-// (2026-02-18 TV 633 / engine 632, 2026-03-12 802 / 801, 2026-04-06 858 /
-// 857 — the engine's formula on its own drifted equity), asserted as exactly
-// that below so any further drift is caught.
+// dropped, 99 TV rows. Replayed ROW-FOR-ROW since the round-7 family-L
+// entry-bar margin path (pineforge-engine round7/entry-bar-margin-path,
+// tests/test_entry_bar_margin_path.cpp): the tape's 55 "Margin call" rows
+// are the short's entry-bar liquidation — the fee-only shortfall trims ONE
+// share at the fill (2025-09-30: 788 x 12.11 = 9542.68 <= 9547.86 < +9.54
+// fee -> 1 @12.11), then the survivor cascades at the post-fill high (40 @
+// 12.20; the engine used to print 44 @12.20 from the untrimmed 788, and its
+// drifted equity moved three later quantities by one share: 2026-02-18 633,
+// 03-12 802, 04-06 858) — and the two gap-open cycles whose pending
+// strategy.close fills the whole position at the open before the open's
+// margin evaluation (2025-04-23 1025 @9.84, 2026-04-08 842 @11.96; the
+// engine used to slice 48 / 140 at the open first).
 // ---------------------------------------------------------------------------
 
 struct Placement {
@@ -402,17 +400,15 @@ std::map<int64_t, Placement> placements_of(const std::vector<Row>& rows) {
 }
 
 void test_ford_short_tape() {
-    std::printf("-- NYSE:F 1D short tape placements (macd1d-mktadmit-f-short) --\n");
+    std::printf("-- NYSE:F 1D short tape replay (macd1d-mktadmit-f-short) --\n");
     const std::vector<Bar> bars = to_bars(kFordDaily);
     TapeProbe eng(/*mintick=*/0.01, /*qty_step=*/1.0, /*is_long=*/false);
     eng.run(bars.data(), (int)bars.size());
     const std::vector<Row> got = eng.rows();
     const std::vector<Row> want = to_rows(kFordShortTape);
+    check_rows_match("f-short", got, want);
     check_entries_only_on_fill_bars(got, bars);
-    // TV's quantities obey the formula on TV's equity, the engine's on the
-    // engine's own equity (the same formula, its own realized PnL).
-    check_qty_formula("f-short (tape)", want, bars, 0.01, 1.0);
-    check_qty_formula("f-short (engine)", got, bars, 0.01, 1.0);
+    check_qty_formula("f-short", want, bars, 0.01, 1.0);
 
     const std::map<int64_t, Placement> got_p = placements_of(got);
     const std::map<int64_t, Placement> want_p = placements_of(want);
@@ -420,34 +416,51 @@ void test_ford_short_tape() {
                 want_p.size());
     CHECK(got_p.size() == 44);
     CHECK(want_p.size() == 44);
-    // The three one-share knock-ons of the short-cascade residual (fill bars
-    // 221, 237, 253 = 2026-02-18, 2026-03-12, 2026-04-06).
-    const std::set<int64_t> knock_on_fills = {
-        bars[221].timestamp, bars[237].timestamp, bars[253].timestamp};
-    int missing = 0, extra = 0, price_off = 0, qty_off = 0;
-    for (const auto& [ts, w] : want_p) {
-        auto it = got_p.find(ts);
-        if (it == got_p.end()) { ++missing; continue; }
-        if (std::fabs(it->second.entry_price - w.entry_price) > 1e-6) ++price_off;
-        const double dq = it->second.qty - w.qty;
-        if (knock_on_fills.count(ts)) {
-            CHECK_NEAR(dq, -1.0, 1e-9);
-        } else if (std::fabs(dq) > 1e-6) {
-            ++qty_off;
-            std::printf("    fill %lld: engine qty %.0f, tape %.0f\n",
-                        (long long)ts, it->second.qty, w.qty);
+
+    // The fee-only shortfall's one-share trim AT THE FILL, then the cascade
+    // at the high over the survivor: 2025-09-30 (fill bar 125) 1 @12.11 +
+    // 40 @12.20 + 747 closed 10-02; 2025-11-19 (bar 161) 1 @13.03 + 48 @13.15;
+    // 2025-12-24 (bar 185) 1 @13.30 + 28 @13.38.
+    for (int fb : {125, 161, 185}) {
+        const std::vector<Row> at = rows_entered_at(got, bars[fb].timestamp);
+        CHECK(at.size() == 3);
+        int fill_price_trims = 0, high_slices = 0, closes = 0;
+        for (const Row& r : at) {
+            if (r.kind == kExitMarginCall && r.exit_ts == bars[fb].timestamp
+                && std::fabs(r.exit_price - r.entry_price) <= 1e-9) {
+                ++fill_price_trims;
+                CHECK_NEAR(r.qty, 1.0, 1e-9);
+            } else if (r.kind == kExitMarginCall) {
+                ++high_slices;
+                CHECK(r.exit_ts == bars[fb].timestamp);
+                CHECK_NEAR(r.exit_price, eng.round_to_mintick(bars[fb].high), 1e-9);
+            } else {
+                ++closes;
+            }
         }
+        CHECK(fill_price_trims == 1);
+        CHECK(high_slices == 1);
+        CHECK(closes == 1);
     }
-    for (const auto& [ts, g] : got_p) {
-        if (!want_p.count(ts)) {
-            ++extra;
-            std::printf("    engine-only fill %lld qty %.0f\n", (long long)ts, g.qty);
+    // The pending close at a gap-open closes the WHOLE position, no open
+    // slice: 2025-04-21's cycle (fill bar 13) closes 1025 @9.84 on 04-23
+    // (bar 15) after its two slices 20 @9.63 (04-21) and 16 @9.72 (04-22);
+    // 2026-04-06's cycle (bar 253) closes 842 @11.96 on 04-08 (bar 255).
+    for (const auto& [fb, close_qty] :
+         std::vector<std::pair<int, double>>{{13, 1025.0}, {253, 842.0}}) {
+        const std::vector<Row> at = rows_entered_at(got, bars[fb].timestamp);
+        int closes = 0;
+        for (const Row& r : at) {
+            if (r.kind == kExitClose) {
+                ++closes;
+                CHECK(r.exit_ts == bars[fb + 2].timestamp);
+                CHECK_NEAR(r.qty, close_qty, 1e-9);
+            } else {
+                CHECK(r.exit_ts < bars[fb + 2].timestamp);   // no slice at that open
+            }
         }
+        CHECK(closes == 1);
     }
-    CHECK(missing == 0);
-    CHECK(extra == 0);
-    CHECK(price_off == 0);
-    CHECK(qty_off == 0);
 
     // Dropped shorts: signal 2025-12-01 (bar 168, equity 9877.08 -> 749),
     // fill 2025-12-02 open 13.19: 749 x 13.19 = 9879.31 > 9877.08 (+0.023%)
