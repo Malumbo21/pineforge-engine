@@ -303,6 +303,66 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     // rule, tapes and numbers on PendingOrder::default_stop_placement_qty).
     // Stop-limit and limit entries carry their own price and are untouched.
     // margin_pct == 0 disables the check, as it does in TradingView.
+    // round 8 family S — the same-bar MARKET transaction (rule text and tapes
+    // on PendingOrder::sbmt_member). A high-level MARKET call in scope, with
+    // FIXED sizing (the default, or an explicit fixed qty): its broker size is
+    // decided HERE and frozen. The opposite same-bar MARKET entries still
+    // pending contribute their own qty (their open leg) to this call's
+    // closing part, and the over-cap same-direction call is dropped outright
+    // unless such an opposite market is pending (rule 2).
+    const bool sbmt_market_call =
+        same_bar_market_tx_scope_is_live()
+        && std::isnan(limit_price) && std::isnan(stop_price)
+        && oca_name.empty()
+        && (qty_type < 0 || qty_type == static_cast<int>(QtyType::FIXED))
+        && (std::isnan(qty) || (std::isfinite(qty) && qty > kQtyEpsilon));
+    double sbmt_own_qty = std::numeric_limits<double>::quiet_NaN();
+    double sbmt_opp_pending_own = 0.0;
+    bool sbmt_opp_market_pending = false;
+    bool sbmt_opp_entry_pending = false;
+    bool sbmt_over_cap = false;
+    if (sbmt_market_call) {
+        sbmt_own_qty = std::isnan(qty)
+            ? apply_qty_step(default_qty_value_)
+            : apply_qty_step(std::abs(qty));
+        for (const PendingOrder& sib : pending_orders_) {
+            if (sib.created_bar != bar_index_ || sib.is_long == is_long
+                || sib.id == id) {
+                continue;
+            }
+            if (sib.type == OrderType::MARKET && sib.sbmt_member
+                && std::isfinite(sib.sbmt_own_qty)) {
+                sbmt_opp_market_pending = true;
+                sbmt_opp_pending_own += sib.sbmt_own_qty;
+            } else if (sib.type == OrderType::MARKET
+                       || sib.type == OrderType::ENTRY
+                       || sib.type == OrderType::RAW_ORDER) {
+                sbmt_opp_entry_pending = true;
+            }
+        }
+        sbmt_over_cap =
+            position_side_ != PositionSide::FLAT
+            && position_side_
+                == (is_long ? PositionSide::LONG : PositionSide::SHORT)
+            && position_entry_count_ >= pyramiding_;
+        // Rule 2: TradingView rejects the over-cap same-direction market call
+        // at placement (dbl-long-full: Long first while long -> nothing;
+        // dbl-short-swapped: Short first while short -> nothing) — it never
+        // reaches the book, so a later call sizes against nothing and a
+        // same-id close finds no pending entry. Only a pending opposite
+        // MARKET keeps it (sized by rule 1). An opposite PRICED entry pending
+        // on the bar is unpinned: that book keeps the established fill-time
+        // semantics and stays out of the frozen transaction.
+        if (sbmt_over_cap && !sbmt_opp_market_pending) {
+            if (!sbmt_opp_entry_pending) {
+                last_rejected_strategy_entry_call_bar_ = bar_index_;
+                return;
+            }
+        }
+    }
+    const bool sbmt_member_call =
+        sbmt_market_call && !(sbmt_over_cap && !sbmt_opp_market_pending);
+
     const bool pure_stop_entry =
         std::isnan(limit_price) && std::isfinite(stop_price);
     const bool affordability_scope =
@@ -393,8 +453,22 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             // earlier in this on_bar has already released its quantity
             // (pending_close_qty_in_bar_ — the tv_carry_qty convention
             // below).
+            // round 8 family S (famS-adm-*): the kept over-cap entry is costed
+            // as held + own + the opposite pending market's open leg — three
+            // lots for the Long/Short/close book (NQ 1e6 declines 3 x 19,339
+            // x 20; ES 1e6 admits 3 x 5,627 x 50). A declined call is dropped
+            // like any other over-notional same-direction add.
+            // Pinned for the DEFAULT-sized call at 100/100 margins (the
+            // tapes' and the movers' shape); an explicit-qty call or another
+            // margin keeps the established held + own cost (gb2wgkrtxs scope
+            // controls) until a tape says otherwise.
+            const bool sbmt_pending_cost =
+                sbmt_member_call && std::isnan(qty)
+                && std::abs(margin_long_ - 100.0) < 1e-12
+                && std::abs(margin_short_ - 100.0) < 1e-12;
             const double held_qty = same_dir
                 ? std::max(0.0, position_qty_ - pending_close_qty_in_bar_)
+                    + (sbmt_pending_cost ? sbmt_opp_pending_own : 0.0)
                 : 0.0;
             // Position value in account currency: the futures point-value
             // multiplier (1.0 for crypto/equity) and the account-currency FX
@@ -556,6 +630,28 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         order.affordability_signal_price = affordability_signal_price;
         order.affordability_held_qty = affordability_held_qty;
         order.affordability_close_only = affordability_close_only;
+        // round 8 family S, rule 1: freeze the broker transaction now — own
+        // qty + the opposite position still held (net of what an earlier
+        // same-bar close released) + the open leg of every opposite same-bar
+        // MARKET entry pending at this call. Consumed by
+        // apply_same_bar_market_tx_reversal; the ordinary paths keep reading
+        // qty / qty_type.
+        if (sbmt_member_call && std::isfinite(sbmt_own_qty)
+            && sbmt_own_qty > kQtyEpsilon) {
+            const PositionSide requested =
+                is_long ? PositionSide::LONG : PositionSide::SHORT;
+            const bool opposite_live =
+                position_side_ != PositionSide::FLAT
+                && position_side_ != requested;
+            const double held_opposite = opposite_live
+                ? std::max(0.0, position_qty_ - pending_close_qty_in_bar_)
+                : 0.0;
+            order.sbmt_member = true;
+            order.sbmt_own_qty = sbmt_own_qty;
+            order.sbmt_tx_qty =
+                sbmt_own_qty + held_opposite + sbmt_opp_pending_own;
+            order.sbmt_kept_over_cap = sbmt_over_cap;
+        }
         if (paired_flat_market_candidate) {
             order.paired_flat_market_candidate = true;
             order.paired_flat_market_own_qty = paired_flat_market_own_qty;
@@ -2675,6 +2771,18 @@ uint64_t BacktestEngine::queue_deferred_close_order(
     order.suppressed_close_consumed_ledger_qty = consumed_ledger_qty;
     // round-4b F1: the rest of that ledger the same call retired.
     order.suppressed_close_retired_ledger_qty = retired_ledger_qty;
+    // round 8 family S, rule 4: a targeted default-FIFO strategy.close(id)
+    // in scope is a member of the bar's market transaction — its target is
+    // frozen here (the lot id holds at the call) and its broker side is the
+    // side that closes the held position. See apply_exit_order_fill.
+    if (same_bar_market_tx_scope_is_live() && !id.empty()
+        && std::isfinite(consumed_ledger_qty)
+        && qty_to_close > eps
+        && position_side_ != PositionSide::FLAT) {
+        order.sbmt_member = true;
+        order.sbmt_close_qty = qty_to_close;
+        order.sbmt_close_buy = position_side_ == PositionSide::SHORT;
+    }
 
     const uint64_t incarnation = order.incarnation;
     pending_orders_.push_back(std::move(order));

@@ -235,20 +235,35 @@ void run_source_order_chain(bool source_long) {
             CHECK(std::fabs(close_short_long.qty - 1.0) < 1e-9);
         }
     } else {
-        // No long-seed mirror is established. Keep the baseline source-order
-        // lifecycle: Short reversal, stale close removal, Long reversal.
-        CHECK(probe.final_side() == PositionSide::LONG);
-        CHECK(std::fabs(probe.final_qty() - 1.0) < 1e-9);
-        CHECK(probe.trade_count() == 2);
-        if (probe.trade_count() == 2) {
+        // Long-seed mirror, pinned by the round-8 family-S tape
+        // famS-dbl-long-mirror-closefirst (CME_MINI:ES1! 15m, 115/115 cycles;
+        // ledger note log-20260905t143024z-76025577): the reversal Short is
+        // frozen at 2, the over-cap Long is KEPT because an opposite market is
+        // pending and buys its frozen 2 while still long (long 3), close(Short)
+        // places nothing, close(Long) is sized to the seed lot. Buys fill first
+        // (Long +2), then the sells in placement order: Short -2 closes the seed
+        // and one unit of the add, close(Long) -1 closes the last unit — FLAT,
+        // three trade rows, exactly TradingView's list.
+        CHECK(probe.final_side() == PositionSide::FLAT);
+        CHECK(std::fabs(probe.final_qty()) < 1e-9);
+        CHECK(probe.trade_count() == 3);
+        if (probe.trade_count() == 3) {
             const Trade& seed = probe.get_trade(0);
-            const Trade& short_lot = probe.get_trade(1);
+            const Trade& add_first = probe.get_trade(1);
+            const Trade& add_second = probe.get_trade(2);
             CHECK(seed.is_long);
             CHECK(seed.entry_id == "Long");
             CHECK(seed.exit_id == "Short");
-            CHECK(!short_lot.is_long);
-            CHECK(short_lot.entry_id == "Short");
-            CHECK(short_lot.exit_id == "Long");
+            CHECK(add_first.is_long);
+            CHECK(add_first.entry_id == "Long");
+            CHECK(add_first.exit_id == "Short");
+            CHECK(std::fabs(add_first.qty - 1.0) < 1e-9);
+            CHECK(add_second.is_long);
+            CHECK(add_second.entry_id == "Long");
+            CHECK(add_second.exit_id == "__close__Long");
+            CHECK(std::fabs(add_second.qty - 1.0) < 1e-9);
+            CHECK(add_second.entry_time == 1'800'000);
+            CHECK(add_second.exit_time == 1'800'000);
         }
     }
 }
@@ -384,10 +399,18 @@ void run_mismatched_reentry_qty_fail_closed(bool source_long) {
     probe.run(bars, 4);
 
     CHECK(probe.queued_count() == 3);
+    // round 8 family S (famS-dbl-short-q1-entry2, 115/115 cycles): the
+    // held-side re-entry with qty 2 is frozen at own 2 + the opposite pending
+    // open leg 1 = 3; close(held) is sized to the seed lot (1) and fills as
+    // the artifact lot when its side is gone. Short seed: Long +2 (long 1),
+    // artifact +1 (long 2), Short -3 closes both and opens 1 -> SHORT 1, three
+    // rows. Long seed (the mirror, model-derived from the mirror-closefirst
+    // tape): Long +3 adds while long (long 4), Short -2 (long 2), close(Long)
+    // -1 -> LONG 1, three rows.
     CHECK(probe.final_side() ==
           (source_long ? PositionSide::LONG : PositionSide::SHORT));
-    CHECK(std::fabs(std::fabs(probe.final_qty()) - 2.0) < 1e-9);
-    CHECK(probe.trade_count() == 2);
+    CHECK(std::fabs(std::fabs(probe.final_qty()) - 1.0) < 1e-9);
+    CHECK(probe.trade_count() == 3);
 }
 
 class StructuralIdProbe final : public BacktestEngine {
@@ -484,16 +507,23 @@ void run_projected_final_admission_fail_closed() {
     };
     probe.run(bars, 4);
 
-    // Materializing Long3 would leave Long6 before the final Short. Its normal
-    // admission requires $900 against only $400 of projected free funds, so
-    // the special transaction must fail closed to the ordinary Short3 result.
-    CHECK(probe.final_side() == PositionSide::SHORT);
-    CHECK(std::fabs(probe.final_qty() + 3.0) < 1e-9);
-    CHECK(probe.trade_count() == 2);
+    // round 8 family S (famS-adm-es-1e6 / famS-adm-nq-1e6): TradingView admits
+    // the kept over-cap Short at PLACEMENT on held + own + the opposite pending
+    // open leg — 3 + 3 + 3 = 9 lots = $900 <= $1,000 — and never re-costs it at
+    // the fill (the projected fill-time form, $900 against $400 of free funds
+    // after the artifact lot, is exactly what the ES tape refutes: 3 x 5,627 x
+    // 50 = $844k fills on $1e6 with the artifact open). So the whole
+    // transaction executes: Long +6 (long 3), artifact +3 (long 6), Short -6
+    // closes both -> FLAT, three rows.
+    CHECK(probe.final_side() == PositionSide::FLAT);
+    CHECK(std::fabs(probe.final_qty()) < 1e-9);
+    CHECK(probe.trade_count() == 3);
     CHECK(!probe.has_open_materialized_lot());
+    bool materialized_row = false;
     for (int i = 0; i < probe.trade_count(); ++i) {
-        CHECK(probe.get_trade(i).entry_id != "__close__Short");
+        if (probe.get_trade(i).entry_id == "__close__Short") materialized_row = true;
     }
+    CHECK(materialized_row);
 }
 
 void run_partial_close_fragments_share_entry_incarnation() {
@@ -578,9 +608,15 @@ void run_internal_close_id_collision_fail_closed() {
     };
     probe.run(bars, 4);
 
-    CHECK(probe.final_side() == PositionSide::SHORT);
-    CHECK(std::fabs(probe.final_qty() + 1.0) < 1e-9);
-    CHECK(probe.trade_count() == 2);
+    // round 8 family S: the transaction model keys on the target id ("Short")
+    // and the pending same-id entry, not on the synthesized close id, so a
+    // user entry occupying the "__close__Short" namespace is just a long id
+    // string to the broker — the book is famS-dbl-short-full's: FLAT, three
+    // rows (the user's long lot and the artifact lot both carry that string as
+    // entry_id, which is what TradingView's list would show too).
+    CHECK(probe.final_side() == PositionSide::FLAT);
+    CHECK(std::fabs(probe.final_qty()) < 1e-9);
+    CHECK(probe.trade_count() == 3);
 }
 
 enum class GateControl {
@@ -711,8 +747,19 @@ void run_gate_control(GateControl control) {
     const std::size_t expected_queued = control == GateControl::ExtraObject
         ? 4U
         : (control == GateControl::ProcessOnClose ? 2U : 3U);
+    // round 8 family S: the general same-bar market-transaction model
+    // (PendingOrder::sbmt_member) does not need the kernel's exact-object
+    // provenance. A placement-rejected extra call leaves no order, a same-id
+    // re-issue replaces its predecessor, and a cancelled sibling is gone — the
+    // surviving book is the tape's Long / Short / close(Short) and TradingView
+    // fills the artifact lot (famS-dbl-short-full). The kernel's other
+    // controls stay outside the model's scope and keep the ordinary result.
+    const bool artifact_expected =
+        control == GateControl::RejectedExtraCall
+        || control == GateControl::SameIdReplacement
+        || control == GateControl::NonconsecutiveSequence;
     if (probe.queued_count() != expected_queued
-        || probe.has_materialized_close_lot()) {
+        || probe.has_materialized_close_lot() != artifact_expected) {
         std::fprintf(stderr,
                      "gate control %d: queued=%zu expected=%zu materialized=%d\n",
                      static_cast<int>(control), probe.queued_count(),
@@ -720,7 +767,7 @@ void run_gate_control(GateControl control) {
                      probe.has_materialized_close_lot() ? 1 : 0);
     }
     CHECK(probe.queued_count() == expected_queued);
-    CHECK(!probe.has_materialized_close_lot());
+    CHECK(probe.has_materialized_close_lot() == artifact_expected);
 }
 
 }  // namespace
