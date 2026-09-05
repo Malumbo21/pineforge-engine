@@ -1520,6 +1520,72 @@ protected:
         return round_to_mintick(raw_bar_price);
     }
 
+    // design-stop-tick-rounding (round 6): the broker emulator TESTS a
+    // resting stop / limit against the bar's OHLC quantized to the tick
+    // (nearest, the finding-446 formula), while the order LEVEL stays raw;
+    // the fill keeps its existing directional / limit-or-better snap.
+    //
+    // Pinned on NYSE:F 1D (mintick 0.01, sub-penny prints; lab tv tapes
+    // scratchpad/r6/pins/stopround-*, 2026-09-04):
+    //   long sell-stops 13.74624 / 13.7451 / 13.7449 / 13.745 all SKIP
+    //     2026-02-02 (low 13.745 -> 13.75) and fill 02-03 @13.74, while
+    //     13.3449 fills 01-26 (low 13.3448 -> 13.34) @13.34 — neither a raw
+    //     compare (02-02 would fill) nor a floored/ceiled level (01-26
+    //     would not) explains both; only the quantized low does;
+    //   short buy-stops 14.0349 / 14.03505 / 14.0352 all fill 02-03 (high
+    //     14.0351 -> 14.04) @14.04; 13.225 skips 12-09 (high 13.2202 ->
+    //     13.22): the high rounds to NEAREST, not up;
+    //   sell-stop 13.776 over the 02-20 open 13.775 (-> 13.78) fills at the
+    //     level 13.77, not at the open: the open is quantized too;
+    //   the same bars/levels reproduce for strategy.exit(limit=),
+    //     strategy.entry(stop=) / (limit=) and strategy.order(stop=), long
+    //     and short (stopround-xl-*, -es-*, -el-*, -eo-*);
+    //   stopround-ohlc-0/1 encode Pine's own low/high in the trade qty:
+    //     13.745, 13.3448, 14.0351 — the RAW prints, identical to the feed,
+    //     so the quantization lives in the broker, not the data.
+    // The trail leg is NOT covered (stopround-xt-L-trail: trail_points 20 /
+    // trail_offset 3 over the 14.035 high exits at the next open, the raw-
+    // extreme behaviour the engine already has), so the trail keeps walking
+    // the raw path; stop-limit entries, the process_orders_on_close close
+    // compares and the calc_on_order_fills cursors were not pinned either
+    // and stay raw.
+    //
+    // The grid point is materialized as k / (1/mintick) when 1/mintick is
+    // integral (every decimal tick), which is the double a Pine literal on
+    // that tick parses to — so an on-grid level compares EQUAL to a
+    // quantized bar price bit-for-bit (14.04 vs k*0.01 = 14.040000000000001
+    // would not). Non-decimal ticks fall back to k*mintick.
+    double tick_grid_price(double price) const {
+        if (std::isnan(price) || syminfo_mintick_ <= 0.0) return price;
+        const double k = std::floor(price / syminfo_mintick_ + 0.5);
+        const double inv = 1.0 / syminfo_mintick_;
+        const double inv_int = std::floor(inv + 0.5);
+        if (inv_int > 0.0 && std::abs(inv - inv_int) <= 1e-6 * inv_int) {
+            return k / inv_int;
+        }
+        return k * syminfo_mintick_;
+    }
+    Bar broker_tick_bar(const Bar& bar) const {
+        Bar b = bar;
+        b.open = tick_grid_price(bar.open);
+        b.high = tick_grid_price(bar.high);
+        b.low = tick_grid_price(bar.low);
+        b.close = tick_grid_price(bar.close);
+        return b;
+    }
+    // The bar the stop / limit trigger tests run on. A synthetic bar — the
+    // calc_on_order_fills scheduler's point / monotonic-segment bars and the
+    // KI-67 cascade waypoint bar — is a slice of an already-decided path and
+    // is compared raw, exactly as before; a real chart / lower-TF bar is
+    // quantized.
+    Bar broker_trigger_bar(const Bar& bar) const {
+        if ((calc_on_order_fills_ && coof_scheduler_active_)
+            || coof_cascade_force_wp_gap_) {
+            return bar;
+        }
+        return broker_tick_bar(bar);
+    }
+
     // TradingView fills stop entries directionally to mintick rather than
     // rounding to nearest: long stops snap UP (ceil), short stops snap DOWN
     // (floor). Verified against basic/parabolic-asr where the 2,513

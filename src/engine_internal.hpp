@@ -242,6 +242,17 @@ int price_path_priority(const Bar& bar, double stop_level, double limit_level);
 // price level is crossed on OHLC path. Returns false if never crossed.
 bool first_touch_position(const Bar& bar, double level, double* out_pos);
 
+// design-stop-tick-rounding: the path helpers below also come in a form whose
+// LEG ORDER (O->H->L->C vs O->L->H->C) is chosen by the caller. The engine
+// walks the tick-quantized twin of a bar (BacktestEngine::broker_trigger_bar)
+// with the RAW bar's order, so a path coordinate produced here — the
+// entry_path_position cursor a same-bar bracket resumes from, a sibling /
+// opposing-order tie-break — lives in the same coordinate system as
+// resolve_exit_path_fill's walk. The single-bar forms derive the order from
+// the bar they are given (bar_path_uses_high_first) and are unchanged.
+bool first_touch_position(const Bar& bar, bool high_first, double level,
+                          double* out_pos);
+
 
 // First path position where a stop ENTRY can fire, accounting for direction:
 // long stops only fire on up-segments (price rising through the stop), short
@@ -253,6 +264,8 @@ bool first_touch_position(const Bar& bar, double level, double* out_pos);
 // broker emulator on probe 83.
 bool entry_stop_first_touch(const Bar& bar, double stop_level,
                                    bool is_long, double* out_pos);
+bool entry_stop_first_touch(const Bar& bar, bool high_first, double stop_level,
+                            bool is_long, double* out_pos);
 
 
 // For flat-position opposing stop entries (long stop vs short stop), return
@@ -261,11 +274,18 @@ bool opposing_stop_entry_hits_first(const Bar& bar,
                                     const std::vector<PendingOrder>& orders,
                                     std::size_t current_idx,
                                     int current_bar_index = -1);
+bool opposing_stop_entry_hits_first(const Bar& bar, bool high_first,
+                                    const std::vector<PendingOrder>& orders,
+                                    std::size_t current_idx,
+                                    int current_bar_index);
 
 
 DualEntryStopPathWinner dual_entry_stop_path_winner(const Bar& bar,
                                                      const std::vector<PendingOrder>& orders,
                                                      int current_bar_index = -1);
+DualEntryStopPathWinner dual_entry_stop_path_winner(const Bar& bar, bool high_first,
+                                                     const std::vector<PendingOrder>& orders,
+                                                     int current_bar_index);
 
 
 // Exact scope for continuing the historical path after a dual-stop winner is
@@ -285,12 +305,20 @@ bool exit_order_touch_position(const Bar& bar,
                                       const PendingOrder& order,
                                       PositionSide pos,
                                       double* out_pos);
+bool exit_order_touch_position(const Bar& bar, bool high_first,
+                               const PendingOrder& order,
+                               PositionSide pos,
+                               double* out_pos);
 
 
 bool oca_exit_sibling_hits_first(const Bar& bar,
                                         const std::vector<PendingOrder>& orders,
                                         std::size_t current_idx,
                                         PositionSide pos);
+bool oca_exit_sibling_hits_first(const Bar& bar, bool high_first,
+                                 const std::vector<PendingOrder>& orders,
+                                 std::size_t current_idx,
+                                 PositionSide pos);
 
 
 // strategy.exit → OrderType::EXIT; strategy.order → RAW_ORDER. When a raw order's
@@ -300,6 +328,10 @@ bool order_is_exit_style(const PendingOrder& o, PositionSide pos);
 
 
 void fill_bar_path_points(const Bar& bar, double path[4]);
+
+// Same 4-waypoint path, but with the leg order chosen by the caller (so a
+// tick-quantized twin of a bar walks the raw bar's leg order).
+void fill_bar_path_points_ordered(const Bar& bar, bool high_first, double path[4]);
 
 
 int path_cross_kind_priority(PathCrossKind kind);
@@ -317,6 +349,17 @@ CrossEventList collect_cross_events(double from_price,
                                                         double stop_level,
                                                         double limit_level,
                                                         double trail_level);
+
+// design-stop-tick-rounding: stop and limit crossings are taken on the
+// tick-quantized segment (tick_from -> tick_to), the trail crossing on the raw
+// segment (from -> to); the merged list keeps collect_cross_events's order.
+CrossEventList collect_cross_events_split(double from_price,
+                                          double to_price,
+                                          double tick_from_price,
+                                          double tick_to_price,
+                                          double stop_level,
+                                          double limit_level,
+                                          double trail_level);
 
 
 // fill_at_bar_point (optional) reports whether the returned fill price is a
@@ -343,8 +386,36 @@ double exit_order_earliest_path_metric_no_trail(
     PositionSide position_side,
     bool is_entry_bar,
     double position_entry_price);
+double exit_order_earliest_path_metric_no_trail(
+    const Bar& bar,
+    bool high_first,
+    const PendingOrder& order,
+    PositionSide position_side,
+    bool is_entry_bar,
+    double position_entry_price);
 
 
+// design-stop-tick-rounding: `tick_bar` is the bar the STOP / LIMIT legs are
+// tested against (the engine passes BacktestEngine::broker_trigger_bar(bar):
+// OHLC quantized to the tick, level raw); the TRAIL leg walks `bar` itself.
+// The two share the raw bar's leg order and segment cursor.
+ExitPathFill resolve_exit_path_fill(const Bar& bar,
+                                           const Bar& tick_bar,
+                                           PositionSide position_side,
+                                           double stop_price,
+                                           double limit_price,
+                                           double trail_points,
+                                           double trail_price,
+                                           double trail_offset,
+                                           double position_entry_price,
+                                           double trail_best_start,
+                                           bool is_entry_bar,
+                                           bool magnifier_active,
+                                           double syminfo_mintick,
+                                           bool cascade_wp_gap = false,
+                                           double path_start_position = 0.0);
+
+// Raw-only form (tick_bar == bar): every leg walks the raw bar.
 ExitPathFill resolve_exit_path_fill(const Bar& bar,
                                            PositionSide position_side,
                                            double stop_price,

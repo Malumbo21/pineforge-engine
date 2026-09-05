@@ -176,8 +176,11 @@ void BacktestEngine::process_pending_orders(const Bar& bar) {
     pass0_opposing_skip_ids.clear();
     DualEntryStopPathWinner dual_entry_path_ = DualEntryStopPathWinner::None;
     if (position_side_ == PositionSide::FLAT) {
+        // design-stop-tick-rounding: stop touches on the tick-quantized bar,
+        // walked in the RAW bar's leg order.
         dual_entry_path_ = dual_entry_stop_path_winner(
-            bar, pending_orders_, bar_index_);
+            broker_trigger_bar(bar), internal::bar_path_uses_high_first(bar),
+            pending_orders_, bar_index_);
     }
     const bool continue_after_stop_margin_decline_scope =
         dual_stop_margin_decline_can_continue_path(
@@ -299,7 +302,8 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
     DualEntryStopPathWinner dual_entry_path = DualEntryStopPathWinner::None;
     if (position_side_ == PositionSide::FLAT) {
         dual_entry_path = dual_entry_stop_path_winner(
-            bar, pending_orders_, bar_index_);
+            broker_trigger_bar(bar), internal::bar_path_uses_high_first(bar),
+            pending_orders_, bar_index_);
     }
 
     auto commit_stop_limit_activation_through = [&](double cursor_price) {
@@ -1732,6 +1736,11 @@ void BacktestEngine::update_trail_best_for_bar_open(const Bar& bar) {
 // Correctness over perf: leave as two sequential stable_sorts.
 void BacktestEngine::sort_exit_siblings_by_path_fill(const Bar& bar) {
     if (pending_orders_.size() < 2) return;  // nothing to order; skips stable_sort's temp-buffer alloc
+    // design-stop-tick-rounding: the no-trail metric is a stop / limit
+    // trigger test, so it walks the tick-quantized bar — in the RAW bar's
+    // leg order, like every other path coordinate this bar.
+    const Bar trigger_bar = broker_trigger_bar(bar);
+    const bool high_first = internal::bar_path_uses_high_first(bar);
     std::stable_sort(pending_orders_.begin(), pending_orders_.end(),
         [&](const PendingOrder& a, const PendingOrder& b) {
             if (a.type != OrderType::EXIT || b.type != OrderType::EXIT
@@ -1754,9 +1763,11 @@ void BacktestEngine::sort_exit_siblings_by_path_fill(const Bar& bar) {
             }
             bool is_ent_bar = (position_open_bar_ == bar_index_);
             double ma = exit_order_earliest_path_metric_no_trail(
-                bar, a, position_side_, is_ent_bar, position_entry_price_);
+                trigger_bar, high_first, a, position_side_, is_ent_bar,
+                position_entry_price_);
             double mb = exit_order_earliest_path_metric_no_trail(
-                bar, b, position_side_, is_ent_bar, position_entry_price_);
+                trigger_bar, high_first, b, position_side_, is_ent_bar,
+                position_entry_price_);
             const double inf = std::numeric_limits<double>::infinity();
             const double eps = kPathPosEps;
             if (ma < inf && mb < inf) {
@@ -2380,6 +2391,11 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
     }
     if (pending_orders_.size() < 2) return;  // nothing to order; skips stable_sort's temp-buffer alloc
 
+    // design-stop-tick-rounding: every "already marketable at the open" test
+    // below is a stop / limit trigger test and runs on the tick-quantized
+    // open, matching evaluate_fill_price's gap decision.
+    const double tick_open = broker_trigger_bar(bar).open;
+
     // Validate pair links before stable_sort starts moving elements. Scanning
     // pending_orders_ from inside the comparator would make its result depend
     // on the sort algorithm's transient moves. The immutable sequence set
@@ -2481,8 +2497,8 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && std::isnan(order.trail_price)
                 && std::isnan(order.trail_offset);
             const bool fills_at_open = pure_limit_parent
-                && (order.is_long ? bar.open <= order.limit_price
-                                  : bar.open >= order.limit_price);
+                && (order.is_long ? tick_open <= order.limit_price
+                                  : tick_open >= order.limit_price);
             if (pure_limit_parent && !fills_at_open) {
                 non_gap_limit_parents.emplace(
                     order.id,
@@ -2837,21 +2853,21 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
 
                 if (exit_style) {
                     if (position_side_ == PositionSide::LONG) {
-                        if (has_stop && bar.open <= o.stop_price) return 0;
-                        if (has_limit && bar.open >= o.limit_price) return 0;
+                        if (has_stop && tick_open <= o.stop_price) return 0;
+                        if (has_limit && tick_open >= o.limit_price) return 0;
                     } else if (position_side_ == PositionSide::SHORT) {
-                        if (has_stop && bar.open >= o.stop_price) return 0;
-                        if (has_limit && bar.open <= o.limit_price) return 0;
+                        if (has_stop && tick_open >= o.stop_price) return 0;
+                        if (has_limit && tick_open <= o.limit_price) return 0;
                     }
                     return 1;
                 }
 
                 if (o.is_long) {
-                    if (has_stop && bar.open >= o.stop_price) return 0;
-                    if (has_limit && bar.open <= o.limit_price) return 0;
+                    if (has_stop && tick_open >= o.stop_price) return 0;
+                    if (has_limit && tick_open <= o.limit_price) return 0;
                 } else {
-                    if (has_stop && bar.open <= o.stop_price) return 0;
-                    if (has_limit && bar.open >= o.limit_price) return 0;
+                    if (has_stop && tick_open <= o.stop_price) return 0;
+                    if (has_limit && tick_open >= o.limit_price) return 0;
                 }
                 return 1;
             };
@@ -2909,12 +2925,12 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 if (ex_trail || (!ex_stop && !ex_limit)) return -1;
                 int exit_prio;
                 if (position_side_ == PositionSide::LONG) {
-                    if (ex_stop && bar.open <= ex.stop_price) exit_prio = 2;
-                    else if (ex_limit && bar.open >= ex.limit_price) exit_prio = 3;
+                    if (ex_stop && tick_open <= ex.stop_price) exit_prio = 2;
+                    else if (ex_limit && tick_open >= ex.limit_price) exit_prio = 3;
                     else return -1;   // not gapped through a leg at the open
                 } else {  // SHORT
-                    if (ex_stop && bar.open >= ex.stop_price) exit_prio = 1;
-                    else if (ex_limit && bar.open <= ex.limit_price) exit_prio = 3;
+                    if (ex_stop && tick_open >= ex.stop_price) exit_prio = 1;
+                    else if (ex_limit && tick_open <= ex.limit_price) exit_prio = 3;
                     else return -1;
                 }
                 int add_prio = add.is_long ? 1 : 2;
@@ -3363,9 +3379,12 @@ bool BacktestEngine::use_stop_placement_open_qty(
     // established fill-time sizing. This covers favorable and adverse gaps:
     // both carry the placement qty, while only an adverse notional overshoot is
     // declined by the caller's margin comparison.
+    // design-stop-tick-rounding: the same tick-quantized open test
+    // evaluate_fill_price's gap fill uses.
+    const double tick_open = broker_trigger_bar(bar).open;
     const bool gap_open_marketable =
-        order.is_long ? bar.open >= order.stop_price
-                      : bar.open <= order.stop_price;
+        order.is_long ? tick_open >= order.stop_price
+                      : tick_open <= order.stop_price;
     const double placement_equity =
         order.stop_placement_open_equity;
     const double equity_guard = std::isfinite(placement_equity)
@@ -5127,12 +5146,20 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
                 // fill price used by excursion accounting. Stop fills can be
                 // rounded or slipped; limit fills can improve at the open. The
                 // child becomes live at the actual parent trigger crossing.
+                // design-stop-tick-rounding: the crossing is located on the
+                // tick-quantized bar the fill was decided on (a 14.0352 stop
+                // that fired on the 14.0351 -> 14.04 high has no crossing on
+                // the raw path), walked in the RAW bar's leg order — the
+                // coordinate system resolve_exit_path_fill resumes the
+                // same-bar bracket in.
+                const Bar trigger_bar = broker_trigger_bar(bar);
+                const bool high_first = internal::bar_path_uses_high_first(bar);
                 if (!std::isnan(order.stop_price)
                     && std::isnan(order.limit_price)) {
                     double entry_path_position = 0.0;
                     if (internal::entry_stop_first_touch(
-                            bar, order.stop_price, order.is_long,
-                            &entry_path_position)) {
+                            trigger_bar, high_first, order.stop_price,
+                            order.is_long, &entry_path_position)) {
                         pyramid_entries_.back().entry_path_position =
                             entry_path_position;
                     }
@@ -5140,11 +5167,12 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
                            && !std::isnan(order.limit_price)) {
                     double entry_path_position = 0.0;
                     const bool fills_at_open = order.is_long
-                        ? bar.open <= order.limit_price
-                        : bar.open >= order.limit_price;
+                        ? trigger_bar.open <= order.limit_price
+                        : trigger_bar.open >= order.limit_price;
                     if (fills_at_open
                         || internal::first_touch_position(
-                            bar, order.limit_price, &entry_path_position)) {
+                            trigger_bar, high_first, order.limit_price,
+                            &entry_path_position)) {
                         pyramid_entries_.back().entry_path_position =
                             entry_path_position;
                     }
@@ -5915,8 +5943,11 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
                 return OrderEligibility::Skip;
             }
         }
+        // design-stop-tick-rounding: same tick-quantized open test as the
+        // fill in evaluate_fill_price.
         const bool prearmed_market_gap =
-            prearmed_market_parent_bracket_gaps_at_open(order, bar);
+            prearmed_market_parent_bracket_gaps_at_open(
+                order, broker_trigger_bar(bar));
         if (!prearmed_market_gap && !bar_magnifier_enabled_
             && !(calc_on_order_fills_ && coof_scheduler_active_
                  && order.created_during_coof_recalc)) {
@@ -5958,8 +5989,20 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
 
     last_exit_fill_was_trail_ = false;
 
+    // design-stop-tick-rounding: every resting stop / limit trigger test in
+    // this function runs on the tick-quantized bar (broker_trigger_bar,
+    // engine.hpp); the fill prices below keep reading the raw `bar`, whose
+    // open / close go through bar_fill_price exactly as before. The trail
+    // legs, the stop-limit entry and the process_orders_on_close close
+    // compares stay on the raw bar (not pinned).
+    const Bar tick_bar = broker_trigger_bar(bar);
+    // The leg order stays the RAW bar's (resolve_exit_path_fill walks the
+    // twin in that order too), so every path coordinate this bar agrees.
+    const bool tick_high_first = internal::bar_path_uses_high_first(bar);
+
     if (order.type == OrderType::RAW_ORDER && exit_style
-        && oca_exit_sibling_hits_first(bar, pending_orders_, order_index, position_side_)) {
+        && oca_exit_sibling_hits_first(tick_bar, tick_high_first, pending_orders_,
+                                       order_index, position_side_)) {
         return {FillEvaluation::Kind::NoFill, 0.0};
     }
 
@@ -5978,7 +6021,7 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
     // fills); the stop leg keeps its established slipped-stop booking.
     bool prearmed_bracket_limit_leg = false;
     if (exit_style && prearmed_market_parent_bracket_gaps_at_open(
-            order, bar, &prearmed_bracket_limit_leg)) {
+            order, tick_bar, &prearmed_bracket_limit_leg)) {
         fill_price = bar_fill_price(bar.open);
         should_fill = true;
         is_limit_fill = prearmed_bracket_limit_leg;
@@ -6075,6 +6118,7 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
         }
         ExitPathFill exit_fill = resolve_exit_path_fill(
             bar,
+            tick_bar,
             position_side_,
             stop_price,
             limit_price,
@@ -6141,24 +6185,29 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
         // Entry stop order
         if (position_side_ == PositionSide::FLAT && opposing_pass == 0 &&
             opposing_stop_entry_hits_first(
-                bar, pending_orders_, order_index, bar_index_)) {
+                tick_bar, tick_high_first, pending_orders_, order_index,
+                bar_index_)) {
             pass0_opposing_skip_ids.insert(order.id);
             return {FillEvaluation::Kind::DeferredToOpposingPass, 0.0};
         }
+        // Trigger and gap tests on the tick-quantized bar
+        // (design-stop-tick-rounding: NYSE:F 14.0349 / 14.03505 / 14.0352
+        // all fill on the 14.0351 high, 13.7451 / 13.7449 skip the 13.745
+        // low); the fill itself is unchanged.
         if (order.is_long) {
-            if (bar.high >= stop_price) {
+            if (tick_bar.high >= stop_price) {
                 // A stop the open already gapped through fills at the raw
                 // open, nearest-tick rounded (finding-446). Otherwise TV
                 // snaps the stop LEVEL to mintick in the conservative
                 // direction (long stop -> ceil).
-                fill_price = bar.open >= stop_price
+                fill_price = tick_bar.open >= stop_price
                     ? bar_fill_price(bar.open)
                     : round_to_mintick_directional(stop_price, true);
                 should_fill = true;
             }
         } else {
-            if (bar.low <= stop_price) {
-                fill_price = bar.open <= stop_price
+            if (tick_bar.low <= stop_price) {
+                fill_price = tick_bar.open <= stop_price
                     ? bar_fill_price(bar.open)
                     : round_to_mintick_directional(stop_price, false);
                 should_fill = true;
@@ -6190,18 +6239,22 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
                 is_limit_fill = true;
             }
         } else if (order.is_long) {
-            if (bar.low <= limit_price) {
+            // Resting limit: trigger and gap tests on the tick-quantized bar
+            // (design-stop-tick-rounding: NYSE:F buy-limits 13.7451 /
+            // 13.7449 skip the 13.745 low, sell-limits 14.03505 / 14.0352
+            // fill on the 14.0351 high).
+            if (tick_bar.low <= limit_price) {
                 // Gap through the limit at the open: raw open, nearest tick
                 // (finding-446); otherwise the limit level (limit-or-better
                 // snap downstream in apply_limit_fill).
-                fill_price = bar.open <= limit_price
+                fill_price = tick_bar.open <= limit_price
                     ? bar_fill_price(bar.open) : limit_price;
                 should_fill = true;
                 is_limit_fill = true;
             }
         } else {
-            if (bar.high >= limit_price) {
-                fill_price = bar.open >= limit_price
+            if (tick_bar.high >= limit_price) {
+                fill_price = tick_bar.open >= limit_price
                     ? bar_fill_price(bar.open) : limit_price;
                 should_fill = true;
                 is_limit_fill = true;

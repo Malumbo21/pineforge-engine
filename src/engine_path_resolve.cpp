@@ -71,16 +71,15 @@ int price_path_priority(const Bar& bar, double stop_level, double limit_level) {
 // Return earliest path position (segment index + [0..1] interpolation) where
 // price level is crossed on OHLC path. Returns false if never crossed.
 bool first_touch_position(const Bar& bar, double level, double* out_pos) {
+    return first_touch_position(bar, bar_path_uses_high_first(bar), level, out_pos);
+}
+
+bool first_touch_position(const Bar& bar, bool high_first, double level,
+                          double* out_pos) {
     if (std::isnan(level) || out_pos == nullptr) return false;
 
     double path[4];
-    if (bar_path_uses_high_first(bar)) {
-        // Open nearer high: O -> H -> L -> C
-        path[0] = bar.open; path[1] = bar.high; path[2] = bar.low; path[3] = bar.close;
-    } else {
-        // Open nearer low (or tied): O -> L -> H -> C
-        path[0] = bar.open; path[1] = bar.low; path[2] = bar.high; path[3] = bar.close;
-    }
+    fill_bar_path_points_ordered(bar, high_first, path);
 
     for (int i = 1; i < 4; ++i) {
         double prev = path[i - 1];
@@ -111,6 +110,12 @@ bool first_touch_position(const Bar& bar, double level, double* out_pos) {
 // broker emulator on probe 83.
 bool entry_stop_first_touch(const Bar& bar, double stop_level,
                                    bool is_long, double* out_pos) {
+    return entry_stop_first_touch(bar, bar_path_uses_high_first(bar),
+                                  stop_level, is_long, out_pos);
+}
+
+bool entry_stop_first_touch(const Bar& bar, bool high_first, double stop_level,
+                            bool is_long, double* out_pos) {
     if (std::isnan(stop_level) || out_pos == nullptr) return false;
 
     if (is_long) {
@@ -128,11 +133,7 @@ bool entry_stop_first_touch(const Bar& bar, double stop_level,
     }
 
     double path[4];
-    if (bar_path_uses_high_first(bar)) {
-        path[0] = bar.open; path[1] = bar.high; path[2] = bar.low; path[3] = bar.close;
-    } else {
-        path[0] = bar.open; path[1] = bar.low; path[2] = bar.high; path[3] = bar.close;
-    }
+    fill_bar_path_points_ordered(bar, high_first, path);
 
     for (int i = 1; i < 4; ++i) {
         double prev = path[i - 1];
@@ -166,6 +167,14 @@ bool opposing_stop_entry_hits_first(const Bar& bar,
                                            const std::vector<PendingOrder>& orders,
                                            std::size_t current_idx,
                                            int current_bar_index) {
+    return opposing_stop_entry_hits_first(bar, bar_path_uses_high_first(bar),
+                                          orders, current_idx, current_bar_index);
+}
+
+bool opposing_stop_entry_hits_first(const Bar& bar, bool high_first,
+                                    const std::vector<PendingOrder>& orders,
+                                    std::size_t current_idx,
+                                    int current_bar_index) {
     if (current_idx >= orders.size()) return false;
     const PendingOrder& current = orders[current_idx];
     auto deferred_at_consumed_close = [&](const PendingOrder& order) {
@@ -182,7 +191,8 @@ bool opposing_stop_entry_hits_first(const Bar& bar,
     if (!current_touched) return false;
 
     double cur_pos = 0.0;
-    if (!entry_stop_first_touch(bar, current.stop_price, current.is_long, &cur_pos))
+    if (!entry_stop_first_touch(bar, high_first, current.stop_price,
+                                current.is_long, &cur_pos))
         return false;
 
     const double eps = kPathPosEps;
@@ -199,7 +209,8 @@ bool opposing_stop_entry_hits_first(const Bar& bar,
         if (!other_touched) continue;
 
         double other_pos = 0.0;
-        if (!entry_stop_first_touch(bar, other.stop_price, other.is_long, &other_pos))
+        if (!entry_stop_first_touch(bar, high_first, other.stop_price,
+                                    other.is_long, &other_pos))
             continue;
         if (other_pos < cur_pos - eps) return true;
         // Path-tied opposing pair: prefer the long entry. Defer the short.
@@ -214,6 +225,13 @@ bool opposing_stop_entry_hits_first(const Bar& bar,
 DualEntryStopPathWinner dual_entry_stop_path_winner(const Bar& bar,
                                                           const std::vector<PendingOrder>& orders,
                                                           int current_bar_index) {
+    return dual_entry_stop_path_winner(bar, bar_path_uses_high_first(bar),
+                                       orders, current_bar_index);
+}
+
+DualEntryStopPathWinner dual_entry_stop_path_winner(const Bar& bar, bool high_first,
+                                                     const std::vector<PendingOrder>& orders,
+                                                     int current_bar_index) {
     const PendingOrder* long_ord = nullptr;
     const PendingOrder* short_ord = nullptr;
     for (const PendingOrder& o : orders) {
@@ -247,9 +265,9 @@ DualEntryStopPathWinner dual_entry_stop_path_winner(const Bar& bar,
     }
     double lp = 0.0;
     double sp = 0.0;
-    if (!entry_stop_first_touch(bar, long_ord->stop_price, true, &lp))
+    if (!entry_stop_first_touch(bar, high_first, long_ord->stop_price, true, &lp))
         return DualEntryStopPathWinner::None;
-    if (!entry_stop_first_touch(bar, short_ord->stop_price, false, &sp))
+    if (!entry_stop_first_touch(bar, high_first, short_ord->stop_price, false, &sp))
         return DualEntryStopPathWinner::None;
     const double eps = kPathPosEps;
     if (lp < sp - eps) {
@@ -271,6 +289,14 @@ bool exit_order_touch_position(const Bar& bar,
                                       const PendingOrder& order,
                                       PositionSide pos,
                                       double* out_pos) {
+    return exit_order_touch_position(bar, bar_path_uses_high_first(bar),
+                                     order, pos, out_pos);
+}
+
+bool exit_order_touch_position(const Bar& bar, bool high_first,
+                               const PendingOrder& order,
+                               PositionSide pos,
+                               double* out_pos) {
     if (out_pos == nullptr || pos == PositionSide::FLAT) return false;
 
     bool has_stop = !std::isnan(order.stop_price);
@@ -284,14 +310,14 @@ bool exit_order_touch_position(const Bar& bar,
                 *out_pos = 0.0;  // gap-through at bar open
                 return true;
             }
-            return first_touch_position(bar, order.stop_price, out_pos);
+            return first_touch_position(bar, high_first, order.stop_price, out_pos);
         }
         if (!(bar.high >= order.limit_price)) return false;
         if (bar.open >= order.limit_price) {
             *out_pos = 0.0;
             return true;
         }
-        return first_touch_position(bar, order.limit_price, out_pos);
+        return first_touch_position(bar, high_first, order.limit_price, out_pos);
     }
 
     // SHORT position
@@ -301,14 +327,14 @@ bool exit_order_touch_position(const Bar& bar,
             *out_pos = 0.0;
             return true;
         }
-        return first_touch_position(bar, order.stop_price, out_pos);
+        return first_touch_position(bar, high_first, order.stop_price, out_pos);
     }
     if (!(bar.low <= order.limit_price)) return false;
     if (bar.open <= order.limit_price) {
         *out_pos = 0.0;
         return true;
     }
-    return first_touch_position(bar, order.limit_price, out_pos);
+    return first_touch_position(bar, high_first, order.limit_price, out_pos);
 }
 
 
@@ -316,6 +342,14 @@ bool oca_exit_sibling_hits_first(const Bar& bar,
                                         const std::vector<PendingOrder>& orders,
                                         std::size_t current_idx,
                                         PositionSide pos) {
+    return oca_exit_sibling_hits_first(bar, bar_path_uses_high_first(bar),
+                                       orders, current_idx, pos);
+}
+
+bool oca_exit_sibling_hits_first(const Bar& bar, bool high_first,
+                                 const std::vector<PendingOrder>& orders,
+                                 std::size_t current_idx,
+                                 PositionSide pos) {
     if (current_idx >= orders.size() || pos == PositionSide::FLAT) return false;
     const PendingOrder& current = orders[current_idx];
     if (current.type != OrderType::RAW_ORDER) return false;
@@ -325,7 +359,7 @@ bool oca_exit_sibling_hits_first(const Bar& bar,
     if (!current_exit_style) return false;
 
     double cur_pos = 0.0;
-    if (!exit_order_touch_position(bar, current, pos, &cur_pos)) return false;
+    if (!exit_order_touch_position(bar, high_first, current, pos, &cur_pos)) return false;
 
     const double eps = kPathPosEps;
     for (std::size_t j = 0; j < orders.size(); ++j) {
@@ -337,7 +371,7 @@ bool oca_exit_sibling_hits_first(const Bar& bar,
         if (!other_exit_style) continue;
 
         double other_pos = 0.0;
-        if (!exit_order_touch_position(bar, other, pos, &other_pos)) continue;
+        if (!exit_order_touch_position(bar, high_first, other, pos, &other_pos)) continue;
         if (other_pos < cur_pos - eps) return true;
     }
     return false;
@@ -358,6 +392,21 @@ bool order_is_exit_style(const PendingOrder& o, PositionSide pos) {
 
 // PathCrossKind, PathCrossEvent, ExitPathFill, DualEntryStopPathWinner
 // are defined in engine_internal.hpp.
+
+void fill_bar_path_points_ordered(const Bar& bar, bool high_first, double path[4]) {
+    if (high_first) {
+        path[0] = bar.open;
+        path[1] = bar.high;
+        path[2] = bar.low;
+        path[3] = bar.close;
+    } else {
+        path[0] = bar.open;
+        path[1] = bar.low;
+        path[2] = bar.high;
+        path[3] = bar.close;
+    }
+}
+
 
 void fill_bar_path_points(const Bar& bar, double path[4]) {
     if (bar_path_uses_high_first(bar)) {
@@ -410,16 +459,9 @@ void append_cross_event(CrossEventList* events,
 }
 
 
-CrossEventList collect_cross_events(double from_price,
-                                                        double to_price,
-                                                        double stop_level,
-                                                        double limit_level,
-                                                        double trail_level) {
-    CrossEventList events;
-    append_cross_event(&events, from_price, to_price, stop_level, PathCrossKind::STOP);
-    append_cross_event(&events, from_price, to_price, limit_level, PathCrossKind::LIMIT);
-    append_cross_event(&events, from_price, to_price, trail_level, PathCrossKind::TRAIL);
+namespace {
 
+void sort_cross_events(CrossEventList& events) {
     // Insertion sort over <=3 elements with the same comparator the previous
     // std::sort used. The three kinds are pairwise distinct, so the comparator
     // is a strict total order here and any correct sort yields the identical
@@ -436,6 +478,37 @@ CrossEventList collect_cross_events(double from_price,
         while (j >= 0 && before(key, events.ev[j])) { events.ev[j + 1] = events.ev[j]; --j; }
         events.ev[j + 1] = key;
     }
+}
+
+}  // namespace
+
+
+CrossEventList collect_cross_events(double from_price,
+                                                        double to_price,
+                                                        double stop_level,
+                                                        double limit_level,
+                                                        double trail_level) {
+    CrossEventList events;
+    append_cross_event(&events, from_price, to_price, stop_level, PathCrossKind::STOP);
+    append_cross_event(&events, from_price, to_price, limit_level, PathCrossKind::LIMIT);
+    append_cross_event(&events, from_price, to_price, trail_level, PathCrossKind::TRAIL);
+    sort_cross_events(events);
+    return events;
+}
+
+
+CrossEventList collect_cross_events_split(double from_price,
+                                          double to_price,
+                                          double tick_from_price,
+                                          double tick_to_price,
+                                          double stop_level,
+                                          double limit_level,
+                                          double trail_level) {
+    CrossEventList events;
+    append_cross_event(&events, tick_from_price, tick_to_price, stop_level, PathCrossKind::STOP);
+    append_cross_event(&events, tick_from_price, tick_to_price, limit_level, PathCrossKind::LIMIT);
+    append_cross_event(&events, from_price, to_price, trail_level, PathCrossKind::TRAIL);
+    sort_cross_events(events);
     return events;
 }
 
@@ -651,7 +724,9 @@ double active_exit_trail_level(const ExitTrailState& s, bool is_long) {
 // active trail level, the activation-as-exit level, or the stop / limit in the
 // firing direction, the exit fills at bar.open. Order matters — trail first,
 // then activation-as-exit, then stop, then limit (matches the original cascade).
-bool try_exit_open_gap_fill(const Bar& bar, bool is_long,
+// design-stop-tick-rounding: the stop / limit legs test `tick_open` (the
+// tick-quantized open), the trail legs the raw open.
+bool try_exit_open_gap_fill(const Bar& bar, double tick_open, bool is_long,
                             bool has_stop, double stop_price,
                             bool has_limit, double limit_price,
                             const ExitTrailState& trail,
@@ -667,13 +742,13 @@ bool try_exit_open_gap_fill(const Bar& bar, bool is_long,
     if (is_long) {
         if (!std::isnan(trail_level) && bar.open <= trail_level) return fill_at_open(false);
         if (trail.exits_at_activation && bar.open >= trail.activation_level) return fill_at_open(false);
-        if (has_stop && bar.open <= stop_price) return fill_at_open(false);
-        if (has_limit && bar.open >= limit_price) return fill_at_open(true);
+        if (has_stop && tick_open <= stop_price) return fill_at_open(false);
+        if (has_limit && tick_open >= limit_price) return fill_at_open(true);
     } else {
         if (!std::isnan(trail_level) && bar.open >= trail_level) return fill_at_open(false);
         if (trail.exits_at_activation && bar.open <= trail.activation_level) return fill_at_open(false);
-        if (has_stop && bar.open >= stop_price) return fill_at_open(false);
-        if (has_limit && bar.open <= limit_price) return fill_at_open(true);
+        if (has_stop && tick_open >= stop_price) return fill_at_open(false);
+        if (has_limit && tick_open <= limit_price) return fill_at_open(true);
     }
     return false;
 }
@@ -837,6 +912,18 @@ double exit_order_earliest_path_metric_no_trail(
     PositionSide position_side,
     bool is_entry_bar,
     double position_entry_price) {
+    return exit_order_earliest_path_metric_no_trail(
+        bar, bar_path_uses_high_first(bar), order, position_side,
+        is_entry_bar, position_entry_price);
+}
+
+double exit_order_earliest_path_metric_no_trail(
+    const Bar& bar,
+    bool high_first,
+    const PendingOrder& order,
+    PositionSide position_side,
+    bool is_entry_bar,
+    double position_entry_price) {
     if (order.type != OrderType::EXIT) {
         return std::numeric_limits<double>::infinity();
     }
@@ -870,7 +957,7 @@ double exit_order_earliest_path_metric_no_trail(
     }
 
     double path[4];
-    fill_bar_path_points(bar, path);
+    fill_bar_path_points_ordered(bar, high_first, path);
 
     for (int seg_idx = 1; seg_idx < 4; ++seg_idx) {
         const double from_price = path[seg_idx - 1];
@@ -898,6 +985,29 @@ double exit_order_earliest_path_metric_no_trail(
 
 
 ExitPathFill resolve_exit_path_fill(const Bar& bar,
+                                           PositionSide position_side,
+                                           double stop_price,
+                                           double limit_price,
+                                           double trail_points,
+                                           double trail_price,
+                                           double trail_offset,
+                                           double position_entry_price,
+                                           double trail_best_start,
+                                           bool is_entry_bar,
+                                           bool magnifier_active,
+                                           double syminfo_mintick,
+                                           bool cascade_wp_gap,
+                                           double path_start_position) {
+    return resolve_exit_path_fill(bar, bar, position_side, stop_price, limit_price,
+                                  trail_points, trail_price, trail_offset,
+                                  position_entry_price, trail_best_start,
+                                  is_entry_bar, magnifier_active, syminfo_mintick,
+                                  cascade_wp_gap, path_start_position);
+}
+
+
+ExitPathFill resolve_exit_path_fill(const Bar& bar,
+                                           const Bar& tick_bar,
                                            PositionSide position_side,
                                            double stop_price,
                                            double limit_price,
@@ -940,7 +1050,7 @@ ExitPathFill resolve_exit_path_fill(const Bar& bar,
     const double path_cursor = std::clamp(path_start_position, 0.0, 3.0);
     if (path_cursor <= kPathPosEps
         && (!is_entry_bar || magnifier_active || cascade_wp_gap)) {
-        if (try_exit_open_gap_fill(bar, is_long, has_stop, stop_price,
+        if (try_exit_open_gap_fill(bar, tick_bar.open, is_long, has_stop, stop_price,
                                    has_limit, limit_price, trail, &fill)) {
             // A gap fill happens at the bar's open — path position 0.
             fill.path_position = 0.0;
@@ -956,8 +1066,15 @@ ExitPathFill resolve_exit_path_fill(const Bar& bar,
         observe_exit_trail_open(is_long, bar.open, &trail);
     }
 
+    // design-stop-tick-rounding: the tick-quantized twin walks the raw bar's
+    // leg order, so both paths share segment indices and the cursor; stop /
+    // limit crossings are taken on the tick path, trail crossings (and the
+    // trail's running best) on the raw path.
+    const bool high_first = bar_path_uses_high_first(bar);
     double path[4];
-    fill_bar_path_points(bar, path);
+    double tick_path[4];
+    fill_bar_path_points_ordered(bar, high_first, path);
+    fill_bar_path_points_ordered(tick_bar, high_first, tick_path);
 
     for (int seg_idx = 1; seg_idx < 4; ++seg_idx) {
         // A priced parent entry can activate a resting from_entry bracket in
@@ -970,10 +1087,13 @@ ExitPathFill resolve_exit_path_fill(const Bar& bar,
         }
         double from_price = path[seg_idx - 1];
         const double to_price = path[seg_idx];
+        double tick_from_price = tick_path[seg_idx - 1];
+        const double tick_to_price = tick_path[seg_idx];
         const double seg_start = static_cast<double>(seg_idx - 1);
         if (path_cursor > seg_start + kPathPosEps) {
             const double t = std::clamp(path_cursor - seg_start, 0.0, 1.0);
             from_price += (to_price - from_price) * t;
+            tick_from_price += (tick_to_price - tick_from_price) * t;
         }
         const bool rising = to_price > from_price;
         const bool falling = to_price < from_price;
@@ -985,8 +1105,9 @@ ExitPathFill resolve_exit_path_fill(const Bar& bar,
                                    stop_price, limit_price, trail,
                                    &stop_level, &limit_level, &trail_level);
 
-        CrossEventList events =
-            collect_cross_events(from_price, to_price, stop_level, limit_level, trail_level);
+        CrossEventList events = collect_cross_events_split(
+            from_price, to_price, tick_from_price, tick_to_price,
+            stop_level, limit_level, trail_level);
         if (events.n != 0) {
             fill.should_fill = true;
             fill.fill_price = events.ev[0].price;
@@ -995,9 +1116,13 @@ ExitPathFill resolve_exit_path_fill(const Bar& bar,
             // Chronology of the fill itself, in first_touch_position units.
             // Interpolate against the FULL segment (path[seg_idx-1] ->
             // path[seg_idx]) even when a mid-path cursor truncated it, so
-            // the scale matches first_touch_position's exactly.
-            const double seg_origin = path[seg_idx - 1];
-            const double seg_denom = to_price - seg_origin;
+            // the scale matches first_touch_position's exactly. A stop /
+            // limit crossing is placed on the tick path it was found on.
+            const bool on_tick_path = !fill.is_trail;
+            const double seg_origin = on_tick_path ? tick_path[seg_idx - 1]
+                                                   : path[seg_idx - 1];
+            const double seg_end = on_tick_path ? tick_to_price : to_price;
+            const double seg_denom = seg_end - seg_origin;
             double fill_pos = seg_start;
             if (std::abs(seg_denom) > kSegmentDenomEps) {
                 fill_pos += (fill.fill_price - seg_origin) / seg_denom;
