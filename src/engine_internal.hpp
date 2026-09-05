@@ -351,15 +351,21 @@ CrossEventList collect_cross_events(double from_price,
                                                         double trail_level);
 
 // design-stop-tick-rounding: stop and limit crossings are taken on the
-// tick-quantized segment (tick_from -> tick_to), the trail crossing on the raw
-// segment (from -> to); the merged list keeps collect_cross_events's order.
+// tick-quantized segment (tick_from -> tick_to), an ACTIVE trail's level
+// crossing on the raw segment (from -> to); the merged list keeps
+// collect_cross_events's order. design-trail-activation-tick-bar: a dormant
+// exit-at-activation trail's activation level (trail_activation_level, set
+// only when trail_level is NaN) is reached on the tick-quantized segment and
+// reported as the TRAIL event.
 CrossEventList collect_cross_events_split(double from_price,
                                           double to_price,
                                           double tick_from_price,
                                           double tick_to_price,
                                           double stop_level,
                                           double limit_level,
-                                          double trail_level);
+                                          double trail_level,
+                                          double trail_activation_level
+                                              = std::numeric_limits<double>::quiet_NaN());
 
 
 // fill_at_bar_point (optional) reports whether the returned fill price is a

@@ -503,11 +503,22 @@ CrossEventList collect_cross_events_split(double from_price,
                                           double tick_to_price,
                                           double stop_level,
                                           double limit_level,
-                                          double trail_level) {
+                                          double trail_level,
+                                          double trail_activation_level) {
     CrossEventList events;
     append_cross_event(&events, tick_from_price, tick_to_price, stop_level, PathCrossKind::STOP);
     append_cross_event(&events, tick_from_price, tick_to_price, limit_level, PathCrossKind::LIMIT);
-    append_cross_event(&events, from_price, to_price, trail_level, PathCrossKind::TRAIL);
+    // An ACTIVE trail's level (running raw best -/+ offset) is crossed on the
+    // raw path; a dormant exit-at-activation trail's ACTIVATION is reached on
+    // the tick-quantized path (design-trail-activation-tick-bar, below). The
+    // two are exclusive per segment (select_exit_segment_levels), so the
+    // list still holds at most one TRAIL event.
+    if (!std::isnan(trail_level)) {
+        append_cross_event(&events, from_price, to_price, trail_level, PathCrossKind::TRAIL);
+    } else {
+        append_cross_event(&events, tick_from_price, tick_to_price,
+                           trail_activation_level, PathCrossKind::TRAIL);
+    }
     sort_cross_events(events);
     return events;
 }
@@ -590,6 +601,38 @@ bool resolve_entry_stop_limit_fill(const Bar& bar,
 
 
 namespace {
+
+// design-trail-activation-tick-bar (round 7 family K): TradingView tests a
+// trailing stop's ACTIVATION against the bar's OHLC quantized to the tick
+// (nearest, floor(p / mintick + 0.5), the round-6 stop / limit trigger rule)
+// while the trail's running best stays the raw print. Pinned with `lab tv`
+// on NYSE:F 15m (scratchpad/r7/pins/f15-trail-0415-{reissue,fixed760,
+// fixed754}, 2025-04-10..18, fixed 100 shares): a short entered 04-15
+// 14:45Z @9.49 with strategy.exit(trail_points = close * 0.008 /
+// syminfo.mintick, trail_offset = 0) re-issued every bar — or a fixed 7.60 /
+// 7.54 ticks, all ceil to 8 -> activation 9.41 — exits on the 15:45Z bar
+// @9.41 in every tape. That bar's raw low is 9.415 (> 9.41: the engine's
+// no-activate, which slid the exit to the 16:45Z low 9.41) and its
+// tick-quantized low is 9.41 (9.415 is 9.41499.. in binary -> floor(941.499
+// + 0.5) = 941), which reaches the activation and, with offset 0, exits
+// one-shot at the level. The boztilkiserhan wma-adx / wma-rsi probes' 1-4
+// bar exit slides (04-15, 06-20, 2026-01-21) and their exitP90 residual are
+// this. The trail's peak / trough path itself stays raw (round 5; the
+// round-6 stopround-xt-L-trail tape: a quantized 14.04 best would have
+// filled 02-20 @14.01 where TradingView exits 02-23 at the open), and so
+// does the open-gap test (unpinned). Same quantizer as
+// BacktestEngine::tick_grid_price, spelled k / (1 / mintick) for decimal
+// ticks so an on-grid level compares equal bit for bit.
+double tick_quantized_price(double price, double mintick) {
+    if (std::isnan(price) || !(mintick > 0.0)) return price;
+    const double k = std::floor(price / mintick + 0.5);
+    const double inv = 1.0 / mintick;
+    const double inv_int = std::floor(inv + 0.5);
+    if (inv_int > 0.0 && std::abs(inv - inv_int) <= 1e-6 * inv_int) {
+        return k / inv_int;
+    }
+    return k * mintick;
+}
 
 // Per-bar trail state used while walking the synthesized OHLC path for an EXIT.
 // activation_level is the absolute price at which the trail arms;
@@ -702,8 +745,12 @@ ExitTrailState compute_exit_trail_state(bool is_long, double trail_points,
     // running after it activates.
     const bool one_shot_zero_offset_trail = zero_tick_offset;
     if (!one_shot_zero_offset_trail && !std::isnan(s.best_price)) {
-        s.trail_active = is_long ? (s.best_price >= s.activation_level)
-                                 : (s.best_price <= s.activation_level);
+        // The carried best is the raw running extreme; the activation test
+        // reads it tick-quantized (design-trail-activation-tick-bar), as the
+        // broker read the bars that produced it.
+        const double tick_best = tick_quantized_price(s.best_price, syminfo_mintick);
+        s.trail_active = is_long ? (tick_best >= s.activation_level)
+                                 : (tick_best <= s.activation_level);
     }
     return s;
 }
@@ -756,16 +803,20 @@ bool try_exit_open_gap_fill(const Bar& bar, double tick_open, bool is_long,
 // Trigger levels for one OHLC-path segment. Stops fire on against-direction
 // segments (long stops on falling, short stops on rising); limits fire on
 // with-direction segments. The trail level is the active one on stop-firing
-// segments; on limit-firing segments it can still arm if the segment crosses
-// up/down through the activation level for an exit-at-activation trail.
+// segments (crossed on the raw path); on limit-firing segments a dormant
+// exit-at-activation trail can still fire if the segment reaches its
+// activation level, which is reported separately because it is tested on
+// the tick-quantized path (design-trail-activation-tick-bar).
 void select_exit_segment_levels(bool is_long, bool rising, bool falling,
                                 double stop_price, double limit_price,
                                 const ExitTrailState& trail,
                                 double* stop_level, double* limit_level,
-                                double* trail_level) {
+                                double* trail_level,
+                                double* trail_activation_level) {
     *stop_level = std::numeric_limits<double>::quiet_NaN();
     *limit_level = std::numeric_limits<double>::quiet_NaN();
     *trail_level = std::numeric_limits<double>::quiet_NaN();
+    *trail_activation_level = std::numeric_limits<double>::quiet_NaN();
     const bool stop_seg = is_long ? falling : rising;
     const bool limit_seg = is_long ? rising : falling;
     if (stop_seg) {
@@ -774,28 +825,31 @@ void select_exit_segment_levels(bool is_long, bool rising, bool falling,
     } else if (limit_seg) {
         *limit_level = limit_price;
         if (trail.exits_at_activation && !trail.trail_active) {
-            *trail_level = trail.activation_level;
+            *trail_activation_level = trail.activation_level;
         }
     }
 }
 
 // After a segment is walked without a fill, advance trail's best price (only
-// on with-direction segments) and arm the trail once best crosses activation.
+// on with-direction segments, the RAW segment end) and arm the trail once the
+// tick-quantized segment end reaches the activation
+// (design-trail-activation-tick-bar).
 void update_exit_trail_state(bool is_long, bool rising, bool falling,
-                             double to_price, ExitTrailState* trail) {
+                             double to_price, double tick_to_price,
+                             ExitTrailState* trail) {
     if (!trail->has_trail) return;
     if (is_long && rising) {
         if (std::isnan(trail->best_price) || to_price > trail->best_price) {
             trail->best_price = to_price;
         }
-        if (!trail->trail_active && trail->best_price >= trail->activation_level) {
+        if (!trail->trail_active && tick_to_price >= trail->activation_level) {
             trail->trail_active = true;
         }
     } else if (!is_long && falling) {
         if (std::isnan(trail->best_price) || to_price < trail->best_price) {
             trail->best_price = to_price;
         }
-        if (!trail->trail_active && trail->best_price <= trail->activation_level) {
+        if (!trail->trail_active && tick_to_price <= trail->activation_level) {
             trail->trail_active = true;
         }
     }
@@ -1101,13 +1155,15 @@ ExitPathFill resolve_exit_path_fill(const Bar& bar,
         double stop_level;
         double limit_level;
         double trail_level;
+        double trail_activation_level;
         select_exit_segment_levels(is_long, rising, falling,
                                    stop_price, limit_price, trail,
-                                   &stop_level, &limit_level, &trail_level);
+                                   &stop_level, &limit_level, &trail_level,
+                                   &trail_activation_level);
 
         CrossEventList events = collect_cross_events_split(
             from_price, to_price, tick_from_price, tick_to_price,
-            stop_level, limit_level, trail_level);
+            stop_level, limit_level, trail_level, trail_activation_level);
         if (events.n != 0) {
             fill.should_fill = true;
             fill.fill_price = events.ev[0].price;
@@ -1117,8 +1173,10 @@ ExitPathFill resolve_exit_path_fill(const Bar& bar,
             // Interpolate against the FULL segment (path[seg_idx-1] ->
             // path[seg_idx]) even when a mid-path cursor truncated it, so
             // the scale matches first_touch_position's exactly. A stop /
-            // limit crossing is placed on the tick path it was found on.
-            const bool on_tick_path = !fill.is_trail;
+            // limit crossing — and a dormant trail's activation reach — is
+            // placed on the tick path it was found on; an active trail's
+            // level crossing on the raw path.
+            const bool on_tick_path = !fill.is_trail || std::isnan(trail_level);
             const double seg_origin = on_tick_path ? tick_path[seg_idx - 1]
                                                    : path[seg_idx - 1];
             const double seg_end = on_tick_path ? tick_to_price : to_price;
@@ -1131,7 +1189,8 @@ ExitPathFill resolve_exit_path_fill(const Bar& bar,
             return fill;
         }
 
-        update_exit_trail_state(is_long, rising, falling, to_price, &trail);
+        update_exit_trail_state(is_long, rising, falling, to_price,
+                                tick_to_price, &trail);
     }
 
     return fill;
