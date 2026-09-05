@@ -148,11 +148,49 @@ bool internal::dual_stop_margin_decline_can_continue_path(
 
 // strategy_entry / strategy_close / strategy_close_all / strategy_exit
 // moved to engine_strategy_commands.cpp.
+// round 8 family S: the transaction model is pinned on books made only of
+// its members — the bar's high-level MARKET entries (at most two, distinct
+// ids) and its targeted default-FIFO closes. Anything else in the book (a
+// resting priced order, a strategy.exit bracket, a close_all, a third entry,
+// a same-id pair) is outside the tapes; strip the membership so every order
+// takes its established kernel, byte-identical to the pre-famS engine.
+void BacktestEngine::finalize_same_bar_market_tx_book() {
+    bool any_member = false;
+    bool exact = true;
+    int market_members = 0;
+    std::string first_market_id;
+    for (const PendingOrder& order : pending_orders_) {
+        if (!order.sbmt_member) {
+            exact = false;
+            continue;
+        }
+        any_member = true;
+        if (order.type == OrderType::MARKET) {
+            ++market_members;
+            if (market_members == 1) {
+                first_market_id = order.id;
+            } else if (market_members > 2 || order.id == first_market_id) {
+                exact = false;
+            }
+        }
+    }
+    if (!any_member || (exact && same_bar_market_tx_scope_is_live())) return;
+    for (PendingOrder& order : pending_orders_) {
+        order.sbmt_member = false;
+        order.sbmt_own_qty = std::numeric_limits<double>::quiet_NaN();
+        order.sbmt_tx_qty = std::numeric_limits<double>::quiet_NaN();
+        order.sbmt_kept_over_cap = false;
+        order.sbmt_close_qty = std::numeric_limits<double>::quiet_NaN();
+        order.sbmt_close_buy = false;
+    }
+}
+
 void BacktestEngine::process_pending_orders(const Bar& bar) {
     // Update risk state
     update_risk_state();
     finalize_default_flat_market_gross_admission();
     finalize_pending_flat_market_pairs(bar);
+    finalize_same_bar_market_tx_book();
 
     double trail_best_path_state = trail_best_price_;
     update_trail_best_for_bar_open(bar);
@@ -3122,6 +3160,23 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
             int pa = fill_phase(a);
             int pb = fill_phase(b);
             if (pa != pb) return pa < pb;
+            // round 8 family S, rule 3: within the open-tick phase every BUY
+            // member of the same-bar market transaction fills before every
+            // SELL member (dbl-short-full: Long +2, close-Short +1, then
+            // Short -2; dbl-long-mirror-closefirst: Long +2, then Short -2,
+            // close-Long -1). Non-members keep their established order and
+            // rank with the buys; the key is a pure function of the order.
+            if (pa == 0) {
+                auto sbmt_sell_rank = [](const PendingOrder& o) {
+                    if (!o.sbmt_member) return 0;
+                    const bool buy = o.type == OrderType::MARKET
+                        ? o.is_long : o.sbmt_close_buy;
+                    return buy ? 0 : 1;
+                };
+                const int ra = sbmt_sell_rank(a);
+                const int rb = sbmt_sell_rank(b);
+                if (ra != rb) return ra < rb;
+            }
             if (retained_child_parent_first_incarnation != 0) {
                 auto effective_seq = [&](const PendingOrder& order) {
                     if (order.incarnation
@@ -3376,6 +3431,124 @@ bool BacktestEngine::short_seed_collision_final_short_is_live(
             <= std::max(1e-12, std::abs(source_long.price) * 1e-12);
 }
 
+// round 8 family S — the same-bar MARKET transaction (rules, tapes and the
+// admission census on PendingOrder::sbmt_member). The scope is the pinned
+// sensor fixture and the mover corpus: ordinary close-calc processing, one
+// admitted entry (Pine pyramiding=0), FIXED default sizing, no risk policy,
+// default-FIFO closes. Everything else keeps its established kernels — the
+// KI-65 pyramiding=2 pair, the percent-of-equity gross admission and the
+// short-seed collision (finding 272, PERCENT/CASH cohort) are untouched; on
+// the FIXED short-seed book this model and that kernel agree lot for lot.
+bool BacktestEngine::same_bar_market_tx_scope_is_live() const {
+    return !process_orders_on_close_
+        && !calc_on_order_fills_
+        && !coof_scheduler_active_
+        && !coof_fill_recalc_active_
+        && !bar_magnifier_enabled_
+        && !stream_warmup_mode_
+        && stream_phase_ == StreamPhase::IDLE
+        && !close_entries_rule_any_
+        && pyramiding_ <= 1
+        && default_qty_type_ == QtyType::FIXED
+        // The sensor tapes and the mover corpus run TradingView's zero-cost
+        // broker; a slipped or commissioned same-bar transaction is unpinned
+        // and keeps the established kernels (the short-seed kernel drew the
+        // same line).
+        && slippage_ == 0
+        && commission_value_ == 0.0
+        && risk_direction_ == RiskDirection::BOTH
+        && risk_max_cons_loss_days_ == 0
+        && risk_max_drawdown_ <= 0.0
+        && risk_max_intraday_loss_ <= 0.0
+        && risk_max_position_size_ <= 0.0
+        && max_intraday_filled_orders_ <= 0
+        && !risk_halted_;
+}
+
+// Rule 4's artifact: a member strategy.close(id) reaching its fill after the
+// side it targeted is gone (the opposite same-bar market already reversed
+// the position) fills as a NEW lot in its own direction iff an entry with
+// the same id is still pending on this bar — i.e. still ahead of it in the
+// sorted book (the fill loop is index-ascending; every buy precedes every
+// sell, so a buy-close finds its sell-side entry unfilled). Otherwise the
+// close is cancelled (rev-plus-close, dbl-short-swapped: no artifact row).
+bool BacktestEngine::same_bar_market_close_artifact_is_live(
+        const PendingOrder& order) const {
+    if (!order.sbmt_member
+        || order.type != OrderType::EXIT
+        || !std::isfinite(order.sbmt_close_qty)
+        || order.sbmt_close_qty <= kQtyEpsilon
+        || order.created_bar + 1 != bar_index_
+        || order.suppress_as_declined_reversal_close
+        || position_side_ == PositionSide::FLAT
+        || !same_bar_market_tx_scope_is_live()) {
+        return false;
+    }
+    const PositionSide target_side =
+        order.sbmt_close_buy ? PositionSide::SHORT : PositionSide::LONG;
+    if (position_side_ == target_side) return false;
+    if (order.id.size() <= kClosePrefix.size()
+        || order.id.compare(0, kClosePrefix.size(), kClosePrefix) != 0) {
+        return false;
+    }
+    const std::string target_id = order.id.substr(kClosePrefix.size());
+    if (pending_orders_.empty()
+        || &order < pending_orders_.data()
+        || &order >= pending_orders_.data() + pending_orders_.size()) {
+        return false;
+    }
+    const size_t self = static_cast<size_t>(&order - pending_orders_.data());
+    for (size_t j = self + 1; j < pending_orders_.size(); ++j) {
+        const PendingOrder& sib = pending_orders_[j];
+        if (sib.type == OrderType::MARKET
+            && sib.sbmt_member
+            && sib.id == target_id
+            && sib.created_bar == order.created_bar
+            && sib.is_long != order.sbmt_close_buy) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Rules 1/2 at the fill: the frozen transaction closes what it can of the
+// live opposite position (FIFO, one trade row per lot) and opens exactly the
+// remainder in its own direction — never the fill-time position plus own
+// qty. dbl-short-full: Short 2 against long 2 (entry lot + artifact) closes
+// both and opens nothing (TV FLAT); dbl-short-noclose: Short 2 against long
+// 1 closes 1 and opens 1 (TV SHORT 1); dbl-short-q1-entry2: Short 3 against
+// long 2 opens 1.
+void BacktestEngine::apply_same_bar_market_tx_reversal(
+        PendingOrder& order, double fill_price, const Bar& bar,
+        double& trail_best_path_state) {
+    const PositionSide requested =
+        order.is_long ? PositionSide::LONG : PositionSide::SHORT;
+    const double tx = order.sbmt_tx_qty;
+    const double close_qty = std::min(tx, position_qty_);
+    if (close_qty >= position_qty_ - kQtyEpsilon) {
+        execute_market_exit(fill_price);
+    } else if (close_qty > kQtyEpsilon) {
+        execute_partial_exit_qty(fill_price, close_qty,
+                                 PositionReductionCause::SCRIPT_ORDER);
+    }
+    const double remainder = tx - close_qty;
+    if (remainder > kQtyEpsilon && std::isfinite(fill_price)) {
+        const double entry_fill = apply_fill_slippage(fill_price, order.is_long);
+        open_fresh_position(requested, entry_fill, remainder, order.id,
+                            order.incarnation);
+        pyramid_entries_.back().entry_comment = order.comment;
+    }
+    // Mirror the ordinary market-entry kernel's trail handling (open-tick
+    // fill: the bar's extreme folds in for same-bar exit evaluation).
+    const double trail_best_after_fill = trail_best_price_;
+    if (position_side_ == PositionSide::LONG) {
+        trail_best_price_ = std::max(trail_best_price_, bar.high);
+    } else if (position_side_ == PositionSide::SHORT) {
+        trail_best_price_ = std::min(trail_best_price_, bar.low);
+    }
+    trail_best_path_state = trail_best_after_fill;
+}
+
 // A strategy.exit can be armed on the signal bar together with the MARKET
 // strategy.entry named by from_entry. The child is valid before the parent
 // fills: TradingView binds it to the eventual lot, and if the next open has
@@ -3597,7 +3770,9 @@ void BacktestEngine::compact_filled_pending_orders(
                 || pending_orders_[read].type == OrderType::MARKET)
             && pending_orders_[read].is_long == exit_closed_was_long
             && pending_orders_[read].created_position_side == closed_side
-            && !resting_limit_entry_carry;
+            && !resting_limit_entry_carry
+            // round 8 family S, rule 2 (lockstep with classify_order_eligibility).
+            && !pending_orders_[read].sbmt_kept_over_cap;
         if (!is_filled(read)
             && !stale_same_direction_entry_after_exit) {
             if (write != read) pending_orders_[write] = std::move(pending_orders_[read]);
@@ -3870,10 +4045,17 @@ void BacktestEngine::apply_filled_order_to_state(
     // 992/992 common cases above held+transaction margin and only the first in
     // 470/471 cases below it. Without this gate the second order always flips
     // back, doubling one trade per affected bar.
+    // round 8 family S: a same-bar market-transaction member was admitted at
+    // placement on this very arithmetic (held + own + the opposite pending
+    // open leg) and TradingView does not re-cost it at the fill — with the
+    // close artifact lot open the fill-time form would charge five lots
+    // where the famS-adm-es-1e6 tape fills on three (3 x 5,627 x 50 <= 1e6).
+    // Without the artifact the two forms agree, so gb2wgkrtxs is untouched.
     if (order.type == OrderType::MARKET
         && std::isnan(order.qty)
         && default_qty_type_ == QtyType::FIXED
-        && position_side_ != PositionSide::FLAT) {
+        && position_side_ != PositionSide::FLAT
+        && !order.sbmt_member) {
         const PositionSide requested =
             order.is_long ? PositionSide::LONG : PositionSide::SHORT;
         const bool same_side_at_creation =
@@ -5340,16 +5522,83 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
         return;
     }
 
+    // round 8 family S (PendingOrder::sbmt_member): a member's broker size is
+    // the transaction frozen at placement. Against the live opposite position
+    // it closes min(tx, live) and opens the remainder (rules 1/2); a same-
+    // direction over-cap member whose opposite market never moved the
+    // position is TradingView's rejected add (no fill, never re-roled); from
+    // flat with a pending opposite market that did not fill first it opens
+    // the frozen size. The ordinary single-entry shapes (tx == own) below
+    // stay byte-identical.
+    bool sbmt_flat_frozen_tx = false;
+    if (order.sbmt_member && std::isfinite(order.sbmt_tx_qty)
+        && order.sbmt_tx_qty > kQtyEpsilon
+        && same_bar_market_tx_scope_is_live()) {
+        const PositionSide requested =
+            order.is_long ? PositionSide::LONG : PositionSide::SHORT;
+        if (position_side_ != PositionSide::FLAT
+            && position_side_ != requested) {
+            apply_same_bar_market_tx_reversal(order, fill_price, bar,
+                                              trail_best_path_state);
+            return;
+        }
+        if (position_side_ == requested && order.sbmt_kept_over_cap) {
+            // dbl-long-mirror-closefirst: the kept Long buys its frozen 2
+            // while still long (long 3) before the Short and close-Long
+            // sell — an add past the pyramiding cap, never a rejected add.
+            const double add_qty = order.sbmt_tx_qty;
+            const double entry_fill =
+                apply_fill_slippage(fill_price, order.is_long);
+            if (std::isfinite(entry_fill) && add_qty > kQtyEpsilon) {
+                const double total_qty = position_qty_ + add_qty;
+                position_entry_price_ =
+                    (position_entry_price_ * position_qty_
+                     + entry_fill * add_qty) / total_qty;
+                position_qty_ = total_qty;
+                ++position_entry_count_;
+                trail_best_price_ = entry_fill;
+                PyramidEntry lot{};
+                lot.price = entry_fill;
+                lot.time = current_bar_.timestamp;
+                lot.qty = add_qty;
+                lot.entry_id = order.id;
+                lot.entry_bar_index = bar_index_;
+                lot.entry_comment = order.comment;
+                lot.entry_incarnation = order.incarnation;
+                lot.market_pyramid_add = true;
+                snapshot_entry_commission(lot);
+                pyramid_entries_.push_back(std::move(lot));
+                id_unclosed_qty_[order.id] += add_qty;
+                cycle_filled_entry_ids_.insert(order.id);
+            }
+            const double trail_best_after_fill = trail_best_price_;
+            if (position_side_ == PositionSide::LONG) {
+                trail_best_price_ = std::max(trail_best_price_, bar.high);
+            } else if (position_side_ == PositionSide::SHORT) {
+                trail_best_price_ = std::min(trail_best_price_, bar.low);
+            }
+            trail_best_path_state = trail_best_after_fill;
+            return;
+        }
+        sbmt_flat_frozen_tx =
+            position_side_ == PositionSide::FLAT
+            && std::isfinite(order.sbmt_own_qty)
+            && order.sbmt_tx_qty > order.sbmt_own_qty + kQtyEpsilon;
+    }
+
     // A default-sized market order carries a quantity frozen at the signal
     // bar's close; hand it through as fixed contracts (qty_type < 0) so the
     // fill does not re-derive it from the fill price. Explicit-qty and
     // FIXED-default orders keep their own (qty, qty_type) pair unchanged.
-    const bool frozen = !std::isnan(order.frozen_default_qty);
+    const bool frozen =
+        !std::isnan(order.frozen_default_qty) || sbmt_flat_frozen_tx;
     const bool paired_flat_market =
         pending_flat_market_pair_is_live(order);
     const double dispatch_qty = paired_flat_market
         ? order.paired_flat_market_transaction_qty
-        : (frozen ? order.frozen_default_qty : order.qty);
+        : (sbmt_flat_frozen_tx
+               ? order.sbmt_tx_qty
+               : (frozen ? order.frozen_default_qty : order.qty));
     const int dispatch_qty_type = paired_flat_market
         ? -1
         : (frozen ? -1 : order.qty_type);
@@ -5627,6 +5876,51 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
         return;
     }
 
+    // round 8 family S, rule 4 (PendingOrder::sbmt_member): a member close
+    // exits what remains of the side it was sized against — min(frozen
+    // target, live) — and, when that side is gone, either fills as TV's
+    // artifact lot (its same-id entry still pending: "Close entry(s) order
+    // X" entry row, later exited by that entry's own transaction) or is
+    // cancelled. The artifact is the frozen target capped at the live
+    // position, exactly the short-seed kernel's min(S, L) above.
+    bool sbmt_frozen_close = false;
+    double sbmt_frozen_close_qty = std::numeric_limits<double>::quiet_NaN();
+    if (order.sbmt_member && std::isfinite(order.sbmt_close_qty)
+        && order.sbmt_close_qty > kQtyEpsilon
+        && same_bar_market_tx_scope_is_live()) {
+        const PositionSide target_side =
+            order.sbmt_close_buy ? PositionSide::SHORT : PositionSide::LONG;
+        if (position_side_ != target_side) {
+            if (!same_bar_market_close_artifact_is_live(order)) return;
+            const double qty = std::min(order.sbmt_close_qty, position_qty_);
+            const double entry_fill =
+                apply_fill_slippage(fill_price, /*is_buy=*/order.sbmt_close_buy);
+            if (!std::isfinite(entry_fill) || qty <= kQtyEpsilon) return;
+            const double total_qty = position_qty_ + qty;
+            position_entry_price_ =
+                (position_entry_price_ * position_qty_ + entry_fill * qty)
+                / total_qty;
+            position_qty_ = total_qty;
+            ++position_entry_count_;
+            trail_best_price_ = entry_fill;
+            PyramidEntry artifact{};
+            artifact.price = entry_fill;
+            artifact.time = current_bar_.timestamp;
+            artifact.qty = qty;
+            artifact.entry_id = order.id;
+            artifact.entry_bar_index = bar_index_;
+            artifact.entry_comment = order.comment;
+            artifact.entry_incarnation = order.incarnation;
+            snapshot_entry_commission(artifact);
+            pyramid_entries_.push_back(std::move(artifact));
+            id_unclosed_qty_[order.id] += qty;
+            cycle_filled_entry_ids_.insert(order.id);
+            return;
+        }
+        sbmt_frozen_close = true;
+        sbmt_frozen_close_qty = std::min(order.sbmt_close_qty, position_qty_);
+    }
+
     double qp = std::isnan(order.qty_percent) ? 100.0 : std::clamp(order.qty_percent, 0.0, 100.0);
     const bool dynamic_full_live_qty =
         order.pooc_global_full_exit_dynamic_qty;
@@ -5673,7 +5967,14 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
             execute_partial_exit_by_entry(fill_price, order.from_entry, cause);
         }
     } else {
-        if (dynamic_full_live_qty) {
+        if (sbmt_frozen_close) {
+            if (sbmt_frozen_close_qty >= position_qty_ - kQtyEpsilon) {
+                execute_market_exit(fill_price);
+            } else {
+                execute_partial_exit_qty(fill_price, sbmt_frozen_close_qty,
+                                         cause);
+            }
+        } else if (dynamic_full_live_qty) {
             execute_market_exit(fill_price);
         } else if (has_explicit_qty_to_close) {
             execute_partial_exit_qty(fill_price, order.qty, cause);
@@ -6084,6 +6385,10 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     bool exit_style = order_is_exit_style(order, position_side_);
     const bool short_seed_materializes_long =
         short_seed_collision_materialization_is_live(order);
+    // round 8 family S, rule 4: the member close whose side is gone but whose
+    // same-id entry is still pending fills as TV's artifact lot.
+    const bool sbmt_close_artifact =
+        same_bar_market_close_artifact_is_live(order);
 
     // The close cursor is a single broker point. A fill-triggered script
     // execution at C may create orders, but those orders cannot consume C a
@@ -6111,7 +6416,8 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         && order.id.rfind("__close__", 0) == 0
         && position_side_ != PositionSide::FLAT
         && position_open_bar_ > order.created_bar
-        && !short_seed_materializes_long;
+        && !short_seed_materializes_long
+        && !sbmt_close_artifact;
     if (stale_close_order_for_new_position) {
         return OrderEligibility::Remove;
     }
@@ -6246,13 +6552,18 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         preserves_same_id_stop_across_deferred_close_all(
             order, exit_closed_from_bar, exit_closed_from_incarnation,
             exit_closed_was_long);
+    // round 8 family S, rule 2: the over-cap entry TradingView kept because an
+    // opposite same-bar market was pending survives the same-bar close that
+    // flattened its side (dbl-short-closefirst: close-Short fills, Long
+    // reverses, Short still sells 2). Mirrored in compact_filled_pending_orders.
     if (exit_closed_from_bar >= 0
         && (order.type == OrderType::MARKET || order.type == OrderType::ENTRY)
         && order.is_long == exit_closed_was_long
         && order.created_position_side == closed_side
         && !resting_limit_entry_carry
         && !coqueued_within_cap
-        && !same_id_stop_preserved_by_deferred_close_all) {
+        && !same_id_stop_preserved_by_deferred_close_all
+        && !order.sbmt_kept_over_cap) {
         return OrderEligibility::Remove;
     }
 
@@ -6357,7 +6668,8 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
             // legitimately create this close and the monotonic scheduler owns
             // its same-bar eligibility.
             if (!(calc_on_order_fills_ && coof_scheduler_active_)
-                && !short_seed_materializes_long) {
+                && !short_seed_materializes_long
+                && !sbmt_close_artifact) {
                 return OrderEligibility::Skip;
             }
         }

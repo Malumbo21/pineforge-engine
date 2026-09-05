@@ -673,6 +673,51 @@ struct PendingOrder {
     // PendingOrder and therefore drops the relation; later orders never get it.
     bool pooc_global_full_exit_bound_add = false;
     bool created_while_in_position = false;  // true if position was open when order was placed
+    // round 8 family S — TradingView's same-bar MARKET transaction (ledger
+    // note log-20260905t143024z-76025577; 15 lab tv sensor tapes famS-dbl-*,
+    // famS-rev-plus-close, famS-adm-{es,nq}-{1e6,500k} on CME_MINI:ES1!/NQ1!
+    // 15m 2025-04-01..15, every 8-bar cycle identical x115). Scope:
+    // same_bar_market_tx_scope_is_live() — non-POOC, no COOF/magnifier,
+    // pyramiding 0 (one admitted entry), FIXED default sizing, no risk policy.
+    // Rules:
+    //   (1) a MARKET entry's size is frozen at PLACEMENT and never re-sized
+    //       at fill: own qty + the opposite position's qty at placement, net
+    //       of the lots an EARLIER same-bar strategy.close already released
+    //       (dbl-short-closefirst: Long buys 1, not 2), + the OPEN leg (own
+    //       qty) of every opposite same-bar MARKET entry still pending at the
+    //       call (dbl-short-q1-entry2: Short qty 2 sells 3; the KI-65 rule
+    //       extended from flat to in-position).
+    //   (2) a same-direction entry OVER the pyramiding cap is dropped at the
+    //       call when no opposite same-bar MARKET entry is pending (dbl-short-
+    //       swapped, dbl-long-full) and KEPT, sized by (1), when one was
+    //       placed earlier in the bar (dbl-short-full: Short after Long sells
+    //       2; dbl-long-mirror-closefirst: Long after Short buys 2 -> long 3
+    //       before the sells). It is never re-roled at fill into a reversal
+    //       sized on the fill-time position.
+    //   (3) fill order = every BUY market order, then every SELL market
+    //       order, each phase in placement order.
+    //   (4) strategy.close(id) is created only if id holds a lot at the call,
+    //       sized to that lot; at fill it exits what remains of that side
+    //       (min(frozen, live)); when the side is gone it fills as a NEW lot
+    //       in its own direction (TV's "Close entry(s) order X" entry row)
+    //       iff an entry with the same id is still pending on the bar, and
+    //       is cancelled otherwise (rev-plus-close, dbl-short-swapped).
+    //   (5) strategy.close(id) with no lot of id at the call places nothing.
+    // Admission (famS-adm-*): the kept over-cap entry is costed at placement
+    // as held + own + the opposite pending open leg (3 lots: ES 1e6 admits
+    // 3 x 5,627 x 50, NQ 1e6 declines 3 x 19,339 x 20 and admits the three
+    // 04-07 cycles at <= 16,679; 500k declines both) — a declined entry is
+    // dropped, so its same-id close finds no pending entry and is cancelled
+    // (LONG 1, no artifact row). The generalized form of the short-seed
+    // collision kernel (finding 272), with which it agrees on that book.
+    bool sbmt_member = false;
+    double sbmt_own_qty = std::numeric_limits<double>::quiet_NaN();
+    double sbmt_tx_qty = std::numeric_limits<double>::quiet_NaN();
+    bool sbmt_kept_over_cap = false;
+    // strategy.close member: frozen target and broker side (buy closes a
+    // short). The target id is order.id without the "__close__" prefix.
+    double sbmt_close_qty = std::numeric_limits<double>::quiet_NaN();
+    bool sbmt_close_buy = false;
     // design-declined-reversal-close-leg: set at the KI-54 percent-of-equity
     // reversal-decline site when this pending FULL close was co-queued AFTER,
     // and on the same bar as, the declined MARKET reversal entry targeting the
@@ -3231,6 +3276,16 @@ private:
         const PendingOrder& order) const;
     bool short_seed_collision_final_short_is_live(
         const PendingOrder& order) const;
+    // round 8 family S (PendingOrder::sbmt_member): the same-bar MARKET
+    // transaction's scope, the close-artifact predicate (rule 4) and the
+    // frozen-transaction reversal kernel (rules 1/2).
+    bool same_bar_market_tx_scope_is_live() const;
+    void finalize_same_bar_market_tx_book();
+    bool same_bar_market_close_artifact_is_live(
+        const PendingOrder& order) const;
+    void apply_same_bar_market_tx_reversal(PendingOrder& order, double fill_price,
+                                           const Bar& bar,
+                                           double& trail_best_path_state);
     // TradingView binds a valid, single/full, non-trailing strategy.exit to a
     // co-queued high-level MARKET parent. If that parent fills at the next open
     // and exactly one bracket leg is already marketable there — the stop
