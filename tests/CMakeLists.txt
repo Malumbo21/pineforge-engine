@@ -97,6 +97,7 @@ set(TEST_SOURCES
     test_direct_short_reversal_affordability
     test_short_reversal_emission
     test_margin_stop_admission
+    test_stop_entry_admission
     test_stop_entry_placement_open_qty
     test_stop_decline_continue_path
     test_frozen_flat_gap_reject

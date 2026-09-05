@@ -183,6 +183,55 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         }
     }
 
+    // Same-id replacement: strategy.entry with an id that is already pending
+    // replaces that order. Shared by the ordinary replacement below and by
+    // the round-7 rejected-STOP-re-issue cancel (a rejected placement leaves
+    // no order behind, but still retires the one it was replacing).
+    const auto remove_same_id_pending_orders = [&]() {
+        for (const PendingOrder& pending : pending_orders_) {
+            if (pending.id == id) {
+                const bool entry_like =
+                    pending.type == OrderType::MARKET
+                    || pending.type == OrderType::ENTRY
+                    || pending.type == OrderType::RAW_ORDER;
+                // A candidate call that replaces any resting entry-like order
+                // is not an exact two-call source-bar set, even when the
+                // replaced order came from an earlier bar. Taint this call's
+                // bar as well as preserving the old-bar tombstone below.
+                if (paired_flat_market_candidate && entry_like) {
+                    pending_flat_market_pair_disqualified_bars_.insert(
+                        bar_index_);
+                }
+                // The POOC+COOF gross-admission oracle covers two fresh
+                // calls, not a current call that inherits an older order's
+                // broker priority. Taint the current source bar even when the
+                // replaced object came from a prior bar.
+                if (pooc_coof_explicit_flat_market_candidate) {
+                    pending_flat_market_pair_disqualified_bars_.insert(
+                        bar_index_);
+                }
+                if (default_flat_market_gross_call && entry_like) {
+                    default_flat_market_gross_disqualified_bars_.insert(
+                        bar_index_);
+                }
+                if (entry_like
+                    && pending.created_position_side == PositionSide::FLAT) {
+                    pending_flat_market_pair_disqualified_bars_.insert(
+                        pending.created_bar);
+                }
+                if (pending.default_flat_market_gross_candidate) {
+                    default_flat_market_gross_disqualified_bars_.insert(
+                        pending.created_bar);
+                }
+                invalidate_pending_flat_market_pair(pending.created_seq);
+            }
+        }
+        pending_orders_.erase(
+            std::remove_if(pending_orders_.begin(), pending_orders_.end(),
+                [&](const PendingOrder& o) { return o.id == id; }),
+            pending_orders_.end());
+    };
+
     // design-market-entry-affordability: TradingView's broker admission for a
     // MARKET entry — rule, pins and evidence on
     // PendingOrder::affordability_placement_equity (engine.hpp). This is the
@@ -192,6 +241,33 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     // keeps ONLY its closing leg (affordability_close_only). The fill-time
     // half in apply_filled_order_to_state costs the same quantity at
     // max(signal price, slipped fill) against the placement snapshot.
+    //
+    // round 7 (design-stop-entry-placement-admission, ledger note
+    // log-20260905t053924z-15615295, 22 lab tv pins scratchpad/r7/pins/
+    // flatten-*): a pure STOP entry takes the SAME placement half. TV
+    // admits strategy.entry(stop=) on the bar B of the call iff
+    //   lot_floored(qty) * tick_half_up(close(B)) * pv * fx * margin%/100
+    //     <= strategy.equity(B) as the script reads it
+    // (NYSE:F 15 2025-08-13 13:45Z, capital 10,026 flattened to 10,002 by
+    // the 11.32 stop exit on that bar: 883 * 11.33 = 10,004.39 > 10,002
+    // rejected although the raw close 11.325 would pass; 14:15Z close
+    // 11.285 -> 11.29 accepted -> 14:30Z fill @11.32; capital 10,029 ->
+    // 10,005 accepts 10,004.39 on the flattening bar itself; margin 50
+    // halves the cost; 884.956 is floored to 884 first). The level, the
+    // high/low and whether the close is already beyond the level play no
+    // part. A still-open opposite position adds nothing (flatten-closenext-
+    // 90: the reversal's new side only) and the position closed on B adds
+    // nothing (flatten-samedir-90, flatten-closeimm-90). A rejected stop
+    // is DROPPED — nothing rests and nothing is re-evaluated on later
+    // closes (flatten-stop-once, fresh-0919-once: no trade although the
+    // next open 11.62 = level was affordable) — and a rejected same-id
+    // re-issue also CANCELS the resting order of an earlier accepted issue
+    // (xau-flatten-replace-c10983: the 15:45Z re-issue is rejected, the
+    // 16:00Z touch fills nothing, the 16:00Z re-issue fills 16:15Z). An
+    // accepted stop rests until touched; the fill-time half for stops is
+    // stop_entry_margin_admission_declines (engine_fills.cpp): the same
+    // floored quantity costed at the tick-rounded FILL price against
+    // realized equity. LIMIT entries were not pinned and stay out of scope.
     //
     // Scope: explicit-qty entries, DEFAULT FIXED / CASH sizing, and DEFAULT
     // percent_of_equity sizing ABOVE 100% (round 6, pin-pct-afford: NYSE:F 15
@@ -208,11 +284,18 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     // (qty * sizing_price <= sizing_equity) makes this placement check a
     // structural no-op there anyway. The two scopes partition on the same
     // default_qty_value_ <= 100 test the KI-54 gate uses, so exactly 100%
-    // is byte-identical. Priced (limit/stop) entries carry
-    // their own price and their own admission (KI-62). margin_pct == 0
-    // disables the check, as it does in TradingView.
+    // is byte-identical. The same sizing partition applies to pure STOP
+    // entries (round 7): a default percent_of_equity stop at or below 100%
+    // keeps the stop_placement_open_* snapshot below and its fill-time
+    // admission; explicit-qty, FIXED / CASH default and >100% stops take
+    // this placement half. Stop-limit and limit entries carry their own
+    // price and are untouched. margin_pct == 0 disables the check, as it
+    // does in TradingView.
+    const bool pure_stop_entry =
+        std::isnan(limit_price) && std::isfinite(stop_price);
     const bool affordability_scope =
-        std::isnan(limit_price) && std::isnan(stop_price)
+        ((std::isnan(limit_price) && std::isnan(stop_price))
+         || pure_stop_entry)
         && (!std::isnan(qty)
             || default_qty_type_ == QtyType::FIXED
             || default_qty_type_ == QtyType::CASH
@@ -274,7 +357,15 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                     pending_flat_market_pair_disqualified_bars_.insert(
                         bar_index_);
                 }
-                if (!reversal) return;
+                if (!reversal) {
+                    // round 7: a rejected same-id STOP re-issue also cancels
+                    // the resting order of an earlier accepted issue
+                    // (xau-flatten-replace-c10983). The MARKET rule is
+                    // unchanged: a market order never rests past the next
+                    // open, and the round-5 pins were taken on that path.
+                    if (pure_stop_entry) remove_same_id_pending_orders();
+                    return;
+                }
                 // The reversal's closing leg still executes: the order is
                 // kept as a close-only transaction.
                 affordability_close_only = true;
@@ -295,46 +386,7 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     }
 
     // Remove existing pending order with same id
-    for (const PendingOrder& pending : pending_orders_) {
-        if (pending.id == id) {
-            const bool entry_like =
-                pending.type == OrderType::MARKET
-                || pending.type == OrderType::ENTRY
-                || pending.type == OrderType::RAW_ORDER;
-            // A candidate call that replaces any resting entry-like order is
-            // not an exact two-call source-bar set, even when the replaced
-            // order came from an earlier bar. Taint this call's bar as well as
-            // preserving the old-bar tombstone below.
-            if (paired_flat_market_candidate && entry_like) {
-                pending_flat_market_pair_disqualified_bars_.insert(bar_index_);
-            }
-            // The POOC+COOF gross-admission oracle covers two fresh calls,
-            // not a current call that inherits an older order's broker
-            // priority. Taint the current source bar even when the replaced
-            // object came from a prior bar.
-            if (pooc_coof_explicit_flat_market_candidate) {
-                pending_flat_market_pair_disqualified_bars_.insert(bar_index_);
-            }
-            if (default_flat_market_gross_call && entry_like) {
-                default_flat_market_gross_disqualified_bars_.insert(
-                    bar_index_);
-            }
-            if (entry_like
-                && pending.created_position_side == PositionSide::FLAT) {
-                pending_flat_market_pair_disqualified_bars_.insert(
-                    pending.created_bar);
-            }
-            if (pending.default_flat_market_gross_candidate) {
-                default_flat_market_gross_disqualified_bars_.insert(
-                    pending.created_bar);
-            }
-            invalidate_pending_flat_market_pair(pending.created_seq);
-        }
-    }
-    pending_orders_.erase(
-        std::remove_if(pending_orders_.begin(), pending_orders_.end(),
-            [&](const PendingOrder& o) { return o.id == id; }),
-        pending_orders_.end());
+    remove_same_id_pending_orders();
 
     // On the ordinary non-POOC path, TradingView rejects a same-direction
     // priced strategy.entry call when the live position is already at the
@@ -566,6 +618,12 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         order.type = OrderType::ENTRY;
         order.limit_price = limit_price;
         order.stop_price = stop_price;
+        // round 7: a pure STOP reversal whose entry leg was rejected at
+        // placement rests as the reversal's closing leg only (consumed by
+        // apply_entry_order_fill; its fill-time admission is skipped since
+        // nothing opens). No placement snapshot is stored on a stop: its
+        // fill-time half is stop_entry_margin_admission_declines.
+        order.affordability_close_only = affordability_close_only;
 
         // Snapshot one narrowly scoped pure STOP at placement. A next-bar
         // open-marketable fill carries the already lot-quantized signal-close
