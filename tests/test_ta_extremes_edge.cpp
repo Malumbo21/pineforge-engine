@@ -64,14 +64,15 @@ static void test_highest_warmup_evict_na() {
     CHECK(near(hi.compute(1.0), 2.0));  // window {2,1,1} -> 9 evicted, max 2
     CHECK(near(hi.compute(1.0), 1.0));  // window {1,1,1} -> all evicted, max 1
 
-    // A direct ta.highest answers na on an na source (pinned 2026-09-04,
-    // NYSE:F 1D every-bar ta.lowest over a source na on every 4th bar: na on
-    // exactly those bars, 11/11); the slot stays a gap the next bar skips.
-    // The finding-331 "stay live over the non-na members" reading survives
-    // inside the composites (Stoch, WPR, Range), which construct with
-    // na_src_answers_na = false.
+    // An na source answers na AND poisons the window (pinned 2026-09-04,
+    // NYSE:F 1D every-bar ta.lowest/ta.highest over `bar_index % 4 == 0 ?
+    // na : low`: na on the na bars, 11/11, and on the bar after each na bar
+    // lowest == highest == that bar's own low, 20/20 -- the members older
+    // than the na are dead, not skipped). Re-pinned from `{1, na, 0.5} ->
+    // 1.0` (the old "skip the gap" reading) with that tape; see
+    // test_ta_extremes_ring.cpp for the full replay.
     CHECK(is_na(hi.compute(na<double>())));      // window {1,1,na} -> na on the na bar
-    CHECK(near(hi.compute(0.5), 1.0));           // window {1,na,0.5} -> max 1
+    CHECK(near(hi.compute(0.5), 0.5));           // window {1,na,0.5} -> the 1 is poisoned: 0.5
 }
 
 // --- Lowest: warmup na, full-window value, eviction, na-input ---
@@ -92,7 +93,7 @@ static void test_lowest_warmup_evict_na() {
     CHECK(near(lo.compute(6.0), 6.0));   // {8,7,6} -> min 6
 
     CHECK(is_na(lo.compute(na<double>())));      // na source -> na (2026-09-04 pin)
-    CHECK(near(lo.compute(10.0), 6.0));          // {6,na,10} -> min 6
+    CHECK(near(lo.compute(10.0), 10.0));         // {6,na,10} -> the 6 is poisoned: 10 (re-pinned, same tape)
 }
 
 // --- HighestBars: warmup na, offset semantics, eviction ---
