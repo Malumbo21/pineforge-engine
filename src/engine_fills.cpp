@@ -3415,15 +3415,58 @@ bool BacktestEngine::use_stop_placement_open_qty(
 }
 
 
+// Fill-time margin admission of a pure STOP entry (round 7, design-stop-
+// entry-placement-admission; ledger note log-20260905t053924z-15615295):
+//
+//   decline iff floored_qty * tick(fill price) * pv * fx * margin%/100
+//               > realized equity at the fill
+//
+// The cost basis is the price the fill BOOKS: the stop level on an intrabar
+// touch, the tick-rounded open on a gap-through. KI-62's earlier premise
+// that TV costs the bar OPEN even on a touch is refuted by the tapes —
+// fresh-touch-once (NYSE:F 15, capital 10,004.2, short stop 11.23 x 890
+// accepted at the 11.24 close): 2025-08-13 13:30Z opens 11.29 > level and
+// touches, and TV FILLS at 11.23 (890 * 11.23 = 9,994.7 <= E) where the
+// open would have cost 10,048; xau-flatten-once-c10983 (OANDA:XAUUSD 15,
+// E 10,973, short stop 3,332.34 x 3.29): the 16:00Z touch fills at the
+// level (10,963.4) although the open 3,335.73 costs 10,974.55 > E. A
+// gap-through IS costed at its open: fresh-gap-once (long stop 11.24 x
+// 889 accepted at the 11.24 close) gaps to 11.29 on 08-13 13:30Z, 889 *
+// 11.29 = 10,036.8 > 10,000 -> the fill is REJECTED and the order dropped
+// (no partial, no trim). The waranyutrkm 369/369 "first open <= stop"
+// census KI-62 was fitted to is produced by the PLACEMENT half instead
+// (strategy_entry: the re-issue is rejected on every close that costs more
+// than equity and accepted exactly when tick(close) <= E/qty, which on
+// that probe is also the first open at or through the level).
+//
+// A declined stop is CANCELLED (consumed here, removed by compaction); an
+// arm-once entry silently dies, a Pine-level re-issue re-posts next bar.
+// An under-margined ADMITTED fill still nibbles at bar end via the
+// existing KI-31 4x cascade (unchanged: 8@11.25 / 24@11.33 on fresh-touch,
+// 1/4/1/12 on fresh-0919-replace, TV's own slices). Scope: an ENTRY with a
+// stop trigger and no limit; margin_pct > 0; positive fill qty; not a
+// reversal that already lost its entry leg at placement (close-only
+// orders open nothing). The available equity is realized-only
+// (current_equity()), unchanged from KI-62. The qty is exactly the fill
+// kernel's: normally calc_qty_for_type at the fill price; for the narrowly
+// scoped next-open default-percent-100 STOP rule, the same placement
+// snapshot that dispatch consumes. Admission therefore never approves one
+// quantity and executes another.
 bool BacktestEngine::stop_entry_margin_admission_declines(
         const PendingOrder& order, double fill_price, const Bar& bar) const {
     if (order.type != OrderType::ENTRY
         || std::isnan(order.stop_price)
-        || !std::isnan(order.limit_price)) {
+        || !std::isnan(order.limit_price)
+        || order.affordability_close_only) {
         return false;
     }
     const double margin_pct = order.is_long ? margin_long_ : margin_short_;
-    if (!(margin_pct > 0.0) || !std::isfinite(bar.open) || bar.open <= 0.0) {
+    // design-stop-tick-rounding / finding-446: the level is already
+    // directionally snapped and a gap open already nearest-rounded when it
+    // reaches here, so round_to_mintick is an identity to within one ulp.
+    const double cost_basis = round_to_mintick(fill_price);
+    if (!(margin_pct > 0.0) || !std::isfinite(cost_basis)
+        || cost_basis <= 0.0) {
         return false;
     }
     const bool use_placement_open_qty =
@@ -3431,7 +3474,7 @@ bool BacktestEngine::stop_entry_margin_admission_declines(
     const double fill_qty = use_placement_open_qty
         ? std::abs(order.stop_placement_open_qty)
         : std::abs(calc_qty_for_type(fill_price, order.qty, order.qty_type));
-    const double required = fill_qty * bar.open * syminfo_.pointvalue
+    const double required = fill_qty * cost_basis * syminfo_.pointvalue
                             * active_account_currency_fx()
                             * (margin_pct / 100.0);
     const double available = use_placement_open_qty
@@ -3507,32 +3550,14 @@ void BacktestEngine::apply_filled_order_to_state(
         }
     }
 
-    // KI-62 STAGE 3: margin fill-time admission for STOP-ENTRY fills. Under
-    // margin simulation (margin_long_/margin_short_ > 0) TV gates every stop
-    // entry AT THE FILL MOMENT against the fill bar's OPEN price,
-    // side-symmetrically — decline iff qty*open*margin% > available (realized)
-    // equity. Admission ignores intrabar extremes: it costs the bar OPEN, NOT
-    // the touched level / the fill price / the bar high. So a marginal all-in
-    // stop touched INTRABAR (open past the level in the adverse direction:
-    // short open>stop, long open<stop) sizes qty ~= equity/level and
-    // qty*open > equity -> DECLINE; only a bar that OPENS THROUGH the level
-    // (short open<=stop, long open>=stop) costs qty*open <= equity and fills at
-    // that open — reproducing the waranyutrkm 369/369 "fill at first open<=stop"
-    // census + the 13/13 long re-touch fills (pf-probe-ki62-margin-deferral,
-    // pinned 99.17%). A declined stop is CANCELLED (consumed here, removed by
-    // compaction); an arm-once entry silently dies (SAO NOFILL), a Pine-level
-    // reissue re-posts next bar and fills at the first admissible bar. An
-    // under-margined ADMITTED fill still nibbles at bar end via the existing
-    // KI-31 4x cascade (unchanged). Scope: an ENTRY with a stop trigger and no
-    // limit; margin_pct>0; positive fill qty. The available equity is
-    // realized-only (current_equity()) — the engine's validated stop-entry
-    // sizing basis (3,160/3,160). Does NOT touch the :443 created_bar
-    // eligibility, the signal-time MARKET-only gate, or any margin=0 path (all
-    // byte-identical when margin_pct==0). The qty is exactly the fill kernel's:
-    // normally calc_qty_for_type at the fill price; for the narrowly scoped
-    // next-open STOP rule, the same placement snapshot that dispatch consumes
-    // below. Admission therefore never approves one quantity and executes
-    // another.
+    // Fill-time margin admission for STOP-ENTRY fills (KI-62 stage 3,
+    // re-based in round 7): the same floored quantity costed at the tick-
+    // rounded FILL price — the level on a touch, the rounded open on a
+    // gap-through — against realized equity; rule, tapes and scope on
+    // stop_entry_margin_admission_declines above. A declined stop is
+    // CANCELLED (consumed here, removed by compaction). Does NOT touch the
+    // :443 created_bar eligibility, the signal-time MARKET gate, or any
+    // margin=0 path (all byte-identical when margin_pct==0).
     if (stop_entry_margin_admission_declines(order, fill_price, bar)) {
         decline_and_cancel();
         return;
@@ -5090,6 +5115,28 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
         && order.tv_carry_qty > kQtyEpsilon
         && std::isfinite(frozen_reversal_tx)
         && std::abs(position_qty_ - frozen_reversal_tx) <= kQtyEpsilon;
+    // round 7 (design-stop-entry-placement-admission): a pure STOP reversal
+    // whose entry leg was rejected at placement survives only as the
+    // reversal's closing leg. Opposite position live at the touch: close it
+    // whole and open nothing (flip_market_position_to close_only). Flat or
+    // same-side at the touch: nothing to close, the order is consumed with
+    // no broker effect — exactly apply_market_order_fill's rule for a
+    // close-only MARKET reversal.
+    if (order.affordability_close_only) {
+        if (!opposite_live_position) {
+            trail_best_path_state = trail_best_price_;
+            return;
+        }
+        // Stale brackets of the closed position follow the ordinary
+        // post-loop cleanup (the book must not be mutated mid-iteration).
+        flip_market_position_to(order.id, order.is_long,
+                                apply_fill_slippage(fill_price, order.is_long),
+                                order.qty, order.qty_type,
+                                /*explicit_qty_prequantized=*/false,
+                                /*close_only=*/true, order.incarnation);
+        trail_best_path_state = trail_best_price_;
+        return;
+    }
     const bool close_only_opposite =
         prior_cycle_close_only || same_cycle_frozen_tx_exact_flat;
     const bool use_placement_open_qty =

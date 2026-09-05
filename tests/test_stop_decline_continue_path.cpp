@@ -3,6 +3,16 @@
  * pure-STOP pair is cancelled specifically by stop-margin admission, the
  * ordinary historical path scanner must consider the later member. All other
  * rejection causes and order-book/scheduler shapes retain their old paths.
+ *
+ * Round 7 (design-stop-entry-placement-admission, ledger note
+ * log-20260905t053924z-15615295): the fill-time gate costs the tick-rounded
+ * FILL price, not the bar open, so an all-in default-sized stop touched
+ * intrabar is no longer declined (its qty * level == equity; fresh-touch-once
+ * pins that TV fills it). The declined member here is therefore an
+ * explicit-qty short stop that the next bar OPENS THROUGH above the signal
+ * close: accepted at placement (100 * 100 <= 10,000), declined at the fill
+ * (100 * 102 > 10,000 — the fresh-gap-once shape). The later long stop is
+ * default-sized and affordable at its level.
  */
 
 #include <cmath>
@@ -56,7 +66,8 @@ public:
     }
 
     double long_stop = 110.0;
-    double short_stop = 90.0;
+    double short_stop = 105.0;   // open-marketable at the 102 open
+    double short_qty = 100.0;    // explicit: 100 * 100 admits, 100 * 102 declines
     bool use_oca = false;
     bool mark_as_after_close = false;
     bool split_signal_bars = false;
@@ -69,7 +80,7 @@ public:
         const int oca_type = use_oca ? 1 : 0;
         strategy_entry("L", true, kNaN, long_stop, kNaN, "", oca,
                        oca_type);
-        strategy_entry("S", false, kNaN, short_stop, kNaN, "", oca,
+        strategy_entry("S", false, kNaN, short_stop, short_qty, "", oca,
                        oca_type);
         if (split_signal_bars) {
             pending_orders_.back().created_bar -= 1;
@@ -95,6 +106,9 @@ public:
     void enable_coof() { calc_on_order_fills_ = true; }
     bool continuation_scope(bool magnifier = false) {
         bar_index_ = 0;
+        // The placement-time admission reads the call bar's close: give the
+        // direct on_bar call the signal bar the run above would have set.
+        current_bar_ = bar(1'000, 100.0, 100.0, 100.0, 100.0);
         on_bar(Bar{});
         const bool scoped = internal::dual_stop_margin_decline_can_continue_path(
             pending_orders_, internal::DualEntryStopPathWinner::ShortFirst,
@@ -108,18 +122,20 @@ public:
     double entry_price() const { return position_entry_price_; }
 };
 
-// O=100 is tied between H=111 and L=89, so the synthesized path is
-// O->L->H->C. The short stop at 90 is first. Its all-in qty is 10000/90,
-// but admission costs that qty at open 100, so it declines. The later long
-// stop is affordable because its qty is 10000/110.
-Bar low_first_dual_touch() {
-    return bar(2'000, 100.0, 111.0, 89.0, 100.0);
+// O=102 is nearer L=94 than H=111, so the synthesized path is O->L->H->C.
+// The short stop at 105 is marketable at the open: it is the path-first
+// member and fills at the rounded open 102, where its explicit 100 shares
+// cost 10,200 > 10,000 — declined and cancelled (placement admitted them at
+// the 100 signal close). The later long stop at 110 is affordable because
+// its default all-in qty is 10000/110 and it is costed at its level.
+Bar dual_touch_bar() {
+    return bar(2'000, 102.0, 111.0, 94.0, 102.0);
 }
 
 void run_pair(DualStopProbe& probe, bool magnifier = false) {
     Bar bars[] = {
         bar(1'000, 100.0, 100.0, 100.0, 100.0),
-        low_first_dual_touch(),
+        dual_touch_bar(),
     };
     if (magnifier) {
         probe.run(bars, 2, "15", "15", true, 4,
@@ -144,14 +160,16 @@ void test_margin_decline_continues_to_affordable_later_stop() {
 void test_accepted_first_stop_preserves_existing_second_touch_result() {
     std::printf("accepted first stop preserves the existing dual-touch result\n");
     DualStopProbe probe;
-    probe.short_stop = 100.0;  // marketable at open; qty*open == equity
+    probe.short_stop = 102.0;  // marketable at the 102 open
+    probe.short_qty = 98.0;    // 98 * 100 admits at placement, 98 * 102 = 9,996 at the fill
     run_pair(probe);
-    // The accepted short opens first; the existing path logic then applies the
-    // later long touch, closing most of it. The margin-decline continuation
-    // must not alter this pre-existing residual/trade shape.
+    // The accepted short opens first at the open; the existing path logic
+    // then applies the later long touch, closing most of it. The margin-
+    // decline continuation must not alter this pre-existing residual/trade
+    // shape.
     CHECK(probe.side() == PositionSide::SHORT);
-    CHECK(std::fabs(probe.qty() - (100.0 - 10'000.0 / 110.0)) < 1e-9);
-    CHECK(std::fabs(probe.entry_price() - 100.0) < 1e-9);
+    CHECK(std::fabs(probe.qty() - (98.0 - 10'000.0 / 110.0)) < 1e-9);
+    CHECK(std::fabs(probe.entry_price() - 102.0) < 1e-9);
     CHECK(probe.trade_count() == 1);
 }
 
@@ -224,7 +242,7 @@ void test_mixed_order_books_are_out_of_scope() {
             const double stop_qty = 10'000.0 / 110.0;
             const double expected_qty = 1.0 + stop_qty;
             const double expected_price =
-                (100.0 + stop_qty * 110.0) / expected_qty;
+                (102.0 + stop_qty * 110.0) / expected_qty;   // M fills at the 102 open
             CHECK(std::fabs(probe.qty() - expected_qty) < 1e-9);
             CHECK(std::fabs(probe.entry_price() - expected_price) < 1e-9);
         } else {

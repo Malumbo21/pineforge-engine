@@ -581,6 +581,20 @@ struct PendingOrder {
     // same rule: their reversal decline is atomic and holds the position);
     // the >100% regime had no admission at all (KI-54 requires pct <= 100).
     // NaN = no snapshot (out of scope, margin_pct == 0, non-finite close).
+    //
+    // Round 7 (design-stop-entry-placement-admission, ledger note
+    // log-20260905t053924z-15615295): a pure STOP strategy.entry on the same
+    // sizing partition takes the PLACEMENT half of this rule in
+    // strategy_entry — lot_floored(qty) * tick(close(B)) * pv * fx * margin%
+    // <= strategy.equity(B) (post-exit realized equity on a flattening bar,
+    // new side only on a reversal); a rejected stop is dropped, never rests
+    // or re-evaluates, and a rejected same-id re-issue cancels the resting
+    // order of an earlier accepted issue. No snapshot is stored on a stop
+    // (these three fields stay NaN/0): its fill-time half is
+    // stop_entry_margin_admission_declines — the same floored qty at the
+    // tick-rounded FILL price (the level on a touch, the rounded open on a
+    // gap-through) against realized equity; only affordability_close_only
+    // carries over, for a reversal whose entry leg was rejected.
     double affordability_placement_equity =
         std::numeric_limits<double>::quiet_NaN();
     // tick(close(S)): the on-tick signal close the placement check costed,
@@ -596,9 +610,10 @@ struct PendingOrder {
     double affordability_held_qty = 0.0;
     // The entry leg was declined (at placement or at fill) while an OPPOSITE
     // position was live: the order survives only as the reversal's closing
-    // leg — apply_market_order_fill closes the opposite position and opens
-    // nothing. Inert (consumed, no broker effect) when the account is flat or
-    // same-side at the fill.
+    // leg — apply_market_order_fill (MARKET) / apply_entry_order_fill (pure
+    // STOP, round 7) closes the opposite position and opens nothing. Inert
+    // (consumed, no broker effect) when the account is flat or same-side at
+    // the fill.
     bool affordability_close_only = false;
     std::string comment;       // order comment for trade reporting
     bool requested_partial = false;         // true iff caller passed qty_percent < 100

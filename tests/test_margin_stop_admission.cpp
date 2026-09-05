@@ -1,22 +1,23 @@
 /*
- * test_margin_stop_admission.cpp — STAGE 3: margin fill-time admission gate for
- * STOP-ENTRY fills (pf-probe-ki62-margin-deferral, pinned 99.17%).
+ * test_margin_stop_admission.cpp — margin admission of STOP-ENTRY fills
+ * (KI-62 stage 3, pf-probe-ki62-margin-deferral; re-based in round 7 on
+ * the 22 lab tv pins of ledger note log-20260905t053924z-15615295, see
+ * test_stop_entry_admission.cpp for the tapes).
  *
- * Under margin simulation (margin_long_/margin_short_ > 0) TV gates every
- * stop-entry fill AT THE FILL MOMENT against the fill bar's OPEN price,
- * side-symmetrically: decline iff qty * open * margin% > available (realized)
- * equity. Admission ignores intrabar extremes (it costs the OPEN, not the fill
- * price / the touched level / the bar high). A declined stop is CANCELLED (not
- * parked) — an arm-once entry silently dies; a Pine-level reissue re-posts and
- * fills at the first admissible bar (a short at the first open<=stop = a
- * price-improved OPEN fill; a long at the first re-touch with open<level).
- * Under-margined ADMITTED fills are margin-called at bar end by the existing
- * KI-31 cascade (unchanged). The :443 created_bar eligibility is NOT touched;
- * the signal-time MARKET-only gate is unaffected; margin=0 is byte-identical.
+ * Under margin simulation (margin_long_/margin_short_ > 0) a stop entry is
+ * admitted twice: at PLACEMENT — floored qty * tick(close of the call bar) *
+ * margin% <= strategy.equity, a rejected call is dropped and never rests —
+ * and at the FILL — the same qty * tick(fill price) <= realized equity,
+ * where the fill price is the LEVEL on an intrabar touch and the rounded
+ * OPEN on a gap-through (KI-62's original "costs the bar open on a touch"
+ * premise was refuted by fresh-touch-once: TV fills 890 x 11.23 with the
+ * open at 11.29). A declined fill is CANCELLED (not parked) — an arm-once
+ * entry silently dies; a Pine-level reissue re-posts and fills at the first
+ * admissible bar. Under-margined ADMITTED fills are margin-called at bar end
+ * by the existing KI-31 cascade (unchanged). margin=0 is byte-identical.
  *
- * REDs (stash-cycle): A1/A2/A3 are RED on baseline 6abebad (no fill-time
- * gate — every stop fills intrabar at the level) and GREEN with the gate; the
- * controls C1 (margin=0) / C2 (well-funded) pass in BOTH states.
+ * The scenarios below keep their original final-state assertions; the
+ * per-bar mechanics noted in each case are the round-7 rule's.
  */
 
 #include <cmath>
@@ -90,21 +91,22 @@ public:
     using BacktestEngine::position_entry_price_;
 };
 
-// A1. Marginal SHORT stop, INTRABAR trigger -> DECLINED + CANCELLED; the
-// reissue fills at the first OPEN<=stop (price-improved gap fill).
+// A1. Marginal SHORT stop reissued every bar; it fills at the first
+// admissible gap-down open.
 //   short qty 100 @ stop 100 (all-in on $10k, margin_short=100).
-//   bar1 open 105 (>100), low 99 (<=100): intrabar touch. required 100*105 =
-//   10500 > 10000 -> DECLINE (baseline fills SHORT@100 here). bar2 open 98
-//   (<=100 gap-down): required 100*98 = 9800 <= 10000 -> ADMIT, fill @98.
+//   bar0 close 110: 100*110 = 11000 > 10000 -> REJECTED at placement (dropped).
+//   bar1 close 101: 10100 > 10000 -> rejected again (nothing rests to touch
+//   the 99 low). bar2 close 98: 9800 <= 10000 -> ACCEPTED. bar3 open 98
+//   (<=100, gap-through): fill costed at the rounded open, 9800 -> fill @98.
 void test_marginal_short_stop_declined_then_gap_fill() {
     std::printf("-- A1: marginal short stop intrabar-declined, gap-open admitted --\n");
     StopProbe eng(10000.0, /*ml*/100.0, /*ms*/100.0, /*mc*/false);
     eng.is_long=false; eng.level=100.0; eng.qty=100.0;
     std::vector<Bar> bars = {
-        mk(1000, 110,110,110,110),        // bar0: place (price above stop, pending)
-        mk(2000, 105,106, 99,101),        // bar1: intrabar touch (open 105>100) -> DECLINE
-        mk(3000,  98, 99, 97, 98),        // bar2: gap-down open 98<=100 -> ADMIT @98
-        mk(4000,  98, 98, 98, 98),
+        mk(1000, 110,110,110,110),        // bar0: placement 100*110 > 10000 -> REJECTED
+        mk(2000, 105,106, 99,101),        // bar1: nothing rests; reissue 100*101 > 10000 -> rejected
+        mk(3000,  98, 99, 97, 98),        // bar2: reissue 100*98 <= 10000 -> ACCEPTED
+        mk(4000,  98, 98, 98, 98),        // bar3: open 98 <= 100 -> fill @98 (9800 admits)
     };
     eng.run(bars.data(), (int)bars.size());
     CHECK(eng.position_side_ == PositionSide::SHORT);   // eventually fills
@@ -112,15 +114,16 @@ void test_marginal_short_stop_declined_then_gap_fill() {
     CHECK_NEAR(eng.position_entry_price_, 98.0, 1e-9);  // GAP OPEN, not the level 100
 }
 
-// A2. ARM-ONCE marginal short stop: declined at the intrabar touch and CANCELLED
-// -> never reissued -> stays FLAT forever (the SAO NOFILL signature).
+// A2. ARM-ONCE marginal short stop: rejected at placement (100*110 > 10000)
+// and DROPPED -> never reissued -> stays FLAT forever (the SAO NOFILL
+// signature; flatten-stop-once / fresh-0919-once pin the drop).
 void test_arm_once_declined_stop_nofill() {
     std::printf("-- A2: arm-once declined stop is cancelled (NOFILL) --\n");
     StopProbe eng(10000.0, 100.0, 100.0, false);
     eng.is_long=false; eng.level=100.0; eng.qty=100.0; eng.arm_once=true;
     std::vector<Bar> bars = {
-        mk(1000, 110,110,110,110),        // place once
-        mk(2000, 105,106, 99,101),        // intrabar touch -> DECLINE + CANCEL
+        mk(1000, 110,110,110,110),        // place once: 100*110 > 10000 -> REJECTED, dropped
+        mk(2000, 105,106, 99,101),        // nothing rests to touch
         mk(3000,  98, 99, 97, 98),        // open<=stop but NO reissue -> stays flat
         mk(4000,  98, 98, 98, 98),
     };
@@ -130,26 +133,25 @@ void test_arm_once_declined_stop_nofill() {
 }
 
 // A3. SIDE-SYMMETRIC long stop: a gap-UP open past the buy-stop is DECLINED
-// (required at the high open > equity); the re-touch bar whose open is below the
-// level admits at the level.
-//   long qty 100 @ stop 100. bar1 open 95 low? no touch. Make bar1 gap up:
-//   open 105 (>=100) -> required 100*105=10500 > 10000 -> DECLINE. bar2 opens 99
-//   (<100) and highs to 100 -> intrabar touch, required 100*99=9900 <=10000 ->
-//   ADMIT at the level 100.
+// at the fill (100*105 = 10500 > 10000, costed at the rounded open — the
+// fresh-gap-once shape) and the order is dropped; the same-bar reissue at
+// close 105 is rejected at placement; the bar2 reissue at close 99 is
+// accepted and bar3 opens at the level: 100*100 = 10000 <= 10000 -> fill @100.
+//   long qty 100 @ stop 100. bar0 close 90: placement 9000 -> accepted.
 void test_marginal_long_stop_gap_declined_then_level_fill() {
     std::printf("-- A3: marginal long stop gap-declined, re-touch admitted (symmetric) --\n");
     StopProbe eng(10000.0, 100.0, 100.0, false);
     eng.is_long=true; eng.level=100.0; eng.qty=100.0;
     std::vector<Bar> bars = {
         mk(1000,  90, 90, 90, 90),        // bar0: place (price below buy-stop, pending)
-        mk(2000, 105,106,104,105),        // bar1: gap-up open 105>=100 -> DECLINE (base fills @105)
-        mk(3000,  99,100.5, 98, 99),      // bar2: open 99<100, high 100.5>=100 -> ADMIT @100
-        mk(4000, 100,100,100,100),
+        mk(2000, 105,106,104,105),        // bar1: gap-up open 105>=100 -> fill DECLINED, dropped; reissue rejected
+        mk(3000,  99,100.5, 98, 99),      // bar2: nothing rests; reissue at close 99 -> ACCEPTED
+        mk(4000, 100,100,100,100),        // bar3: open 100 through the level -> fill @100
     };
     eng.run(bars.data(), (int)bars.size());
     CHECK(eng.position_side_ == PositionSide::LONG);
     CHECK_NEAR(eng.position_qty_, 100.0, 1e-9);
-    CHECK_NEAR(eng.position_entry_price_, 100.0, 1e-9); // re-touch level, not the gap @105
+    CHECK_NEAR(eng.position_entry_price_, 100.0, 1e-9); // the level, not the gap @105
 }
 
 // C1. CONTROL — margin=0: NO fill-time gate. The intrabar touch fills at the
@@ -188,7 +190,7 @@ void test_well_funded_stop_admitted_at_level() {
 }  // namespace
 
 int main() {
-    std::printf("--- margin_stop_admission (KI-62 stage 3) ---\n");
+    std::printf("--- margin_stop_admission (KI-62 stage 3, round-7 basis) ---\n");
     test_marginal_short_stop_declined_then_gap_fill();
     test_arm_once_declined_stop_nofill();
     test_marginal_long_stop_gap_declined_then_level_fill();
