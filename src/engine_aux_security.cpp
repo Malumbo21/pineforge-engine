@@ -198,6 +198,37 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
     const std::size_t begin = aux_security_chart_begin_[idx];
     const std::size_t end = aux_security_chart_end_[idx];
 
+    // The calling chart bar's nominal close -- TradingView's time_close of
+    // the native bar this slice belongs to: a calendar chart bar closes at
+    // its period's nominal (last traded session-day) close whatever the
+    // slice holds -- Fri 17:00 ET for OANDA:XAUUSD's 07-03-stamped daily
+    // bar although its data ends 12:45 -- and an intraday chart bar at its
+    // grid end. An OTC calendar bucket the next auxiliary bar leaves
+    // completes on the slice's last bar exactly when this close reaches the
+    // period's (TimeframeAggregator::feed(bar, next_input_ms,
+    // calling_close_ms); lab tv oanda1d pin, 2026-09-05). current_bar_ is
+    // the native chart bar the run loop set before calling here.
+    {
+        const CalendarPeriod chart_period = calendar_period_for(input_tf_);
+        if (chart_period != CalendarPeriod::NONE) {
+            security_calling_close_ms_ = session_period_last_traded_close_ms(
+                session_covered_instant_ms(current_bar_.timestamp,
+                                           syminfo_.timezone, syminfo_.session),
+                syminfo_.timezone, syminfo_.session, chart_period);
+        } else {
+            int chart_seconds = 0;
+            try {
+                chart_seconds = tf_to_seconds(input_tf_);
+            } catch (...) {
+                chart_seconds = 0;
+            }
+            security_calling_close_ms_ = chart_seconds > 0
+                ? current_bar_.timestamp
+                      + static_cast<int64_t>(chart_seconds) * 1000
+                : 0;
+        }
+    }
+
     // Lower-TF arrays belong to the native chart slice, not a raw UTC bucket.
     // Accumulate the entire symbol-clock-aligned slice here and publish it only
     // after its final auxiliary bar. This keeps an overnight 17:00-17:00 daily
@@ -237,6 +268,8 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
             }
         }
     }
+
+    security_calling_close_ms_ = 0;
 
     struct SecurityNaWarmupScope {
         bool previous;

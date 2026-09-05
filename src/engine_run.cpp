@@ -1387,6 +1387,7 @@ int BacktestEngine::count_expected_script_bars(const Bar* input_bars, int n_inpu
 void BacktestEngine::init_security_eval_states_for_run(
     const std::string& effective_input_tf) {
     security_next_input_ms_ = 0;
+    security_calling_close_ms_ = 0;
     for (auto& state : security_eval_states_) {
         state.feed_count = 0;
         state.eval_complete_count = 0;

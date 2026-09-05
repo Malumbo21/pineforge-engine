@@ -38,7 +38,33 @@
 // applied the rule to every declared session and closed the 07-04 day on
 // the 12:45 bar and the 02-16 day on the 14:15 bar -- the mukhlisilahi
 // universal-backtest-pro XAUUSD@15 regression (two trades one bar early).
+//
+// THE 1D CHART (the split-feed path: native daily bars, the 15m slice
+// advancing request.security). What TradingView compares is the CALLING
+// chart bar's time_close against the period's nominal close, and the daily
+// bar of an early-close day keeps its nominal 17:00 ET time_close: on the
+// OANDA:XAUUSD 1D chart (lab tv oanda1d-{jul,feb,novm,decm}-par{0,1},
+// 2026-09-05, decoded into oanda1d-<win>-table.txt beside each tape)
+//   (f) "W" lookahead_off advances on FRIDAY's daily bar -- the 07-03-stamped
+//       bar of the 07-04 early close included (tW Sun 06-29 17:00, cW
+//       3336.61 = that early close, cW[1] 3274.18; its time_close 70417) --
+//       exactly as on the regular Fridays (06-13 3432.84, 06-20 3368.75,
+//       06-27 3274.18, 07-11 3355.66, 02-13 5042.74, 02-20, 02-27, 03-06);
+//   (g) "D" is the chart bar itself on every daily bar, the early-close days
+//       07-04 (c0 3336.61) and 02-16 (c0 4992.01) included, [1] = the
+//       previous daily bar;
+//   (h) "M" completes on the month's last daily bar (Nov 2025 on the
+//       11-27-stamped Fri 11-28 bar, tM Sun 11-02 17:00, cM 4215.82; Dec on
+//       the 12-30-stamped Wed 12-31 bar, cM 4322.61), the month in progress
+//       at the range start absent; "240" reads the last 240 bucket the day's
+//       data reaches (13:00 ET on a regular day, 09:00 on 07-04).
+// So an OTC period the next input bar leaves completes on the slice's last
+// bar iff the calling chart bar's nominal close reaches the period's
+// (TimeframeAggregator::feed(bar, next_input_ms, calling_close_ms), set per
+// native chart bar by feed_aux_security_for_chart_bar); on the 15m chart the
+// calling bar is the input bar and nothing changes.
 
+#include <pineforge/pineforge.h>
 #include <pineforge/engine.hpp>
 #include <pineforge/timeframe.hpp>
 
@@ -193,6 +219,15 @@ std::vector<Bar> from(const std::vector<Bar>& chart, int64_t from_ts) {
     return out;
 }
 
+// The bars stamped in [first, last].
+std::vector<Bar> between(const std::vector<Bar>& bars, int64_t first, int64_t last) {
+    std::vector<Bar> out;
+    for (const Bar& b : bars) {
+        if (b.timestamp >= first && b.timestamp <= last) out.push_back(b);
+    }
+    return out;
+}
+
 void run15(LazyProbe& probe, const std::vector<Bar>& chart, const char* tz,
            const char* session, const char* type, int64_t range_start_ms) {
     probe.set_syminfo_timezone(tz);
@@ -212,6 +247,25 @@ void run15(LazyProbe& probe, const std::vector<Bar>& chart, const char* tz,
 void run_xau(LazyProbe& probe, const std::vector<Bar>& chart,
              int64_t range_start_ms, const char* type = "cfd") {
     run15(probe, chart, "America/New_York", "1800-1700", type, range_start_ms);
+}
+
+// The OANDA:XAUUSD 1D lane: native daily bars (stamped 17:00 ET) as the
+// chart, the 15m feed as the auxiliary request.security slice -- the
+// split-feed path every @1D lane runs.
+void run_xau_daily(LazyProbe& probe, const std::vector<Bar>& daily,
+                   const std::vector<Bar>& aux15, int64_t range_start_ms,
+                   const char* type = "cfd") {
+    probe.set_syminfo_timezone("America/New_York");
+    probe.set_syminfo_session("1800-1700");
+    probe.set_syminfo_type(type);
+    probe.set_syminfo_metadata("security_range_start_na_warmup",
+                               static_cast<double>(range_start_ms));
+    probe.set_syminfo_metadata("historical_security_lookahead_projection", 1.0);
+    CHECK(probe.set_aux_security_feed(aux15.data(), static_cast<int>(aux15.size()), "15"),
+          "the 15m auxiliary feed installs");
+    probe.run(daily.data(), static_cast<int>(daily.size()), "1D", "1D",
+              false, 4, MagnifierDistribution::ENDPOINTS);
+    CHECK(probe.last_error().empty(), probe.last_error().c_str());
 }
 
 void check_ohlc(const Ohlc& got, const Ohlc& want, const char* tag) {
@@ -619,6 +673,221 @@ void test_exchange_kind_completes_on_the_actual_last_bar() {
     }
 }
 
+// ---- the 1D chart: W on Friday's daily bar, D the bar itself (f, g) ----------
+
+// The oanda1d-jul tape's week of 06-29 on the daily chart: the seven daily
+// bars whose sessions the 15m slice holds whole, Sun 06-29 .. Mon 07-07
+// stamps (Fri 07-04 = the 12:45 early close).
+void test_daily_chart_july() {
+    const std::vector<Bar> aux = vec(oanda_data::kXau15Jul);
+    const std::vector<Bar> d1 = vec(oanda_data::kXau1DJul);
+    const std::vector<Bar> chart = between(d1, edt(2025, 6, 29, 17, 0), edt(2025, 7, 7, 17, 0));
+    CHECK(chart.size() == 7, "seven daily bars 06-29 .. 07-07");
+    const Ohlc d0629 = daily(d1, edt(2025, 6, 29, 17, 0));
+    const Ohlc d0630 = daily(d1, edt(2025, 6, 30, 17, 0));
+    const Ohlc d0701 = daily(d1, edt(2025, 7, 1, 17, 0));
+    const Ohlc d0702 = daily(d1, edt(2025, 7, 2, 17, 0));
+    const Ohlc d0703 = daily(d1, edt(2025, 7, 3, 17, 0));  // Fri 07-04, data to 12:45
+    const Ohlc d0706 = daily(d1, edt(2025, 7, 6, 17, 0));
+    const Ohlc d0707 = daily(d1, edt(2025, 7, 7, 17, 0));
+    const Ohlc w0629 = weekly(d1, edt(2025, 6, 29, 17, 0), edt(2025, 7, 3, 17, 0));
+    check_ohlc(w0629, Ohlc{3271.64, 3365.92, 3244.415, 3336.615}, "the week 06-29: c = the 07-04 early close, cW 3336.61");
+    for (const char* kind : {"cfd", "futures"}) {
+        LazyProbe probe;
+        probe.sites = {{"D", false}, {"D", true}, {"W", false}, {"W", true}};
+        run_xau_daily(probe, chart, aux, utc_ms(2025, 6, 28), kind);
+        CHECK(probe.rows.size() == 7, "seven daily chart bars ran");
+        const bool cfd = std::string(kind) == "cfd";
+        const std::string tag = std::string("1D as ") + kind + ": ";
+        // (g) D off = the chart bar itself on every daily bar, [1] = the
+        // previous daily bar, time = the stamp -- the tape's t0 = tb, c0 =
+        // the bar's close, c1 = the previous close on 07-03 (70317 3336.61
+        // 3326.03) exactly as on 07-02 and 07-06.
+        struct Day { int64_t stamp; Ohlc x0, x1; };
+        const Day days[] = {
+            {edt(2025, 6, 29, 17, 0), d0629, kNa},
+            {edt(2025, 6, 30, 17, 0), d0630, d0629},
+            {edt(2025, 7, 1, 17, 0), d0701, d0630},
+            {edt(2025, 7, 2, 17, 0), d0702, d0701},
+            {edt(2025, 7, 3, 17, 0), d0703, d0702},   // the early-close day reads ITSELF
+            {edt(2025, 7, 6, 17, 0), d0706, d0703},
+            {edt(2025, 7, 7, 17, 0), d0707, d0706},
+        };
+        for (const Day& d : days) {
+            const Read& off = probe.at(d.stamp, kDOff);
+            check_ohlc(off.x0, d.x0, (tag + "D off = the daily bar itself").c_str());
+            check_ohlc(off.x1, d.x1, (tag + "D off [1] = the previous daily bar").c_str());
+            CHECK(off.t0 == d.stamp, (tag + "D off time = the bar's 17:00 ET stamp").c_str());
+            CHECK(off.complete0, (tag + "D off publishes complete on its own bar").c_str());
+            check_ohlc(probe.at(d.stamp, kDOn).x0, d.x0, (tag + "D on = the daily bar itself").c_str());
+        }
+        CHECK(same(probe.at(edt(2025, 7, 3, 17, 0), kDOff).v0, 221059.0),
+              (tag + "the early-close day's D volume = the 1D bar's 221059").c_str());
+        // (f) W off: na on Sun .. Thu, the week on FRIDAY's bar (the
+        // 07-04 early close: tW 62917, cW 3336.61), held on the next week's
+        // Sun / Mon bars with no [1].
+        for (int k = 0; k < 4; ++k) {
+            check_ohlc(probe.at(days[k].stamp, kWOff).x0, kNa, (tag + "W off na through Thu 07-03").c_str());
+        }
+        const Read& friday = probe.at(edt(2025, 7, 3, 17, 0), kWOff);
+        check_ohlc(friday.x0, w0629, (tag + "W off week 06-29 ON Fri 07-04's daily bar").c_str());
+        check_ohlc(friday.x1, kNa, (tag + "W off [1] na on Fri 07-04").c_str());
+        CHECK(friday.t0 == edt(2025, 6, 29, 17, 0), (tag + "W off dated Sun 06-29 17:00").c_str());
+        CHECK(friday.complete0, (tag + "W off publishes complete on Friday's bar").c_str());
+        CHECK(same(friday.v0, 349557.0 + 417491.0 + 398577.0 + 374883.0 + 221059.0),
+              (tag + "W off volume = the sum of the daily volumes").c_str());
+        check_ohlc(probe.at(edt(2025, 7, 6, 17, 0), kWOff).x0, w0629, (tag + "W off held on Sun 07-06's bar").c_str());
+        check_ohlc(probe.at(edt(2025, 7, 7, 17, 0), kWOff).x0, w0629, (tag + "W off held on Mon 07-07's bar").c_str());
+        // W on: the tape leaks the week's FINAL values from its Sunday bar
+        // (tWL 62917 cWL 3336.61 from the 06-29 stamp); the split-feed path
+        // builds no finite-batch projection (prepare_aux_security_chart_ranges
+        // replaces prepare_historical_security_lookahead_projections) and
+        // peeks the running week instead -- a residual older than this
+        // change and outside it; only Friday's bar, where the two agree, is
+        // asserted.
+        check_ohlc(probe.at(edt(2025, 7, 3, 17, 0), kWOn).x0, w0629, (tag + "W on = the whole week on Fri 07-04's bar").c_str());
+        CHECK(probe.session_template_knows_early_close() == !cfd,
+              "session_template_knows_early_close follows syminfo.type");
+    }
+}
+
+// The oanda1d-feb tape on the daily chart: Sun 02-08 .. Mon 02-16 stamps
+// (Fri 02-13 a regular Friday; Mon 02-16 Presidents' Day, data to 14:15).
+void test_daily_chart_february() {
+    const std::vector<Bar> aux = vec(oanda_data::kXau15Feb);
+    const std::vector<Bar> d1 = vec(oanda_data::kXau1DFeb);
+    const std::vector<Bar> chart = between(d1, est(2026, 2, 8, 17, 0), est(2026, 2, 16, 17, 0));
+    CHECK(chart.size() == 7, "seven daily bars 02-08 .. 02-16");
+    LazyProbe probe;
+    probe.sites = {{"D", false}, {"D", true}, {"W", false}, {"W", true}};
+    run_xau_daily(probe, chart, aux, utc_ms(2026, 2, 7));
+    CHECK(probe.rows.size() == 7, "seven daily chart bars ran");
+    const Ohlc d0208 = daily(d1, est(2026, 2, 8, 17, 0));
+    const Ohlc d0209 = daily(d1, est(2026, 2, 9, 17, 0));
+    const Ohlc d0210 = daily(d1, est(2026, 2, 10, 17, 0));
+    const Ohlc d0211 = daily(d1, est(2026, 2, 11, 17, 0));
+    const Ohlc d0212 = daily(d1, est(2026, 2, 12, 17, 0));
+    const Ohlc d0215 = daily(d1, est(2026, 2, 15, 17, 0));  // Mon 02-16, data to 14:15
+    const Ohlc d0216 = daily(d1, est(2026, 2, 16, 17, 0));
+    const Ohlc w0208 = weekly(d1, est(2026, 2, 8, 17, 0), est(2026, 2, 12, 17, 0));
+    check_ohlc(w0208, Ohlc{4989.93, 5119.345, 4878.5, 5042.74}, "the week 02-08, cW 5042.74");
+    struct Day { int64_t stamp; Ohlc x0, x1; };
+    const Day days[] = {
+        {est(2026, 2, 8, 17, 0), d0208, kNa},
+        {est(2026, 2, 9, 17, 0), d0209, d0208},
+        {est(2026, 2, 10, 17, 0), d0210, d0209},
+        {est(2026, 2, 11, 17, 0), d0211, d0210},
+        {est(2026, 2, 12, 17, 0), d0212, d0211},
+        {est(2026, 2, 15, 17, 0), d0215, d0212},   // the early-close day reads ITSELF (t0 21517 c0 4992.01)
+        {est(2026, 2, 16, 17, 0), d0216, d0215},
+    };
+    for (const Day& d : days) {
+        const Read& off = probe.at(d.stamp, kDOff);
+        check_ohlc(off.x0, d.x0, "1D feb: D off = the daily bar itself");
+        check_ohlc(off.x1, d.x1, "1D feb: D off [1] = the previous daily bar");
+        CHECK(off.t0 == d.stamp, "1D feb: D off time = the stamp");
+        CHECK(off.complete0, "1D feb: D off publishes complete on its own bar");
+        check_ohlc(probe.at(d.stamp, kDOn).x0, d.x0, "1D feb: D on = the daily bar itself");
+    }
+    CHECK(same(probe.at(est(2026, 2, 15, 17, 0), kDOff).v0, 396800.0),
+          "1D feb: the early-close day's D volume = the 1D bar's 396800");
+    // W off: na Sun .. Thu, the week on Fri 02-13's bar (tW 20817 cW
+    // 5042.74), held through the 02-16 early close and the 02-16 stamp.
+    for (int k = 0; k < 4; ++k) {
+        check_ohlc(probe.at(days[k].stamp, kWOff).x0, kNa, "1D feb: W off na through Thu 02-12");
+    }
+    const Read& friday = probe.at(est(2026, 2, 12, 17, 0), kWOff);
+    check_ohlc(friday.x0, w0208, "1D feb: W off week 02-08 on Fri 02-13's daily bar");
+    CHECK(friday.t0 == est(2026, 2, 8, 17, 0), "1D feb: W off dated Sun 02-08 17:00");
+    CHECK(friday.complete0, "1D feb: W off publishes complete on Friday's bar");
+    check_ohlc(probe.at(est(2026, 2, 15, 17, 0), kWOff).x0, w0208, "1D feb: W off held on the 02-16 early-close bar");
+    check_ohlc(probe.at(est(2026, 2, 16, 17, 0), kWOff).x0, w0208, "1D feb: W off held on the 02-16 stamp");
+    // (W on: the running week on the split-feed path, see test_daily_chart_july.)
+    check_ohlc(probe.at(est(2026, 2, 12, 17, 0), kWOn).x0, w0208, "1D feb: W on = the whole week on Fri 02-13's bar");
+}
+
+// ---- aggregator: the calling chart bar's nominal close (f, g, h) -------------
+
+void test_aggregator_calling_close_hint() {
+    const std::vector<Bar> feed = vec(oanda_data::kXau15Jul);
+    const std::string tz = "America/New_York", sess = "1800-1700";
+    // The daily chart bar's nominal close for a 15m bar = its session-day's
+    // close (Fri 17:00 ET for the 07-04 12:45 bar); the 15m chart bar's own
+    // end = ts + 15m.
+    auto daily_close = [&](int64_t ts) {
+        return session_period_last_traded_close_ms(ts, tz, sess, CalendarPeriod::DAY);
+    };
+    enum Hint { kNone, kOwnEnd, kDailyClose };
+    auto completions = [&](const char* tf, bool early, Hint hint, const std::vector<Bar>& bars) {
+        TimeframeAggregator agg(tf, "15", tz, sess);
+        agg.set_early_close_completes(early);
+        std::vector<int64_t> on;
+        for (std::size_t i = 0; i < bars.size(); ++i) {
+            const int64_t next = i + 1 < bars.size() ? bars[i + 1].timestamp : 0;
+            const int64_t close = hint == kNone ? 0
+                : hint == kOwnEnd ? bars[i].timestamp + kQuarter
+                                  : daily_close(bars[i].timestamp);
+            const AggregatedBar ab = hint == kNone ? agg.feed(bars[i], next)
+                                                   : agg.feed(bars[i], next, close);
+            if (ab.is_complete) on.push_back(bars[i].timestamp);
+        }
+        return on;
+    };
+    CHECK(daily_close(edt(2025, 7, 4, 12, 45)) == edt(2025, 7, 4, 17, 0),
+          "the 07-04 12:45 bar's daily chart bar closes Fri 17:00 ET (tc 70417)");
+    CHECK(daily_close(edt(2025, 7, 3, 16, 45)) == edt(2025, 7, 3, 17, 0),
+          "the 07-03 16:45 bar's daily chart bar closes Thu 17:00 ET");
+    const std::vector<int64_t> regular = {
+        edt(2025, 6, 30, 16, 45), edt(2025, 7, 1, 16, 45), edt(2025, 7, 2, 16, 45),
+        edt(2025, 7, 3, 16, 45), 0 /* the early-close day */, edt(2025, 7, 7, 16, 45),
+        edt(2025, 7, 8, 16, 45)};
+    for (const bool early : {false, true}) {
+        for (const Hint hint : {kNone, kOwnEnd, kDailyClose}) {
+            const auto on = completions("D", early, hint, feed);
+            CHECK(on.size() == 7, "seven completed days");
+            if (on.size() != 7) continue;
+            for (std::size_t k = 0; k < on.size(); ++k) {
+                if (regular[k] != 0) CHECK(on[k] == regular[k], "regular days complete on the 16:45 bar under every hint");
+            }
+            // cfd: the daily chart bar's close (Fri 17:00) reaches the day's
+            // close, so the 12:45 bar completes it -- the 1D chart's rule;
+            // the 15m bar's own end (13:00) does not, nor does no hint --
+            // the 15m chart's rule. Exchange kinds: 12:45 either way.
+            const bool on_12_45 = early || hint == kDailyClose;
+            CHECK(on[4] == (on_12_45 ? edt(2025, 7, 4, 12, 45) : edt(2025, 7, 6, 18, 0)),
+                  on_12_45 ? "the shortened day completes on its 12:45 bar"
+                           : "the shortened day completes on Sun 18:00");
+            const auto week = completions("W", early, hint, feed);
+            CHECK(week.size() == 1 && week[0] == (on_12_45 ? edt(2025, 7, 4, 12, 45) : edt(2025, 7, 6, 18, 0)),
+                  on_12_45 ? "the week completes on the 12:45 bar"
+                           : "the week completes on Sun 07-06 18:00");
+        }
+    }
+    // (h) M on the month's last daily bar: June 2025's last session (Sun
+    // 06-29 18:00 -> Mon 06-30) with its tail cut at 12:45, a synthetic
+    // early close on the month's last day. The daily chart bar's close (Mon
+    // 17:00) reaches June's last traded close, so the 12:45 bar completes
+    // the month on the 1D chart; on the 15m chart it waits for July's first
+    // bar, Mon 18:00. Untouched, the month completes on 06-30 16:45 either
+    // way (the nominal rule).
+    std::vector<Bar> cut;
+    for (const Bar& b : feed) {
+        if (b.timestamp > edt(2025, 6, 30, 12, 45) && b.timestamp < edt(2025, 6, 30, 18, 0)) continue;
+        cut.push_back(b);
+    }
+    CHECK(cut.size() == feed.size() - 16, "sixteen 15m bars cut from 06-30 13:00 .. 16:45");
+    for (const Hint hint : {kNone, kOwnEnd, kDailyClose}) {
+        const auto whole = completions("M", false, hint, feed);
+        CHECK(whole.size() == 1 && whole[0] == edt(2025, 6, 30, 16, 45), "June completes on 06-30 16:45 under every hint");
+        const auto early = completions("M", false, hint, cut);
+        CHECK(early.size() == 1 && early[0] == (hint == kDailyClose ? edt(2025, 6, 30, 12, 45) : edt(2025, 6, 30, 18, 0)),
+              hint == kDailyClose ? "cfd, the daily chart bar's close: June completes on the cut 12:45 bar"
+                                  : "cfd, the 15m bar: June completes on July's first bar, Mon 18:00");
+        const auto exchange = completions("M", true, hint, cut);
+        CHECK(exchange.size() == 1 && exchange[0] == edt(2025, 6, 30, 12, 45), "exchange kinds: June completes on the cut 12:45 bar either way");
+    }
+}
+
 // ---- aggregator: the flag ----------------------------------------------------
 
 void test_aggregator_flag() {
@@ -678,6 +947,9 @@ int main() {
     test_range_start_absent_period();
     test_sessions_aggregate_to_the_native_daily_bar();
     test_exchange_kind_completes_on_the_actual_last_bar();
+    test_daily_chart_july();
+    test_daily_chart_february();
+    test_aggregator_calling_close_hint();
     test_aggregator_flag();
     std::printf("test_oanda_lazy_close: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

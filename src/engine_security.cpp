@@ -588,8 +588,11 @@ void BacktestEngine::feed_security_eval_state(
 
     // The next input bar's timestamp (0 when unknown) lets a calendar
     // bucket complete on the period's actual last chart bar -- see
-    // security_next_input_ms_.
-    AggregatedBar ab = state.aggregator.feed(input_bar, security_next_input_ms_);
+    // security_next_input_ms_ -- and the calling chart bar's nominal close
+    // (split-feed path, else 0) lets an OTC bucket do so exactly when that
+    // close reaches the period's -- see security_calling_close_ms_.
+    AggregatedBar ab = state.aggregator.feed(input_bar, security_next_input_ms_,
+                                             security_calling_close_ms_);
     state.feed_count++;
     state.current_sub_bar_count = ab.sub_bar_count;
     if (ab.is_complete) {

@@ -237,6 +237,31 @@ public:
     /// bar.
     AggregatedBar feed(const Bar& input_bar, int64_t next_input_ms);
 
+    /// feed(bar, next_input_ms) with the CALLING chart bar's nominal close
+    /// known (0 = unknown, the forms above): TradingView's time_close of
+    /// the chart bar this input bar belongs to -- the input bar's own end
+    /// on a single-feed run, the native D/W/M chart bar's session close on
+    /// the split-feed path, where a finer auxiliary slice advances
+    /// request.security. Read only by the OTC rule
+    /// (set_early_close_completes(false)): TradingView surfaces a D/W/M
+    /// value on the chart bar whose time_close reaches the period's
+    /// nominal close, and the daily bar of an early-close day keeps its
+    /// nominal time_close -- on the OANDA:XAUUSD 1D chart the Fri
+    /// 2025-07-04 bar (data to 12:45 ET) still closes at 17:00 ET, so
+    /// request.security(tickerid, "W", x) advances on it (cW 3336.61, the
+    /// early close) exactly as on every regular Friday, and "D" is the
+    /// chart bar itself there and on Mon 2026-02-16 (14:15 early close);
+    /// on the 15m chart the 12:45 / 14:15 bar's own time_close falls short
+    /// and the value waits for the next session's first bar (lab tv
+    /// oanda1d-{jul,feb,novm,decm} beside the oanda 15m pin, 2026-09-05).
+    /// So on an OTC stream a bucket the next input bar leaves completes on
+    /// this input bar iff calling_close_ms reaches the period's nominal
+    /// close (session_period_last_traded_close_ms); with 0 it waits, as
+    /// before. Exchange kinds (early_close_completes) ignore the hint: the
+    /// actual last bar completes the period either way.
+    AggregatedBar feed(const Bar& input_bar, int64_t next_input_ms,
+                       int64_t calling_close_ms);
+
     /// Current in-progress bar.
     Bar current() const;
 
@@ -292,7 +317,10 @@ public:
     /// period) -- true, the default -- or the bucket waits for the period's
     /// nominal close (the 16:45 bar reaching 17:00, the last traded
     /// session-day's close) and, when no input bar reaches it, completes
-    /// lazily on the next period's first bar (false). TradingView finalizes
+    /// lazily on the next period's first bar (false) -- unless the CALLING
+    /// chart bar's nominal close reaches the period's (feed(bar,
+    /// next_input_ms, calling_close_ms): the 1D chart's early-close daily
+    /// bar, whose time_close stays 17:00 ET). TradingView finalizes
     /// on the actual last bar only where its session template carries the
     /// early close: exchange calendars (stock / futures / index -- NYSE:F's
     /// 13:00 half-days, CME's 12:00 CT early closes). OTC quote streams have

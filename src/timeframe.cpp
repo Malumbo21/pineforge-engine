@@ -902,7 +902,8 @@ AggregatedBar feed_ratio_mode(const Bar& input_bar, FeedState s,
 AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
                                   CalendarPeriod cal_period,
                                   int64_t input_seconds,
-                                  int64_t next_input_ms) {
+                                  int64_t next_input_ms,
+                                  int64_t calling_close_ms) {
     AggregatedBar result;
     const bool pf_tr = getenv("PF_SEC_TRACE") != nullptr;
     if (pf_tr) {
@@ -1034,9 +1035,10 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
         }
     }
     const bool early_close_completes = !s.agg || s.agg->early_close_completes();
-    if (!complete && !native_periods && early_close_completes
+    if (!complete && !native_periods
         && next_input_ms > input_bar.timestamp
-        && has_trading_session(asess)) {
+        && has_trading_session(asess)
+        && (early_close_completes || calling_close_ms > 0)) {
         // The nominal rules above end a period at its scheduled close and
         // model neither early closes nor exchange holidays: on NYSE:F the
         // 13:00 ET half-day of Fri 2025-11-28 left the week (and the day)
@@ -1057,9 +1059,28 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
         // TradingView, which surfaces that D, and the week holding it, on
         // the next session's first 18:00 bar: the nominal rules above plus
         // the boundary completion, exactly as before this rule (lab tv
-        // oanda pin, ledger log-20260905t034240z-30be11fe, 2026-09-05).
-        complete = crosses_boundary(input_bar.timestamp, next_input_ms,
-                                    cal_period, atz, asess);
+        // oanda pin, ledger log-20260905t034240z-30be11fe, 2026-09-05) --
+        // on the 15m chart. What TradingView compares is the CALLING chart
+        // bar's time_close against the period's nominal close, and the
+        // daily bar of that same early-close day keeps its nominal 17:00
+        // ET time_close: on the OANDA:XAUUSD 1D chart "W" advances on the
+        // 07-04 daily bar (cW 3336.61, tW Sun 06-29 17:00) as on every
+        // regular Friday, "D" is the chart bar itself on 07-04 and on Mon
+        // 2026-02-16, and "M" completes on the month's last daily bar (lab
+        // tv oanda1d-{jul,feb,novm,decm}, 2026-09-05). So when the caller
+        // names that close (the split-feed path: a finer auxiliary slice
+        // under a native D/W/M chart bar), an OTC bucket the next input
+        // bar leaves completes on this input bar iff the calling bar's
+        // close reaches the period's nominal close
+        // (session_period_last_traded_close_ms); without it (0: the input
+        // bar is the chart bar, whose own end the nominal rules above
+        // already tested) the bucket waits, bit-identical to before.
+        if (crosses_boundary(input_bar.timestamp, next_input_ms,
+                             cal_period, atz, asess)) {
+            complete = early_close_completes
+                || calling_close_ms >= session_period_last_traded_close_ms(
+                       input_bar.timestamp, atz, asess, cal_period);
+        }
     }
     if (!complete && native_periods && cal_period == CalendarPeriod::DAY
         && input_seconds > 0 && next_input_ms <= input_bar.timestamp) {
@@ -1102,11 +1123,17 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
 }  // namespace
 
 AggregatedBar TimeframeAggregator::feed(const Bar& input_bar) {
-    return feed(input_bar, 0);
+    return feed(input_bar, 0, 0);
 }
 
 AggregatedBar TimeframeAggregator::feed(const Bar& input_bar,
                                         int64_t next_input_ms) {
+    return feed(input_bar, next_input_ms, 0);
+}
+
+AggregatedBar TimeframeAggregator::feed(const Bar& input_bar,
+                                        int64_t next_input_ms,
+                                        int64_t calling_close_ms) {
     FeedState s{current_bar_, sub_bar_count_, current_emitted_complete_,
                 last_completed_bar_, has_completed_,
                 &anchor_tz_, &anchor_session_, this};
@@ -1118,7 +1145,7 @@ AggregatedBar TimeframeAggregator::feed(const Bar& input_bar,
                                    input_seconds_);
         case Mode::CALENDAR:
             return feed_calendar_mode(input_bar, s, cal_period_, input_seconds_,
-                                      next_input_ms);
+                                      next_input_ms, calling_close_ms);
     }
 
     // Unreachable

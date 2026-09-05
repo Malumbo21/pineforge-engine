@@ -1188,6 +1188,14 @@ protected:
     // per input bar, per auxiliary bar on the split-feed path, per sub-bar
     // under the magnifier; never by the stream path.
     int64_t security_next_input_ms_ = 0;
+    // Nominal close (TradingView's time_close) of the CALLING chart bar the
+    // input bar being fed belongs to; 0 = the input bar is the chart bar
+    // (single-feed runs, streams). Set per native chart bar on the
+    // split-feed path, where a finer auxiliary slice advances
+    // request.security under a D/W/M chart bar whose close an OTC
+    // calendar bucket compares against the period's nominal close
+    // (TimeframeAggregator::feed(bar, next_input_ms, calling_close_ms)).
+    int64_t security_calling_close_ms_ = 0;
     // Opt-in historical-only request.security lookahead projection. TradingView
     // can merge a completed higher-timeframe bar onto the first chart child
     // when a finite historical batch is already known. The normal engine path
