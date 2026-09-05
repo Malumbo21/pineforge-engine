@@ -1,5 +1,6 @@
 #pragma once
 #include "na.hpp"
+#include "window_sum.hpp"
 #include <cstdint>
 #include <deque>
 
@@ -25,21 +26,8 @@ namespace math {
 /// `math.sum(source, length)` (not a `ta.*` builtin). Returns na until seeded,
 /// then holds the seeded sum on na-input bars.
 class Sum {
+    KahanWindowSum window_;   // TradingView's sliding-window arithmetic (window_sum.hpp)
     int length_;
-    std::deque<double> buffer_;
-    double sum_;
-
-    // State needed to rewind the current bar before an intrabar recompute.
-    // A valid input can append one value and evict at most one old value, so
-    // restoring this delta stays O(1) without copying the rolling window.
-    double saved_sum_;
-    bool has_saved_state_;
-    bool current_value_added_;
-    bool current_value_evicted_;
-    double current_evicted_value_;
-
-    double apply(double src);
-    void restore();
 
 public:
     explicit Sum(int length);
