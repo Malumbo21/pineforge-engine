@@ -1778,11 +1778,28 @@ bool BacktestEngine::margin_call_slice_at_bar_open(const Bar& bar) {
 
     // Deficit at the open: the same fee-net eq/req arithmetic as the
     // adverse-extreme cascade, evaluated at the open price.
+    //
+    // Round 7 family N mechanism 1 (campaign pin log-20260905t112243z-
+    // b6ddd126, lab tv tape scratchpad/r7/pins/aapl15-mcopen-willow): the
+    // SHORT side marks equity and required margin at the TICK-ROUNDED open,
+    // the same on-tick ledger the adverse-extreme cascade (process_margin_
+    // call, margin_call_slice_before_priced_exit) already marks on and the
+    // tick the slice books at. A half-tick session open discriminates: the
+    // willowsportz 5253-share short into the 04-22 13:30Z open 196.135 gives
+    // x = 103.26 at 196.14 (TV 412) and 102.999 at the raw print (408, the
+    // engine's row); algoai 06-20 o 198.235 -> 64 vs 60, shojiy 10-27 o
+    // 264.925 -> 36 vs 32. Census: with the tape's own equity the on-tick
+    // rule reproduces 1067/1067 'Margin call' rows of the four AAPL@15 all-in
+    // tapes. The LONG side keeps the raw open exactly as the cascade keeps
+    // the raw low (no evidence either way on an on-tick feed).
     const double fx = active_account_currency_fx();
     if (!std::isfinite(fx) || !(fx > 0.0)) return false;
-    const double equity_open = percent_commission_live_equity(open);
+    const double open_mark = (position_side_ == PositionSide::SHORT)
+        ? round_to_mintick(open) : open;
+    if (!std::isfinite(open_mark) || !(open_mark > 0.0)) return false;
+    const double equity_open = percent_commission_live_equity(open_mark);
     if (!std::isfinite(equity_open)) return false;
-    const double margin_per_unit_open = open * pv * fx * m;
+    const double margin_per_unit_open = open_mark * pv * fx * m;
     if (!std::isfinite(margin_per_unit_open) || !(margin_per_unit_open > 0.0)) {
         return false;
     }
