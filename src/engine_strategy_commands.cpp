@@ -67,6 +67,16 @@ namespace {
 // unconditional bypass produces in continuously-firing strategies
 // like basic/volty-expan. The buffer matches TV's chart-bar
 // resolution rather than the validator-chosen input-bar resolution.
+//
+// Since round 7 the harness (scripts/run_strategy.py,
+// _tv_entry_emit_window) sets the gate to the chart-feed bar that
+// PRECEDES TV's first entry bar, walked over the feed it actually
+// runs — so a weekend, holiday or overnight session gap before the
+// first fill no longer hides the signal bar (six single-entry 1D/15m
+// tapes produced 0 trades on every candidate: ledger
+// log-20260905t054904z-a9baf07e). On a gapless feed that is the same
+// timestamp as before; the one-script-TF buffer here stays for the
+// input-bar-finer-than-script-bar case above.
 inline bool trading_is_active(int64_t current_ms, int64_t start_ms,
                               int script_tf_seconds) {
     if (start_ms == std::numeric_limits<int64_t>::min()) {
