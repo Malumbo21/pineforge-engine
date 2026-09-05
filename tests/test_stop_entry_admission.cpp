@@ -26,10 +26,15 @@
  *
  * Scope: the explicit-qty / default FIXED / CASH / default percent > 100
  * sizing partition (every tape passes an explicit qty). A DEFAULT
- * percent_of_equity <= 100 stop takes neither half: no placement check and
- * the fill-time gate keeps KI-62's bar-OPEN basis — the ahtisham regression
- * at the end of this file (cand-round7-engine-a-20260905: costing the
- * all-in default at the level admitted 394 short touches TV never fills).
+ * percent_of_equity <= 100 stop takes the SAME placement half with its own
+ * quantity — sized at the tick-snapped LEVEL, family K, ledger note
+ * log-20260905t084529z-c7b22df1, tests/test_default_pct_stop_sizing.cpp —
+ * and the same fill half on that quantity; KI-62's bar-OPEN basis is
+ * retired. The ahtisham regression at the end of this file
+ * (cand-round7-engine-a-20260905: costing the all-in default at the level
+ * with a FILL-time quantity admitted 394 short touches TV never fills) is
+ * now explained by the placement half: the all-in sell stop below the
+ * close is never placed.
  *
  * Feed bars are the registry's NYSE:F 15 (mintick 0.01, whole shares) and
  * OANDA:XAUUSD 15 (mintick 0.005, lot 0.01) bars, UTC, `lab bars`. Tape
@@ -1020,6 +1025,11 @@ void test_margin_zero_control() {
 // 1859.63 >= l 1853.57, all-in 5.3133 x 1859.63 = 9,880.8 <= 9,880.86 at the
 // level where 5.3133 x 1866.16 = 9,915.5 > 9,880.86 declines at the open
 // (TV: no trade; 394 such shorts over the range, 591 -> 1,177 trades).
+// Family K (this round) explains it from the placement side: the 05:00Z
+// call sizes the sell stop at the level (5.3133 = floor(9,880.86 / 1859.63,
+// 0.0001)) and rejects it at the close (5.3133 x 1866.16 = 9,915.5 >
+// 9,880.86) — nothing rests for the 05:15Z touch. The buy stop at the level
+// 1912.40 sizes 5.1667 (9,880.8 <= 9,880.86) and fills the touch unchanged.
 struct EthRow { double o, h, l, c, buy_stop, sell_stop, mid; };
 constexpr int kEthCount = 56;   // 2025-04-02 04:15Z .. 18:00Z
 enum EthBar {
@@ -1096,7 +1106,7 @@ std::vector<Bar> eth_bars() {
 }
 
 void test_ahtisham_default_pct_stop() {
-    std::printf("-- ahtisham: default percent 100 x margin 100, the 05:15Z short touch is declined at the open, the 15:30Z long touch fills --\n");
+    std::printf("-- ahtisham: default percent 100 x margin 100, the 05:00Z sell stop is never placed (no 05:15Z touch fill), the 15:30Z long touch fills 5.1667 sized at the level --\n");
     Probe p(9880.86, 100.0, 0.01, 0.0001);
     p.use_default_percent(100.0);
     p.script = [&](Probe& e, int bar) {
@@ -1112,9 +1122,15 @@ void test_ahtisham_default_pct_stop() {
             e.entry_stop("Long", true, r.buy_stop, kNaN, "EXPANSION UP");
             e.entry_stop("Short", false, r.sell_stop, kNaN, "EXPANSION DOWN");
             if (bar == E0402_0500) {
-                // No placement check on a default-sized stop: both rest.
+                // Family K placement check: the all-in sell stop below the
+                // close (5.3133 x 1866.16 > 9,880.86) is rejected; the buy
+                // stop rests, sized at its level.
                 CHECK(e.pending("Long"));
-                CHECK(e.pending("Short"));
+                CHECK(!e.pending("Short"));
+            }
+            if (bar == E0402_1515) {
+                CHECK(e.pending("Long"));
+                CHECK(!e.pending("Short"));
             }
         }
         if (e.position_size() > 0) {

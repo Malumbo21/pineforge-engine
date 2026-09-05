@@ -3524,57 +3524,40 @@ void BacktestEngine::compact_filled_pending_orders(
 }
 
 
-bool BacktestEngine::use_stop_placement_open_qty(
-        const PendingOrder& order, double fill_price, const Bar& bar) const {
+// round 7 (family K default-percent stop-entry sizing; rule, tapes and
+// numbers on PendingOrder::default_stop_placement_qty): the DEFAULT
+// percent_of_equity <= 100 pure STOP was sized when strategy.entry was
+// called — at the tick-snapped level, or at tick(close) for a beyond-level
+// stop — and that quantity is the order's quantity for the rest of its life:
+// the fill-time admission costs it and dispatch opens it, on an intrabar
+// touch (the level), on a gap-through (the rounded open) and on the
+// next-open fill of a beyond-level stop alike; a resting order is never
+// re-sized (only the script's next call re-issues it). Scope of the
+// consumption: a true-flat placement (created FLAT, not after a same-bar
+// close) filling from FLAT — the shape every tape and the ahtisham decode
+// pin. A stop placed while a position is held (a same-direction add, a
+// reversal, a deferred-flip carry) keeps the established fill-time sizing
+// of its kernel, and a fill against a live opposite position keeps the
+// reversal kernel's own sizing; both still passed the family-E placement
+// check at the call. A non-positive fill print (a zero open) falls back too,
+// so the zero-lot decline stays byte-identical.
+bool BacktestEngine::use_default_stop_placement_qty(
+        const PendingOrder& order, double fill_price) const {
     if (order.type != OrderType::ENTRY
         || std::isnan(order.stop_price)
         || !std::isnan(order.limit_price)
-        || !std::isfinite(bar.open)
-        || bar.open <= 0.0) {
+        || !std::isnan(order.qty)
+        || order.affordability_close_only) {
         return false;
     }
-    const double margin_pct = order.is_long ? margin_long_ : margin_short_;
-    // A candidate snapshot is usable only on the immediately following bar
-    // when the pure STOP is already marketable at O and therefore fills exactly
-    // at O. Re-prove the ordinary scheduler and unchanged true-flat equity at
-    // consumption time; any intervening fill, delayed resting order, intrabar
-    // touch, OCA link, commission/slippage, or non-default sizing falls back to
-    // established fill-time sizing. This covers favorable and adverse gaps:
-    // both carry the placement qty, while only an adverse notional overshoot is
-    // declined by the caller's margin comparison.
-    // design-stop-tick-rounding: the same tick-quantized open test
-    // evaluate_fill_price's gap fill uses.
-    const double tick_open = broker_trigger_bar(bar).open;
-    const bool gap_open_marketable =
-        order.is_long ? tick_open >= order.stop_price
-                      : tick_open <= order.stop_price;
-    const double placement_equity =
-        order.stop_placement_open_equity;
-    const double equity_guard = std::isfinite(placement_equity)
-        ? std::max(1e-9, std::abs(placement_equity) * 1e-12)
-        : 0.0;
-    return std::isfinite(order.stop_placement_open_qty)
-        && order.stop_placement_open_qty > 0.0
-        && std::isfinite(placement_equity) && placement_equity > 0.0
-        && std::isfinite(order.stop_placement_signal_close)
+    return default_qty_type_ == QtyType::PERCENT_OF_EQUITY
+        && default_qty_value_ <= 100.0
+        && std::isfinite(order.default_stop_placement_qty)
+        && order.default_stop_placement_qty > 0.0
+        && std::isfinite(fill_price) && fill_price > 0.0
         && order.created_position_side == PositionSide::FLAT
         && !order.created_after_position_close_in_bar
-        && position_side_ == PositionSide::FLAT
-        && order.created_bar == bar_index_ - 1
-        && !process_orders_on_close_
-        && !calc_on_order_fills_
-        && !bar_magnifier_enabled_
-        && !order.created_during_coof_recalc
-        && order.oca_name.empty() && order.oca_type == 0
-        && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-        && std::abs(default_qty_value_ - 100.0) < 1e-12
-        && std::abs(margin_pct - 100.0) < 1e-12
-        && slippage_ == 0
-        && gap_open_marketable
-        && fill_price == bar_fill_price(bar.open)
-        && std::abs(current_equity() - placement_equity) <= equity_guard
-        && calc_commission(
-               fill_price, order.stop_placement_open_qty) == 0.0;
+        && position_side_ == PositionSide::FLAT;
 }
 
 
@@ -3584,25 +3567,32 @@ bool BacktestEngine::use_stop_placement_open_qty(
 //   decline iff floored_qty * cost_basis * pv * fx * margin%/100
 //               > realized equity at the fill
 //
-// The cost basis partitions on the same default-sizing test as the
-// placement half (strategy_entry's affordability_scope): an explicit-qty,
-// default FIXED / CASH or default percent_of_equity > 100 stop is costed
-// at the price the fill BOOKS — the stop level on an intrabar touch, the
-// tick-rounded open on a gap-through (the round-7 pin below). The DEFAULT
-// percent_of_equity <= 100 stop keeps KI-62's bar-OPEN basis: nothing
-// pinned it (all 22 tapes pass an explicit qty), and costing it at the
-// level is a structural no-op for an all-in default (qty = equity / level
-// -> qty * level == equity always admits) that broke the ahtisham
-// volatility-expansion probe on every lane (cand-round7-engine-a-20260905
-// vs base-round7-harness-20260905, BINANCE:ETHUSDT.P 15: 591 -> 1,177
-// trades, 394 extra SHORT entries, every one an intrabar touch whose open
-// is above the level — 2025-04-02 05:15Z o 1866.16 > level 1859.63 >= l
-// 1853.57, 5.3133 * 1866.16 = 9,915 > 9,880.86 declines at the open where
-// 5.3133 * 1859.63 = 9,880.8 admits at the level; TV has no trade there).
-// Under the open basis a default-sized LONG touch (open < level) admits on
-// both bases and a gap-through books the open on both, so the partition
-// changes exactly the default short touch the base engine matched TV on
-// (tests/test_stop_entry_admission.cpp, test_ahtisham_default_pct_stop).
+// The cost basis is the price the fill BOOKS in every sizing partition —
+// the stop level on an intrabar touch, the tick-rounded open on a
+// gap-through (the round-7 family-E pin below). The quantity is the
+// order's: the explicit-qty / default FIXED / CASH / >100% stop re-sizes
+// at the fill (calc_qty_for_type); the DEFAULT percent_of_equity <= 100
+// stop carries the quantity it was sized with at the call (family K,
+// PendingOrder::default_stop_placement_qty — floor(equity * pct /
+// tick(level))), the same quantity dispatch opens.
+//
+// KI-62's bar-OPEN basis for the default partition is RETIRED here: it was
+// the family-K placement rule seen from the fill side. The ahtisham
+// volatility-expansion decode (NYSE:F 15, 121/126 TV entries reproduced
+// with qty and price, every non-fill) shows the open basis coincided with
+// TV on all 178 intrabar touches only because an all-in sell stop below
+// the close is never PLACED (floor(eq/L) * tick(close) > eq — 0 short
+// fills over 3 touches on the pct100 tape, 0 on short-only; the ETH
+// 2025-04-02 05:15Z short touch the open basis declined is that same
+// never-placed order: 5.3133 * 1866.16 = 9,915.5 > 9,880.86 at the 05:00Z
+// close) — and diverged on every session-open gap: 18/18 first-bar SHORT
+// gap-throughs the engine filled at the open TV never placed (2025-04-04
+// 13:30Z 1,020 @9.32; TV re-issues at the 13:30Z close and fills the
+// beyond-level order 13:45Z @9.34 x 1,043), and 6 first-bar LONG
+// gap-throughs TV fills that the close-sized quantity over-costed
+// (2025-08-19 13:30Z: 817 = floor(9,414.16 / 11.51) x 11.52 = 9,411.84
+// <= 9,414.16 admits; 822 sized at the 11.45 close x 11.52 = 9,469 does
+// not).
 //
 // For the explicit partition, KI-62's premise that TV costs the bar OPEN
 // even on a touch is refuted by the tapes —
@@ -3630,12 +3620,12 @@ bool BacktestEngine::use_stop_placement_open_qty(
 // reversal that already lost its entry leg at placement (close-only
 // orders open nothing). The available equity is realized-only
 // (current_equity()), unchanged from KI-62. The qty is exactly the fill
-// kernel's: normally calc_qty_for_type at the fill price; for the narrowly
-// scoped next-open default-percent-100 STOP rule, the same placement
-// snapshot that dispatch consumes. Admission therefore never approves one
-// quantity and executes another.
+// kernel's: the default percent <= 100 stop's placement quantity when
+// use_default_stop_placement_qty says dispatch consumes it, otherwise
+// calc_qty_for_type at the fill price. Admission therefore never approves
+// one quantity and executes another.
 bool BacktestEngine::stop_entry_margin_admission_declines(
-        const PendingOrder& order, double fill_price, const Bar& bar) const {
+        const PendingOrder& order, double fill_price, const Bar& /*bar*/) const {
     if (order.type != OrderType::ENTRY
         || std::isnan(order.stop_price)
         || !std::isnan(order.limit_price)
@@ -3643,37 +3633,21 @@ bool BacktestEngine::stop_entry_margin_admission_declines(
         return false;
     }
     const double margin_pct = order.is_long ? margin_long_ : margin_short_;
-    // The same sizing partition as strategy_entry's affordability_scope:
-    // order.qty is the call's explicit qty (NaN for a default-sized entry)
-    // and default_qty_type_/default_qty_value_ the declaration's sizing.
-    const bool placement_partition =
-        !std::isnan(order.qty)
-        || default_qty_type_ == QtyType::FIXED
-        || default_qty_type_ == QtyType::CASH
-        || (default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-            && default_qty_value_ > 100.0);
     // design-stop-tick-rounding / finding-446: the level is already
     // directionally snapped and a gap open already nearest-rounded when it
     // reaches here, so round_to_mintick is an identity to within one ulp.
-    // The default percent_of_equity <= 100 partition costs the bar OPEN
-    // (KI-62, unchanged — see above).
-    const double cost_basis = placement_partition
-        ? round_to_mintick(fill_price) : bar.open;
+    const double cost_basis = round_to_mintick(fill_price);
     if (!(margin_pct > 0.0) || !std::isfinite(cost_basis)
         || cost_basis <= 0.0) {
         return false;
     }
-    const bool use_placement_open_qty =
-        use_stop_placement_open_qty(order, fill_price, bar);
-    const double fill_qty = use_placement_open_qty
-        ? std::abs(order.stop_placement_open_qty)
+    const double fill_qty = use_default_stop_placement_qty(order, fill_price)
+        ? std::abs(order.default_stop_placement_qty)
         : std::abs(calc_qty_for_type(fill_price, order.qty, order.qty_type));
     const double required = fill_qty * cost_basis * syminfo_.pointvalue
                             * active_account_currency_fx()
                             * (margin_pct / 100.0);
-    const double available = use_placement_open_qty
-        ? order.stop_placement_open_equity
-        : current_equity();
+    const double available = current_equity();
     const double eps = std::max(1e-9, std::abs(available) * 1e-12);
     return fill_qty > 0.0 && required > available + eps;
 }
@@ -3745,11 +3719,12 @@ void BacktestEngine::apply_filled_order_to_state(
     }
 
     // Fill-time margin admission for STOP-ENTRY fills (KI-62 stage 3,
-    // re-based in round 7 for the explicit-qty / FIXED / CASH / >100%
-    // partition): the same floored quantity costed at the tick-rounded FILL
-    // price — the level on a touch, the rounded open on a gap-through —
-    // against realized equity; the default percent_of_equity <= 100 stop
-    // keeps the bar-OPEN basis. Rule, tapes and scope on
+    // re-based in round 7): the order's quantity — re-sized at the fill for
+    // the explicit-qty / FIXED / CASH / >100% partition, the placement
+    // quantity for a default percent_of_equity <= 100 stop (family K) —
+    // costed at the tick-rounded FILL price — the level on a touch, the
+    // rounded open on a gap-through — against realized equity. KI-62's
+    // bar-OPEN basis is retired. Rule, tapes and scope on
     // stop_entry_margin_admission_declines above. A declined stop is
     // CANCELLED (consumed here, removed by compaction). Does NOT touch the
     // :443 created_bar eligibility, the signal-time MARKET gate, or any
@@ -3977,8 +3952,8 @@ void BacktestEngine::apply_filled_order_to_state(
             if (!std::isnan(order.frozen_default_qty)) {
                 opening_qty = order.frozen_default_qty;
             } else if (order.type == OrderType::ENTRY
-                       && use_stop_placement_open_qty(order, fill_price, bar)) {
-                opening_qty = order.stop_placement_open_qty;
+                       && use_default_stop_placement_qty(order, fill_price)) {
+                opening_qty = order.default_stop_placement_qty;
             } else {
                 opening_qty = calc_qty_for_type(
                     apply_fill_slippage(fill_price, order.is_long),
@@ -5371,12 +5346,15 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
     }
     const bool close_only_opposite =
         prior_cycle_close_only || same_cycle_frozen_tx_exact_flat;
-    const bool use_placement_open_qty =
-        use_stop_placement_open_qty(order, fill_price, bar);
-    const double dispatch_qty = use_placement_open_qty
-        ? order.stop_placement_open_qty
+    // round 7 (family K): a default percent <= 100 stop dispatches the
+    // quantity it was sized with at placement (see
+    // use_default_stop_placement_qty); every other stop sizes at the fill.
+    const bool use_placement_qty =
+        use_default_stop_placement_qty(order, fill_price);
+    const double dispatch_qty = use_placement_qty
+        ? order.default_stop_placement_qty
         : order.qty;
-    const int dispatch_qty_type = use_placement_open_qty ? -1 : order.qty_type;
+    const int dispatch_qty_type = use_placement_qty ? -1 : order.qty_type;
     execute_market_entry(order.id, order.is_long, fill_price,
                          dispatch_qty, dispatch_qty_type,
                          order.created_position_side, close_only_opposite,
@@ -5386,7 +5364,7 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
                          /*later_same_tick_entry=*/false,
                          /*paired_flat_market_transaction=*/false,
                          /*explicit_qty_prequantized=*/
-                             use_placement_open_qty,
+                             use_placement_qty,
                          order.incarnation);
 
     bool did_execute =

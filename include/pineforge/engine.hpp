@@ -427,17 +427,47 @@ struct PendingOrder {
     // flips every one of them. Keep ``qty`` NaN; read this field only where a
     // quantity is actually computed.
     double frozen_default_qty = std::numeric_limits<double>::quiet_NaN();
-    // Placement snapshot for one narrowly scoped default-sized pure STOP. A
-    // next-bar open-marketable fill uses this already-quantized quantity for
-    // both margin admission and dispatch. Intrabar touches and every other
-    // priced-entry shape remain fill-time-sized. Keeping it separate from
-    // frozen_default_qty prevents generic MARKET consumers from widening the
-    // rule. NaN means ordinary stop sizing/admission.
-    double stop_placement_open_qty =
+    // Placement snapshot of a DEFAULT percent_of_equity <= 100 pure STOP
+    // entry (round 7, family K default-percent stop-entry sizing; ledger note
+    // log-20260905t084529z-c7b22df1, lab tv tapes scratchpad/r7/pins/
+    // f15-stopsize-{pct100,pct50,short-only,short-m50}, NYSE:F 15
+    // 2025-08-11..23). TradingView sizes the order when strategy.entry is
+    // called, at the TICK-SNAPPED STOP LEVEL (buy stop ceil, sell stop floor):
+    //
+    //   qty = floor_step(equity(B) * pct/100 / (tick(level) + slippage))
+    //
+    // (pct100: 858 = floor(10,000 / 11.65) on the 08-19 13:30Z touch, 854 =
+    // floor(10,000 / 11.70) on 08-22; 873 / 869 at the 11.45 / 11.50 closes
+    // would be wrong; pct50: 450 / 444 / 441 = floor(0.5 eq / L) on the short
+    // touches; margin 50: 901 / 886 / 880 = floor(eq / L)), then runs the
+    // family-E placement check on that quantity at the tick-rounded CLOSE of
+    // the call bar (qty * tick(close) * pv * fx * margin%/100 <= equity), so
+    // an all-in sell stop BELOW the close is never placed (floor(eq/L) * C >
+    // eq: 0 short fills over 3 touches in pct100, 0 fills in short-only —
+    // not an opposite-order effect) while a buy stop above the close always
+    // is. A stop whose level is already at or beyond the close is TV's
+    // market-at-next-open order and is sized like one, at tick(close) +
+    // slippage (frozen_sizing_price; ahtisham F@15 2025-04-04: the 13:30Z
+    // close 9.335 -> 9.34 sizes 1,043 = 88 + 955 filled 13:45Z @9.34).
+    // The quantity is fixed here — a resting order is never re-sized, only
+    // the script's next call re-issues it — and is consumed by the fill-time
+    // admission (stop_entry_margin_admission_declines: qty * tick(fill) <=
+    // realized equity, the level on a touch, the rounded open on a
+    // gap-through) and by dispatch. Explicit-qty / FIXED / CASH / >100%
+    // stops carry no snapshot (family E). NaN means no snapshot: ordinary
+    // fill-time sizing. Kept separate from frozen_default_qty so generic
+    // MARKET consumers never see it.
+    double default_stop_placement_qty =
         std::numeric_limits<double>::quiet_NaN();
-    double stop_placement_open_equity =
+    // strategy.equity as the script read it on the call bar (the placement
+    // check's right-hand side), the tick-rounded call-bar close (its price
+    // basis) and the sizing basis the quantity was divided at — tick(level)
+    // (+/- slippage) or, for a beyond-level stop, tick(close) (+/- slippage).
+    double default_stop_placement_equity =
         std::numeric_limits<double>::quiet_NaN();
-    double stop_placement_signal_close =
+    double default_stop_placement_signal_close =
+        std::numeric_limits<double>::quiet_NaN();
+    double default_stop_sizing_price =
         std::numeric_limits<double>::quiet_NaN();
     // TV margin-admission snapshot for a FROZEN default-sized market order
     // (KI-54). Captured at the same placement point as frozen_default_qty:
@@ -2054,6 +2084,25 @@ protected:
             o.affordability_placement_equity =
                 current_equity() + open_profit(current_bar_.close);
         }
+        // round 7 (family K): a default percent_of_equity <= 100 STOP placed
+        // by this bar's on_bar was sized on pre-liquidation equity too.
+        // Re-size it at its sizing basis on the post-liquidation state, the
+        // same re-freeze the market orders above get. The placement verdict
+        // is not revisited (this runs inside process_pending_orders on the
+        // finding-308 path, where the book must not be mutated); the
+        // fill-time admission still costs the re-sized quantity at the fill.
+        for (auto& o : pending_orders_) {
+            if (o.type != OrderType::ENTRY) continue;
+            if (o.created_bar != bar_index_) continue;
+            if (!std::isfinite(o.default_stop_placement_qty)) continue;
+            if (!std::isfinite(o.default_stop_sizing_price)) continue;
+            o.default_stop_placement_qty =
+                calc_qty(o.default_stop_sizing_price);
+            o.default_stop_placement_equity =
+                current_equity() + open_profit(current_bar_.close);
+            o.default_stop_placement_signal_close =
+                round_to_mintick(current_bar_.close);
+        }
     }
 
     // --- Strategy variable accessors ---
@@ -3093,8 +3142,13 @@ private:
                                      std::vector<size_t>& filled_indices);
     bool stop_entry_margin_admission_declines(
         const PendingOrder& order, double fill_price, const Bar& bar) const;
-    bool use_stop_placement_open_qty(
-        const PendingOrder& order, double fill_price, const Bar& bar) const;
+    // True iff `order` is a default percent_of_equity <= 100 pure STOP that
+    // carries its placement snapshot (PendingOrder::default_stop_placement_qty)
+    // and the fill price is a usable positive print: the fill-time admission
+    // and dispatch then consume the placement quantity instead of re-sizing
+    // at the fill.
+    bool use_default_stop_placement_qty(
+        const PendingOrder& order, double fill_price) const;
     // design-declined-reversal-close-leg: called at the KI-54 reversal-decline
     // site with the just-declined MARKET reversal entry. Flags every pending
     // FULL close that was co-queued after it on the same bar against the held

@@ -294,13 +294,14 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     // (qty * sizing_price <= sizing_equity) makes this placement check a
     // structural no-op there anyway. The two scopes partition on the same
     // default_qty_value_ <= 100 test the KI-54 gate uses, so exactly 100%
-    // is byte-identical. The same sizing partition applies to pure STOP
-    // entries (round 7): a default percent_of_equity stop at or below 100%
-    // keeps the stop_placement_open_* snapshot below and its fill-time
-    // admission; explicit-qty, FIXED / CASH default and >100% stops take
-    // this placement half. Stop-limit and limit entries carry their own
-    // price and are untouched. margin_pct == 0 disables the check, as it
-    // does in TradingView.
+    // is byte-identical. Pure STOP entries take the same placement half in
+    // every sizing partition (round 7): explicit-qty, FIXED / CASH default
+    // and >100% stops with the family-E quantity; a DEFAULT percent_of_equity
+    // stop at or below 100% with its family-K quantity — sized at the
+    // tick-snapped STOP LEVEL, not the close (default_stop_scope below;
+    // rule, tapes and numbers on PendingOrder::default_stop_placement_qty).
+    // Stop-limit and limit entries carry their own price and are untouched.
+    // margin_pct == 0 disables the check, as it does in TradingView.
     const bool pure_stop_entry =
         std::isnan(limit_price) && std::isfinite(stop_price);
     const bool affordability_scope =
@@ -311,13 +312,59 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             || default_qty_type_ == QtyType::CASH
             || (default_qty_type_ == QtyType::PERCENT_OF_EQUITY
                 && default_qty_value_ > 100.0));
+    // round 7 (family K, ledger note log-20260905t084529z-c7b22df1; lab tv
+    // tapes scratchpad/r7/pins/f15-stopsize-{pct100,pct50,short-only,
+    // short-m50}): TradingView sizes a DEFAULT percent_of_equity <= 100 pure
+    // STOP entry when the call is made, at the tick-snapped stop level (buy
+    // stop ceil, sell stop floor) plus the slippage ticks the fill will
+    // carry — qty = floor_step(equity * pct / tick(level)) — and then runs
+    // the placement check above on THAT quantity at tick(close). A level
+    // already at or beyond the close is a market-at-next-open order and is
+    // sized like one, at tick(close) + slippage (frozen_sizing_price, the
+    // family-H basis: ahtisham F@15 2025-04-04 13:30Z close 9.335 -> 9.34,
+    // 1,043 = floor(9,742.34 / 9.34) filled 13:45Z @9.34 as TV's 88 + 955).
+    // The quantity is frozen on the order (default_stop_placement_qty) for
+    // the fill-time admission and dispatch; a resting stop is never re-sized.
+    // The snapshot is taken whenever the close and the level are usable,
+    // the check itself only under margin simulation.
+    const bool default_stop_scope =
+        pure_stop_entry && std::isnan(qty)
+        && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
+        && default_qty_value_ <= 100.0;
+    double default_stop_qty = std::numeric_limits<double>::quiet_NaN();
+    double default_stop_sizing_price =
+        std::numeric_limits<double>::quiet_NaN();
+    if (default_stop_scope && std::isfinite(current_bar_.close)
+        && current_bar_.close > 0.0 && stop_price > 0.0) {
+        const double signal_price = round_to_mintick(current_bar_.close);
+        const double snapped_level =
+            round_to_mintick_directional(stop_price, /*is_long_stop=*/is_long);
+        const bool beyond_level = is_long ? snapped_level <= signal_price
+                                          : snapped_level >= signal_price;
+        double sizing_price = frozen_sizing_price(/*is_buy=*/is_long);
+        if (!beyond_level && std::isfinite(snapped_level)
+            && snapped_level > 0.0) {
+            sizing_price = snapped_level;
+            if (slippage_ != 0 && syminfo_mintick_ > 0.0) {
+                sizing_price +=
+                    (is_long ? 1.0 : -1.0) * slippage_ * syminfo_mintick_;
+            }
+        }
+        const double sized = calc_qty(sizing_price);
+        if (std::isfinite(sized) && sized > kQtyEpsilon
+            && std::isfinite(sizing_price) && sizing_price > 0.0) {
+            default_stop_qty = sized;
+            default_stop_sizing_price = sizing_price;
+        }
+    }
     bool affordability_close_only = false;
     double affordability_placement_equity =
         std::numeric_limits<double>::quiet_NaN();
     double affordability_signal_price =
         std::numeric_limits<double>::quiet_NaN();
     double affordability_held_qty = 0.0;
-    if (affordability_scope) {
+    if (affordability_scope
+        || (default_stop_scope && std::isfinite(default_stop_qty))) {
         const double margin_pct = is_long ? margin_long_ : margin_short_;
         if (margin_pct > 0.0 && std::isfinite(current_bar_.close)
             && current_bar_.close > 0.0) {
@@ -329,14 +376,17 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             // The on-tick signal close is the price the rule is stated on
             // (slippage ticks are in neither basis). The quantity is exactly
             // the one the fill kernel dispatches: the lot-floored explicit
-            // contracts, the FIXED default, or the CASH / >100%
+            // contracts, the FIXED default, the CASH / >100%
             // percent_of_equity default frozen at its slipped sizing basis
             // (frozen_default_market_qty — the same call that fills
-            // order.frozen_default_qty below).
+            // order.frozen_default_qty below), or the default percent <= 100
+            // STOP quantity sized at the level above.
             const double signal_price = round_to_mintick(current_bar_.close);
-            const double own_qty = std::isnan(qty)
-                ? frozen_default_market_qty(/*is_buy=*/is_long)
-                : calc_qty_for_type(signal_price, std::abs(qty), qty_type);
+            const double own_qty = default_stop_scope
+                ? default_stop_qty
+                : std::isnan(qty)
+                    ? frozen_default_market_qty(/*is_buy=*/is_long)
+                    : calc_qty_for_type(signal_price, std::abs(qty), qty_type);
             // A same-direction add is costed as the RESULTING position. Calls
             // are evaluated in source order, so a strategy.close issued
             // earlier in this on_bar has already released its quantity
@@ -632,44 +682,26 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         // round 7: a pure STOP reversal whose entry leg was rejected at
         // placement rests as the reversal's closing leg only (consumed by
         // apply_entry_order_fill; its fill-time admission is skipped since
-        // nothing opens). No placement snapshot is stored on a stop: its
-        // fill-time half is stop_entry_margin_admission_declines.
+        // nothing opens). The explicit / FIXED / CASH / >100% partition
+        // stores no placement snapshot on a stop: its fill-time half is
+        // stop_entry_margin_admission_declines re-sizing at the fill.
         order.affordability_close_only = affordability_close_only;
 
-        // Snapshot one narrowly scoped pure STOP at placement. A next-bar
-        // open-marketable fill carries the already lot-quantized signal-close
-        // quantity into both admission and dispatch; fill-time logic re-proves
-        // every scope condition before consuming it.
-        const double stop_margin_pct =
-            is_long ? margin_long_ : margin_short_;
-        if (std::isnan(qty)
-            && std::isfinite(stop_price)
-            && std::isnan(limit_price)
-            && oca_name.empty() && oca_type == 0
-            && order.created_position_side == PositionSide::FLAT
-            && !order.created_after_position_close_in_bar
-            && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-            && std::abs(default_qty_value_ - 100.0) < 1e-12
-            && std::isfinite(stop_margin_pct)
-            && std::abs(stop_margin_pct - 100.0) < 1e-12
-            && !process_orders_on_close_
-            && !calc_on_order_fills_
-            && !bar_magnifier_enabled_
-            && !order.created_during_coof_recalc
-            && slippage_ == 0
-            && std::isfinite(current_bar_.close)
-            && current_bar_.close > 0.0) {
-            const double placement_equity = current_equity();
-            const double placement_qty = calc_qty(current_bar_.close);
-            if (std::isfinite(placement_equity) && placement_equity > 0.0
-                && std::isfinite(placement_qty)
-                && placement_qty > kQtyEpsilon
-                && calc_commission(current_bar_.close, placement_qty) == 0.0) {
-                order.stop_placement_open_qty = placement_qty;
-                order.stop_placement_open_equity = placement_equity;
-                order.stop_placement_signal_close =
-                    current_bar_.close;
-            }
+        // round 7 (family K): the DEFAULT percent_of_equity <= 100 pure STOP
+        // carries the quantity it was sized and placement-checked with (see
+        // default_stop_scope above and PendingOrder::default_stop_placement_
+        // qty). Both the fill-time admission and dispatch consume it — on an
+        // intrabar touch, on a gap-through and on the next-open fill of a
+        // beyond-level stop alike. order.qty stays NaN (default-sized
+        // semantics elsewhere are keyed on it).
+        if (default_stop_scope && std::isfinite(default_stop_qty)
+            && !affordability_close_only) {
+            order.default_stop_placement_qty = default_stop_qty;
+            order.default_stop_sizing_price = default_stop_sizing_price;
+            order.default_stop_placement_signal_close =
+                round_to_mintick(current_bar_.close);
+            order.default_stop_placement_equity =
+                current_equity() + open_profit(current_bar_.close);
         }
         // KI-65 placement-time pending-market awareness (probe pf-probe-ki65-
         // dual-entry-precedence): a priced entry placed from FLAT that will

@@ -4,13 +4,27 @@
  * ordinary historical path scanner must consider the later member. All other
  * rejection causes and order-book/scheduler shapes retain their old paths.
  *
- * The declined member is an all-in DEFAULT percent-of-equity short stop
- * touched intrabar: its qty is 10000/90 and the fill-time gate costs it at
- * the bar OPEN 100 (11,111 > 10,000). Round 7 re-based that gate to the
- * fill price for the explicit-qty / FIXED / CASH / >100% partition only
- * (design-stop-entry-placement-admission); the default percent <= 100 stop
- * keeps the open basis, so this shape — the ahtisham volatility-expansion
- * probe's — still declines (tests/test_stop_entry_admission.cpp).
+ * Round 7 family K (tests/test_default_pct_stop_sizing.cpp) changed what this
+ * file's historical shape does: the all-in DEFAULT percent-of-equity sell
+ * stop 90 below the signal close 100 is sized at its level (10000 / 90) and
+ * REJECTED AT THE CALL (111.11 x 100 = 11,111 > 10,000), so it never reaches
+ * the book — there is no path-first member to decline at the fill and no
+ * fence on the later long, which fills its 110 touch alone in every
+ * configuration below. (A sell stop that IS accepted at the call costs less
+ * at its fill — the level or a lower open — than at its placement close, so
+ * a fill-time margin decline of a true-flat pair's leading short needs an
+ * equity drop while resting, which a true-flat pair cannot have. The
+ * continuation is a dormant safety net on that shape.)
+ *
+ * What stays pinned here: the continuation scope predicate as a pure
+ * function on a two-stop book (continuation_scope builds the book under
+ * margin 0 so the family-K admission does not empty it), the kernel's
+ * results on the historical shape, and — the buy-stop-leading orientation —
+ * a long declined at a gap-up open (family K: sized at the level, costed at
+ * the rounded open) followed by the later short touch, which TradingView
+ * applies as the same-bar second touch (classify_order_eligibility's
+ * LongFirst pass-1 rule) and which fills at its level with its placement
+ * quantity.
  */
 
 #include <cmath>
@@ -101,9 +115,18 @@ public:
     void long_only() { risk_direction_ = RiskDirection::LONG_ONLY; }
     void enable_pooc() { process_orders_on_close_ = true; }
     void enable_coof() { calc_on_order_fills_ = true; }
+    void set_lots(double step) { qty_step_ = step; }
     bool continuation_scope(bool magnifier = false) {
         bar_index_ = 0;
+        // Build the two-stop book with the placement check disabled (margin
+        // 0): the predicate under test reads the book's shape, not the
+        // family-K admission that drops the all-in short at the call.
+        const double ml = margin_long_, ms = margin_short_;
+        margin_long_ = 0.0;
+        margin_short_ = 0.0;
         on_bar(Bar{});
+        margin_long_ = ml;
+        margin_short_ = ms;
         const bool scoped = internal::dual_stop_margin_decline_can_continue_path(
             pending_orders_, internal::DualEntryStopPathWinner::ShortFirst,
             process_orders_on_close_, calc_on_order_fills_, magnifier);
@@ -114,12 +137,17 @@ public:
     PositionSide side() const { return position_side_; }
     double qty() const { return position_qty_; }
     double entry_price() const { return position_entry_price_; }
+    bool pending(const std::string& id) const {
+        for (const auto& o : pending_orders_) if (o.id == id) return true;
+        return false;
+    }
 };
 
 // O=100 is tied between H=111 and L=89, so the synthesized path is
-// O->L->H->C. The short stop at 90 is first. Its all-in qty is 10000/90,
-// but admission costs that qty at open 100, so it declines. The later long
-// stop is affordable because its qty is 10000/110.
+// O->L->H->C. Historically the short stop at 90 was first and declined at
+// the open-costed fill; under family K its call is rejected (11,111 > 10,000
+// at the signal close) and only the long rests, sized 10000/110 at its
+// level (9,090.9 <= 10,000 placed; 10,000 <= 10,000 admitted at the touch).
 Bar low_first_dual_touch() {
     return bar(2'000, 100.0, 111.0, 89.0, 100.0);
 }
@@ -137,22 +165,53 @@ void run_pair(DualStopProbe& probe, bool magnifier = false) {
     }
 }
 
-void test_margin_decline_continues_to_affordable_later_stop() {
-    std::printf("margin decline continues to the affordable later stop\n");
-    DualStopProbe scope_probe;
-    CHECK(scope_probe.continuation_scope());
-    DualStopProbe probe;
-    run_pair(probe);
+void check_long_alone(const DualStopProbe& probe) {
     CHECK(probe.side() == PositionSide::LONG);
     CHECK(std::fabs(probe.entry_price() - 110.0) < 1e-9);
     CHECK(std::fabs(probe.qty() - (10'000.0 / 110.0)) < 1e-9);
     CHECK(probe.trade_count() == 0);
+    CHECK(!probe.pending("S"));
+}
+
+void test_rejected_all_in_short_leaves_later_stop_to_fill() {
+    std::printf("rejected all-in short (family K placement) leaves the later stop to fill alone\n");
+    DualStopProbe scope_probe;
+    CHECK(scope_probe.continuation_scope());
+    DualStopProbe probe;
+    run_pair(probe);
+    check_long_alone(probe);
+}
+
+// The buy-stop-leading orientation, whole shares, signal close 100: the buy
+// stop 105 sizes 95 = floor(10000 / 105) and places (9,500 <= 10,000); the
+// sell stop 99.5 sizes 100 and places (100 x 100 = 10,000 <= 10,000 — the lot
+// floor absorbs the half tick). Bar 1 opens 106 through the buy stop: the
+// long is DECLINED at the fill (95 x 106 = 10,070 > 10,000, costed at the
+// rounded open) and dropped; the sell stop is touched later on the path
+// (l 99) and fills at its level with its placement quantity (100 x 99.5 =
+// 9,950 <= 10,000).
+void test_long_gap_decline_then_short_touch_fills() {
+    std::printf("long declined at the gap-up open, the later short touch fills at its level\n");
+    DualStopProbe probe;
+    probe.set_lots(1.0);
+    probe.long_stop = 105.0;
+    probe.short_stop = 99.5;
+    Bar bars[] = {
+        bar(1'000, 100.0, 100.0, 100.0, 100.0),
+        bar(2'000, 106.0, 107.0, 99.0, 100.0),
+    };
+    probe.run(bars, 2);
+    CHECK(probe.side() == PositionSide::SHORT);
+    CHECK(std::fabs(probe.entry_price() - 99.5) < 1e-9);
+    CHECK(std::fabs(probe.qty() - 100.0) < 1e-9);
+    CHECK(probe.trade_count() == 0);
+    CHECK(!probe.pending("L"));
 }
 
 void test_accepted_first_stop_preserves_existing_second_touch_result() {
     std::printf("accepted first stop preserves the existing dual-touch result\n");
     DualStopProbe probe;
-    probe.short_stop = 100.0;  // marketable at open; qty*open == equity
+    probe.short_stop = 100.0;  // at the close: market-at-next-open, qty*open == equity
     run_pair(probe);
     // The accepted short opens first; the existing path logic then applies the
     // later long touch, closing most of it. The margin-decline continuation
@@ -163,16 +222,15 @@ void test_accepted_first_stop_preserves_existing_second_touch_result() {
     CHECK(probe.trade_count() == 1);
 }
 
-void test_non_margin_rejection_does_not_continue() {
-    std::printf("risk rejection does not release the later stop\n");
+void test_non_margin_rejection_does_not_change_shape() {
+    std::printf("risk direction leaves the historical shape unchanged\n");
     DualStopProbe scope_probe;
     scope_probe.long_only();
     CHECK(scope_probe.continuation_scope());
     DualStopProbe probe;
     probe.long_only();
     run_pair(probe);
-    CHECK(probe.side() == PositionSide::FLAT);
-    CHECK(probe.trade_count() == 0);
+    check_long_alone(probe);
 }
 
 void test_oca_pair_is_out_of_scope() {
@@ -183,8 +241,7 @@ void test_oca_pair_is_out_of_scope() {
     DualStopProbe probe;
     probe.use_oca = true;
     run_pair(probe);
-    CHECK(probe.side() == PositionSide::FLAT);
-    CHECK(probe.trade_count() == 0);
+    check_long_alone(probe);
 }
 
 void test_pooc_is_out_of_scope() {
@@ -195,8 +252,7 @@ void test_pooc_is_out_of_scope() {
     DualStopProbe probe;
     probe.enable_pooc();
     run_pair(probe);
-    CHECK(probe.side() == PositionSide::FLAT);
-    CHECK(probe.trade_count() == 0);
+    check_long_alone(probe);
 }
 
 void test_coof_is_out_of_scope() {
@@ -207,10 +263,7 @@ void test_coof_is_out_of_scope() {
     DualStopProbe probe;
     probe.enable_coof();
     run_pair(probe);
-    CHECK(probe.side() == PositionSide::LONG);
-    CHECK(std::fabs(probe.qty() - (10'000.0 / 110.0)) < 1e-9);
-    CHECK(std::fabs(probe.entry_price() - 110.0) < 1e-9);
-    CHECK(probe.trade_count() == 0);
+    check_long_alone(probe);
 }
 
 void test_mixed_order_books_are_out_of_scope() {
@@ -227,44 +280,43 @@ void test_mixed_order_books_are_out_of_scope() {
         DualStopProbe probe;
         probe.mixed_order = kind;
         run_pair(probe);
+        // The third order fills its share (the market at the open 100, the
+        // limit / raw limit at 95 on the way down) and the long stop adds
+        // 10000/110 at 110 on the way up; nothing is fenced because the
+        // short never reached the book.
         CHECK(probe.side() == PositionSide::LONG);
-        if (kind == DualStopProbe::MixedOrder::Market) {
-            const double stop_qty = 10'000.0 / 110.0;
-            const double expected_qty = 1.0 + stop_qty;
-            const double expected_price =
-                (100.0 + stop_qty * 110.0) / expected_qty;
-            CHECK(std::fabs(probe.qty() - expected_qty) < 1e-9);
-            CHECK(std::fabs(probe.entry_price() - expected_price) < 1e-9);
-        } else {
-            CHECK(std::fabs(probe.qty() - 1.0) < 1e-9);
-            CHECK(std::fabs(probe.entry_price() - 95.0) < 1e-9);
-        }
+        const double stop_qty = 10'000.0 / 110.0;
+        const double expected_qty = 1.0 + stop_qty;
+        const double third_price =
+            kind == DualStopProbe::MixedOrder::Market ? 100.0 : 95.0;
+        const double expected_price =
+            (third_price + stop_qty * 110.0) / expected_qty;
+        CHECK(std::fabs(probe.qty() - expected_qty) < 1e-9);
+        CHECK(std::fabs(probe.entry_price() - expected_price) < 1e-9);
         CHECK(probe.trade_count() == 0);
     }
 }
 
 void test_non_true_flat_pair_is_out_of_scope() {
-    std::printf("post-close flat provenance does not release the later stop\n");
+    std::printf("post-close flat provenance: predicate false, shape unchanged\n");
     DualStopProbe scope_probe;
     scope_probe.mark_as_after_close = true;
     CHECK(!scope_probe.continuation_scope());
     DualStopProbe probe;
     probe.mark_as_after_close = true;
     run_pair(probe);
-    CHECK(probe.side() == PositionSide::FLAT);
-    CHECK(probe.trade_count() == 0);
+    check_long_alone(probe);
 }
 
 void test_different_signal_bars_are_out_of_scope() {
-    std::printf("different-signal stop pair does not release the later stop\n");
+    std::printf("different-signal stop pair: predicate false, shape unchanged\n");
     DualStopProbe scope_probe;
     scope_probe.split_signal_bars = true;
     CHECK(!scope_probe.continuation_scope());
     DualStopProbe probe;
     probe.split_signal_bars = true;
     run_pair(probe);
-    CHECK(probe.side() == PositionSide::FLAT);
-    CHECK(probe.trade_count() == 0);
+    check_long_alone(probe);
 }
 
 void test_magnifier_is_out_of_scope() {
@@ -273,18 +325,16 @@ void test_magnifier_is_out_of_scope() {
     CHECK(!scope_probe.continuation_scope(true));
     DualStopProbe probe;
     run_pair(probe, true);
-    CHECK(probe.side() == PositionSide::LONG);
-    CHECK(std::fabs(probe.qty() - (10'000.0 / 110.0)) < 1e-9);
-    CHECK(std::fabs(probe.entry_price() - 110.0) < 1e-9);
-    CHECK(probe.trade_count() == 0);
+    check_long_alone(probe);
 }
 
 }  // namespace
 
 int main() {
-    test_margin_decline_continues_to_affordable_later_stop();
+    test_rejected_all_in_short_leaves_later_stop_to_fill();
+    test_long_gap_decline_then_short_touch_fills();
     test_accepted_first_stop_preserves_existing_second_touch_result();
-    test_non_margin_rejection_does_not_continue();
+    test_non_margin_rejection_does_not_change_shape();
     test_oca_pair_is_out_of_scope();
     test_pooc_is_out_of_scope();
     test_coof_is_out_of_scope();
