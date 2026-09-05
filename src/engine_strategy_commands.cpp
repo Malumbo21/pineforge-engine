@@ -595,10 +595,11 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                 percent_commission_live_equity(order.sizing_mark);
             order.sizing_fx = active_account_currency_fx();
             // Direction-neutral: two fill-time consumers read this flag.
-            //   1. KI-61 long entry-bar affordability trim
-            //      (engine_fills.cpp): re-checks order.is_long and margin_long
-            //      via long_full_margin_after_fill, so its long-only exemption
-            //      remains invariant.
+            //   1. KI-61 entry-bar affordability trim (engine_fills.cpp):
+            //      re-checks the direction-appropriate margin at the fill
+            //      (long_full_margin_after_fill / the default short shapes,
+            //      round 7 family M), so the true-flat zero-fee exemption
+            //      remains invariant on either side.
             //   2. gap-reject (design-cntvxiao-gap-reject, engine_fills.cpp):
             //      direction-symmetric — drops a true-flat all-in entry, with
             //      or without a commission, whose gapped fill notional exceeds

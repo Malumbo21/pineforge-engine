@@ -521,11 +521,13 @@ struct PendingOrder {
     // for a high-level MARKET call (either side) with omitted qty, a frozen
     // 100%-of-equity snapshot, direction-appropriate margin == 100, true-flat
     // placement, and no earlier paired close in this on_bar. Consumers:
-    //   1. KI-61 long entry-bar affordability EXEMPTION (engine_fills.cpp):
-    //      long-only — it independently re-checks order.is_long and margin_long
-    //      via long_full_margin_after_fill. Fill-time code must additionally
-    //      prove true-flat fill, sizing-price admission, success, and zero
-    //      actual opening commission before treating it as exempt.
+    //   1. KI-61 entry-bar affordability EXEMPTION (engine_fills.cpp): the
+    //      fill-time code independently re-checks the direction-appropriate
+    //      margin (long_full_margin_after_fill / the default short shapes)
+    //      and must additionally prove true-flat fill, sizing-price
+    //      admission, success, and zero actual opening commission before
+    //      treating either side as exempt (round 7 family M queues the
+    //      default-sized short event with or without a commission).
     //   2. gap-reject (design-cntvxiao-gap-reject, engine_fills.cpp):
     //      direction-symmetric — silently drops the entry at fill when the
     //      frozen-qty notional at the slipped fill price exceeds sizing_equity
