@@ -1515,6 +1515,42 @@ protected:
     // an open slice AND an extreme slice. Bars whose open does not breach
     // are untouched. Returns true when a "Margin call" row was booked.
     bool margin_call_slice_at_bar_open(const Bar& bar);
+    // Round 7 family H residual (NYSE:F 1D short admission tape 2025-04-23 /
+    // 2026-04-08): a strategy.close / close_all MARKET order for the WHOLE
+    // position resting for this bar's open fills before the open's margin
+    // evaluation — TradingView closes 1025 @9.84 through the pending close
+    // where the engine sliced 48 @9.84 first. True when such an order rests
+    // in the book (created on a prior bar, no priced leg, covers the whole
+    // position); margin_call_slice_at_bar_open then stands down. A partial
+    // close or a priced exit the open gapped through keeps the open slice
+    // (unpinned).
+    bool whole_position_market_close_rests_for_open() const;
+    // Round 7 family L (campaign pin log-20260905t093952z-0c4938cb; lab tv
+    // tapes scratchpad/r7/pins/xau15-mcpath-{a,b}, fresh-touch-once): on the
+    // bar a position OPENS, TradingView marks the forced liquidation only
+    // over the part of the synthesized O-H-L-C / O-L-H-C path AFTER the
+    // entry fill — a bearish bar whose stop fill lies below the open never
+    // sees that bar's high (asian-box 04-01 15:45Z: no slice; xau15-mcpath-a:
+    // the slice comes on the next bar at its high), the bar CLOSE is a mark
+    // point (fresh-touch-once: 8 @11.25 = the entry bar's close), and a fill
+    // at the open (market, or a stop the open gapped through) sees the whole
+    // bar (xau15-mcpath-b, mdfe3757 04-08 13:30Z: same-bar slice at the
+    // high). Carried bars keep the whole-bar extreme.
+    //
+    // True when the just-opened position leaves a path suffix on `bar`:
+    // *out_mark is the suffix's adverse extreme (RAW price — the waypoints
+    // after the fill, the close included; the caller applies the cascade's
+    // own mintick rounding), *out_pos its path position (waypoint index, in
+    // first_touch_position's units). An unrouted fill coordinate (market /
+    // open fills, stop-limit, raw orders) reads as the open, i.e. the whole
+    // bar as before; a fill at the close has no suffix (false).
+    bool entry_bar_post_fill_adverse(const Bar& bar, double* out_mark,
+                                     double* out_pos) const;
+    // The dispatch shapes the entry-bar path rule is pinned for: the position
+    // opened on this bar under ordinary historical dispatch (no
+    // process_orders_on_close, calc_on_order_fills, bar magnifier or
+    // streaming). Everything else keeps the whole-bar extreme.
+    bool entry_bar_margin_path_scope() const;
 
     // --- Fill rounding helpers ---
     // Nearest-tick rounding: TradingView's exact double-precision function

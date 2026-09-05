@@ -727,6 +727,79 @@ bool BacktestEngine::process_carried_position_fx_rollover(const Bar& bar) {
 //
 // Validated against the p2 margin-call short probe (TV: 68 margin calls, first
 // at ~1798.26) and the leverage-margin-call-perp-5x long probe.
+//
+// Round 7 family L — the ENTRY bar (campaign pin log-20260905t093952z-
+// 0c4938cb; lab tv tapes scratchpad/r7/pins/xau15-mcpath-{a,b} on OANDA:XAUUSD
+// 15, the round-7 family-E fresh-touch-once tape on NYSE:F 15, probe rows
+// waranyutrkm asian-box / inside-day and mdfe3757 XAUUSD@15): on the bar the
+// position opens, TradingView marks the liquidation only over the part of the
+// synthesized O-H-L-C / O-L-H-C path AFTER the fill. A sell stop filled below
+// the open of a bearish (high-first) bar sees L then C only — no slice at that
+// bar's pre-fill high (mcpath-a: TV slices 1.0 lot on the NEXT bar at 2975.345,
+// its high; asian-box 2025-04-01 15:45Z: no slice at all) but the CLOSE is a
+// mark point (fresh-touch-once: 8 @11.25 = the entry bar's close, then the
+// carried 24 @11.33 at the next bar's rounded high); a fill at the open — a
+// market order, or a stop the open gapped through — sees the whole bar
+// (mcpath-b: 1.0 lot at the 2980 high of the bullish fill bar; mdfe3757
+// 2025-04-08 13:30Z: 2.4 lots at the 3017.3 high of the bearish fill bar, after
+// the 1.28-lot fill-price trim). The engine marked the just-opened position
+// at the whole bar's extreme, wrong both ways. Carried bars are untouched
+// (whole-bar extreme, as before), as are POOC / COOF / magnifier / streaming
+// dispatch (entry_bar_margin_path_scope). The fill checkpoint itself (the
+// opening-affordability trim at the fill price) is unchanged; it is followed
+// by the post-fill adverse pass over the survivor (run_post_opening_adverse_
+// pass), which generalizes the pinned close-then-short retry.
+bool BacktestEngine::entry_bar_margin_path_scope() const {
+    return position_open_bar_ == bar_index_
+        && position_side_ != PositionSide::FLAT
+        && !process_orders_on_close_
+        && !calc_on_order_fills_
+        && !bar_magnifier_enabled_
+        && !coof_scheduler_active_
+        && !stream_warmup_mode_
+        && stream_phase_ == StreamPhase::IDLE;
+}
+
+bool BacktestEngine::entry_bar_post_fill_adverse(const Bar& bar,
+                                                 double* out_mark,
+                                                 double* out_pos) const {
+    if (out_mark == nullptr || out_pos == nullptr) return false;
+    if (position_side_ == PositionSide::FLAT || pyramid_entries_.empty()) {
+        return false;
+    }
+    // The opening lot's fill coordinate. Pure stop / limit entries record it
+    // on the tick-quantized trigger bar in the RAW bar's leg order
+    // (apply_entry_fill); a market fill at the open and every unrouted
+    // parent class carry NaN and read as the open — the whole bar, as
+    // before.
+    double fill_pos = pyramid_entries_.front().entry_path_position;
+    if (!std::isfinite(fill_pos) || fill_pos < 0.0) fill_pos = 0.0;
+    const bool high_first = internal::bar_path_uses_high_first(bar);
+    double path[4];
+    internal::fill_bar_path_points_ordered(bar, high_first, path);
+    // The suffix is the waypoints strictly after the fill. A fill numerically
+    // AT a waypoint excludes that waypoint: the position's mark there is its
+    // own fill price, which is the fill checkpoint's question (opening
+    // affordability / stop-fill admission), not an adverse-path one.
+    int seg = static_cast<int>(std::floor(fill_pos + internal::kPathPosEps));
+    if (seg < 0) seg = 0;
+    if (seg >= 3) return false;  // filled at the close: no post-fill path
+    const bool is_long = position_side_ == PositionSide::LONG;
+    double mark = path[seg + 1];
+    double pos = static_cast<double>(seg + 1);
+    for (int i = seg + 2; i < 4; ++i) {
+        const bool worse = is_long ? (path[i] < mark) : (path[i] > mark);
+        if (worse) {
+            mark = path[i];
+            pos = static_cast<double>(i);
+        }
+    }
+    if (!std::isfinite(mark)) return false;
+    *out_mark = mark;
+    *out_pos = pos;
+    return true;
+}
+
 void BacktestEngine::process_margin_call(const Bar& bar) {
     // Consume first, including on disabled/degenerate paths. This is an event
     // attached to the just-completed fill cycle, never durable per-position
@@ -775,10 +848,30 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
         short_full_margin && event_is_actionable;
     const bool opening_affordability =
         long_opening_affordability || short_opening_affordability;
-    const auto run_default_short_adverse_retry = [&]() {
-        if (short_opening_affordability
+    // The post-opening adverse pass over the just-opened position. Two shapes
+    // reach it: the pinned commissioned all-in close-then-short / direct
+    // short reversal (as before), and — round 7 family L — every position
+    // that opened on this bar with a finite liquidation price once its fill
+    // checkpoint has run: TradingView's entry-bar chronology is the fill
+    // checkpoint first, then the ordinary adverse mark over the post-fill
+    // path (mdfe3757 XAUUSD@15 2025-04-08 13:30Z: 1.28 lots trimmed at the
+    // 3013.745 fill, then 2.4 lots at the 3017.3 high of the same bar; the
+    // NYSE:F short admission tape 2025-09-30: 1 share at the 12.11 open for
+    // the fee-only shortfall, then 40 at the 12.20 high). The one-shot
+    // provenance was consumed above, so the recursion is bounded to one pass
+    // and lands in the adverse branch below (post-fill suffix on this bar).
+    const bool entry_bar_path_scope = entry_bar_margin_path_scope();
+    const auto run_post_opening_adverse_pass = [&]() {
+        if (!opening_affordability) return;
+        if (position_side_ == PositionSide::FLAT) return;
+        const bool pinned_default_short_retry =
+            short_opening_affordability
             && opening_event_default_short_reversal
-            && position_side_ == PositionSide::SHORT) {
+            && position_side_ == PositionSide::SHORT;
+        const bool entry_bar_finite_liq =
+            entry_bar_path_scope
+            && !std::isnan(compute_liquidation_price());
+        if (pinned_default_short_retry || entry_bar_finite_liq) {
             process_margin_call(bar);
         }
     };
@@ -883,7 +976,7 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
                 ? 0.0
                 : std::max(0.005, std::abs(opening_equity) * 1e-12);
         if (opening_equity >= required_margin - converted_ledger_guard) {
-            run_default_short_adverse_retry();
+            run_post_opening_adverse_pass();
             return;
         }
         q_min = qty - opening_equity / margin_per_unit;
@@ -938,10 +1031,24 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
         // chronological copy of this test, margin_call_slice_before_priced_
         // exit, takes the same mark so the ledger does not depend on
         // whether a priced exit happens to be resting on the bar.
+        double adverse_raw =
+            (position_side_ == PositionSide::LONG) ? bar.low : bar.high;
+        if (entry_bar_path_scope) {
+            // Round 7 family L: on the opening bar only the path AFTER the
+            // fill is marked (see the function comment). No suffix — a fill
+            // at the close — means no adverse-path check on this bar.
+            double suffix_mark = 0.0;
+            double suffix_pos = 0.0;
+            if (!entry_bar_post_fill_adverse(bar, &suffix_mark,
+                                             &suffix_pos)) {
+                return;
+            }
+            adverse_raw = suffix_mark;
+        }
         const double adverse =
             (position_side_ == PositionSide::LONG)
-                ? bar.low
-                : round_to_mintick(bar.high);
+                ? adverse_raw
+                : round_to_mintick(adverse_raw);
         if (!std::isfinite(adverse) || !(adverse > 0.0)) return;
         const double fx = active_account_currency_fx();
         if (!std::isfinite(fx) || !(fx > 0.0)) return;
@@ -960,7 +1067,7 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
     }
 
     if (!std::isfinite(q_min) || q_min <= kQtyEpsilon) {
-        run_default_short_adverse_retry();
+        run_post_opening_adverse_pass();
         return;
     }
     // Per-instrument lot quantization. TradingView floors the minimum-restore
@@ -1015,7 +1122,7 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
             }
         }
         if (!std::isfinite(opening_floor_zero_fallback)) {
-            run_default_short_adverse_retry();
+            run_post_opening_adverse_pass();
             return;
         }
     }
@@ -1032,7 +1139,7 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
         double floored = std::floor(qty_liq / qty_step_ + 1e-6) * qty_step_;
         if (floored <= kQtyEpsilon) {
             if (opening_affordability) {
-                run_default_short_adverse_retry();
+                run_post_opening_adverse_pass();
                 return;
             }
             // A finite-price liquidation IS required, but the documented
@@ -1137,7 +1244,7 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
     // fill bar: fill-price opening affordability (which may be a no-op), then
     // the ordinary adverse-high check over the surviving short. The one-shot
     // provenance bit was consumed above, so recursion is bounded to one retry.
-    run_default_short_adverse_retry();
+    run_post_opening_adverse_pass();
 }
 
 void BacktestEngine::revive_position_brackets_after_margin_call_partial(
@@ -1268,14 +1375,24 @@ bool BacktestEngine::margin_call_slice_before_priced_exit(
     // (the trail must arm before it fires, so the fill price's first path
     // touch can precede the fill). A caller with no resolved position falls
     // back to the price's first touch.
-    const double adverse =
+    double adverse =
         (position_side_ == PositionSide::LONG) ? bar.low : bar.high;
-    if (!std::isfinite(adverse) || !(adverse > 0.0)) return false;
     double adverse_pos = 0.0;
     double exit_pos = 0.0;
-    if (!internal::first_touch_position(bar, adverse, &adverse_pos)) {
-        return false;
+    if (entry_bar_margin_path_scope()) {
+        // Round 7 family L: on the opening bar the candidate extreme is the
+        // post-fill path suffix's, at its own waypoint — the pre-fill leg of
+        // the entry bar is never a liquidation mark (process_margin_call).
+        if (!entry_bar_post_fill_adverse(bar, &adverse, &adverse_pos)) {
+            return false;
+        }
+    } else {
+        if (!std::isfinite(adverse) || !(adverse > 0.0)) return false;
+        if (!internal::first_touch_position(bar, adverse, &adverse_pos)) {
+            return false;
+        }
     }
+    if (!std::isfinite(adverse) || !(adverse > 0.0)) return false;
     if (std::isfinite(exit_path_position)) {
         exit_pos = exit_path_position;
     } else if (!internal::first_touch_position(bar, exit_fill_price,
@@ -1581,10 +1698,56 @@ bool BacktestEngine::margin_call_1x_long_opening_slice_before_priced_exit(
 // (the ETH corpus) stay bit-identical. The 1x long has no adverse-price
 // liquidation and keeps its fill-time affordability event; a COOF bar keeps
 // the established once-per-script-bar placement (no exemplar).
+bool BacktestEngine::whole_position_market_close_rests_for_open() const {
+    if (position_side_ == PositionSide::FLAT) return false;
+    for (const PendingOrder& o : pending_orders_) {
+        if (o.type != OrderType::EXIT) continue;
+        if (o.id.size() < kClosePrefix.size()
+            || o.id.compare(0, kClosePrefix.size(), kClosePrefix) != 0) {
+            continue;
+        }
+        if (o.suppress_as_declined_reversal_close) continue;
+        // Rests from a prior bar: a market close fills at this bar's open.
+        if (o.created_bar >= bar_index_) continue;
+        if (!std::isnan(o.stop_price) || !std::isnan(o.limit_price)
+            || !std::isnan(o.trail_points) || !std::isnan(o.trail_price)) {
+            continue;
+        }
+        // The whole position: a default-FIFO / close_all full close carries
+        // qty = NaN, qty_percent = 100 (queue_deferred_close_order). Under
+        // close_entries_rule=ANY the order is scoped to its entry id, so the
+        // id's live lots must be the whole position.
+        const bool full_percent =
+            std::isnan(o.qty)
+            && o.qty_percent >= 100.0 - internal::kFullPercentEps;
+        if (!full_percent) continue;
+        if (!o.from_entry.empty()) {
+            double id_qty = 0.0;
+            for (const PyramidEntry& pe : pyramid_entries_) {
+                if (pe.entry_id == o.from_entry) id_qty += pe.qty;
+            }
+            if (id_qty < position_qty_ - kQtyEpsilon) continue;
+        }
+        return true;
+    }
+    return false;
+}
+
 bool BacktestEngine::margin_call_slice_at_bar_open(const Bar& bar) {
     if (!margin_call_enabled_) return false;
     if (position_side_ == PositionSide::FLAT) return false;
     if (coof_scheduler_active_) return false;
+    // Round 7 family H residual (macd1d-mktadmit-f-short 2025-04-23 and
+    // 2026-04-08): the open is a path point like any other — the orders that
+    // fill there execute first, the margin evaluation sees what survives.
+    // A whole-position market close resting for this open leaves nothing to
+    // slice: TV books the close (1025 @9.84 / 842 @11.96) and no "Margin
+    // call" row, where the finding-430 slice ran before any resting order
+    // (48 @9.84 + 977 / 140 @11.96 + 702). The finding-430 census had no
+    // exemplar of an open slice sharing its bar with an exit at the open;
+    // these two rows are that exemplar. Nothing else about the open slice
+    // moves.
+    if (whole_position_market_close_rests_for_open()) return false;
     // Carried positions only. A position filled at this bar's open is
     // checked by its own opening-affordability event; the broker-open
     // boundary runs before any fill of this bar, so this is a structural
@@ -4696,9 +4859,19 @@ void BacktestEngine::apply_filled_order_to_state(
         const bool successful_short_open_or_add =
             requested_side == PositionSide::SHORT
             && (successful_fresh_open || accepted_additional_entry);
+        // Round 7 family H residual (NYSE:F 1D short admission tape
+        // scratchpad/r7/pins/macd1d-mktadmit-f-short, 2025-09-30 / 11-19 /
+        // 12-24): a TRUE-FLAT commissioned all-in default short has the same
+        // fill checkpoint as the close-then-short shape — TradingView slices
+        // ONE lot at the fill price for the fee-only shortfall (cost <=
+        // equity < cost + fee: 788 x 12.11 = 9542.68 <= 9547.86 < 9552.22 ->
+        // 1 @ 12.11, PnL = the two fees) and only then cascades at the
+        // post-fill high over the survivor (40 @ 12.20; the engine printed
+        // 44 @ 12.20 from the untrimmed 788).
         const bool scoped_short_opening_fill =
             (explicit_market_short_full_margin_after_fill
              || default_market_short_close_then_open_after_fill
+             || default_market_flat_short_after_fill
              || default_market_direct_short_reversal_after_fill)
             && positive_raw_base;
         if (successful_short_open_or_add && !scoped_short_opening_fill) {
@@ -4713,6 +4886,7 @@ void BacktestEngine::apply_filled_order_to_state(
         if ((long_full_margin_after_fill
              || explicit_market_short_full_margin_after_fill
              || default_market_short_close_then_open_after_fill
+             || default_market_flat_short_after_fill
              || default_market_direct_short_reversal_after_fill)
             && positive_raw_base
             && (successful_fresh_open || accepted_additional_entry)) {

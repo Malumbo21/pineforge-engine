@@ -682,12 +682,10 @@ void test_fresh_touch_once_fill_costed_at_level() {
 // and the ordinary margin call slices it from the fill bar on (8 @11.25 on
 // 13:30Z, 24 @11.33 on 13:45Z, then 1 / 4 / 4) — the entry itself is
 // untouched (890 @11.23) and every slice comes out of those 890. The slice
-// SIZES are the KI-31 cascade's business, not this pin's: the engine takes
-// the fill bar's adverse extreme from the bar's high (11.29, the open —
-// which the short never saw, the level was touched after it) where TV
-// marks the post-fill path (close 11.25); that entry-bar chronology is a
-// separate lead (32 @11.29 here vs TV's 8 @11.25) and is deliberately not
-// asserted.
+// SIZES are the KI-31 cascade's business, not this pin's; the entry-bar
+// chronology (the fill bar's mark is the post-fill path — its close 11.25,
+// not the 11.29 high the short never saw) is the round-7 family-L rule,
+// asserted row-for-row in tests/test_entry_bar_margin_path.cpp.
 void test_fresh_touch_once_margin_call_slices() {
     std::printf("-- fresh-touch-once + margin call: admitted fill, sliced from 890 --\n");
     Probe p(10004.2, 100.0, 0.01, 1.0);
