@@ -392,8 +392,9 @@ void test_scope_controls_remain_ordinary() {
     std::printf("-- intrabar, delayed, fractional, explicit and shape controls --\n");
 
     // Intrabar touch is not an open-marketable gap. Existing admission uses
-    // fill-time qty at stop=120, costed at the level 120 (round 7: the fill
-    // price, not the open), 83.3333 * 120 <= 10000, so it admits.
+    // fill-time qty at stop=120, costed at open=110, so it admits (the
+    // default percent-100 stop keeps the open basis; round 7 re-based only
+    // the explicit-qty / FIXED / CASH / >100% partition to the fill price).
     Probe intrabar;
     intrabar.is_long = true;
     intrabar.stop = 120.0;

@@ -594,7 +594,10 @@ struct PendingOrder {
     // stop_entry_margin_admission_declines — the same floored qty at the
     // tick-rounded FILL price (the level on a touch, the rounded open on a
     // gap-through) against realized equity; only affordability_close_only
-    // carries over, for a reversal whose entry leg was rejected.
+    // carries over, for a reversal whose entry leg was rejected. A DEFAULT
+    // percent_of_equity <= 100 stop is outside both halves: no placement
+    // check, and its fill-time gate keeps KI-62's bar-OPEN basis (the
+    // ahtisham regression, engine_fills.cpp).
     double affordability_placement_equity =
         std::numeric_limits<double>::quiet_NaN();
     // tick(close(S)): the on-tick signal close the placement check costed,

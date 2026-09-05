@@ -3418,12 +3418,31 @@ bool BacktestEngine::use_stop_placement_open_qty(
 // Fill-time margin admission of a pure STOP entry (round 7, design-stop-
 // entry-placement-admission; ledger note log-20260905t053924z-15615295):
 //
-//   decline iff floored_qty * tick(fill price) * pv * fx * margin%/100
+//   decline iff floored_qty * cost_basis * pv * fx * margin%/100
 //               > realized equity at the fill
 //
-// The cost basis is the price the fill BOOKS: the stop level on an intrabar
-// touch, the tick-rounded open on a gap-through. KI-62's earlier premise
-// that TV costs the bar OPEN even on a touch is refuted by the tapes —
+// The cost basis partitions on the same default-sizing test as the
+// placement half (strategy_entry's affordability_scope): an explicit-qty,
+// default FIXED / CASH or default percent_of_equity > 100 stop is costed
+// at the price the fill BOOKS — the stop level on an intrabar touch, the
+// tick-rounded open on a gap-through (the round-7 pin below). The DEFAULT
+// percent_of_equity <= 100 stop keeps KI-62's bar-OPEN basis: nothing
+// pinned it (all 22 tapes pass an explicit qty), and costing it at the
+// level is a structural no-op for an all-in default (qty = equity / level
+// -> qty * level == equity always admits) that broke the ahtisham
+// volatility-expansion probe on every lane (cand-round7-engine-a-20260905
+// vs base-round7-harness-20260905, BINANCE:ETHUSDT.P 15: 591 -> 1,177
+// trades, 394 extra SHORT entries, every one an intrabar touch whose open
+// is above the level — 2025-04-02 05:15Z o 1866.16 > level 1859.63 >= l
+// 1853.57, 5.3133 * 1866.16 = 9,915 > 9,880.86 declines at the open where
+// 5.3133 * 1859.63 = 9,880.8 admits at the level; TV has no trade there).
+// Under the open basis a default-sized LONG touch (open < level) admits on
+// both bases and a gap-through books the open on both, so the partition
+// changes exactly the default short touch the base engine matched TV on
+// (tests/test_stop_entry_admission.cpp, test_ahtisham_default_pct_stop).
+//
+// For the explicit partition, KI-62's premise that TV costs the bar OPEN
+// even on a touch is refuted by the tapes —
 // fresh-touch-once (NYSE:F 15, capital 10,004.2, short stop 11.23 x 890
 // accepted at the 11.24 close): 2025-08-13 13:30Z opens 11.29 > level and
 // touches, and TV FILLS at 11.23 (890 * 11.23 = 9,994.7 <= E) where the
@@ -3461,10 +3480,22 @@ bool BacktestEngine::stop_entry_margin_admission_declines(
         return false;
     }
     const double margin_pct = order.is_long ? margin_long_ : margin_short_;
+    // The same sizing partition as strategy_entry's affordability_scope:
+    // order.qty is the call's explicit qty (NaN for a default-sized entry)
+    // and default_qty_type_/default_qty_value_ the declaration's sizing.
+    const bool placement_partition =
+        !std::isnan(order.qty)
+        || default_qty_type_ == QtyType::FIXED
+        || default_qty_type_ == QtyType::CASH
+        || (default_qty_type_ == QtyType::PERCENT_OF_EQUITY
+            && default_qty_value_ > 100.0);
     // design-stop-tick-rounding / finding-446: the level is already
     // directionally snapped and a gap open already nearest-rounded when it
     // reaches here, so round_to_mintick is an identity to within one ulp.
-    const double cost_basis = round_to_mintick(fill_price);
+    // The default percent_of_equity <= 100 partition costs the bar OPEN
+    // (KI-62, unchanged — see above).
+    const double cost_basis = placement_partition
+        ? round_to_mintick(fill_price) : bar.open;
     if (!(margin_pct > 0.0) || !std::isfinite(cost_basis)
         || cost_basis <= 0.0) {
         return false;
@@ -3551,9 +3582,11 @@ void BacktestEngine::apply_filled_order_to_state(
     }
 
     // Fill-time margin admission for STOP-ENTRY fills (KI-62 stage 3,
-    // re-based in round 7): the same floored quantity costed at the tick-
-    // rounded FILL price — the level on a touch, the rounded open on a
-    // gap-through — against realized equity; rule, tapes and scope on
+    // re-based in round 7 for the explicit-qty / FIXED / CASH / >100%
+    // partition): the same floored quantity costed at the tick-rounded FILL
+    // price — the level on a touch, the rounded open on a gap-through —
+    // against realized equity; the default percent_of_equity <= 100 stop
+    // keeps the bar-OPEN basis. Rule, tapes and scope on
     // stop_entry_margin_admission_declines above. A declined stop is
     // CANCELLED (consumed here, removed by compaction). Does NOT touch the
     // :443 created_bar eligibility, the signal-time MARKET gate, or any
