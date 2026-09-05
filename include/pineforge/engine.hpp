@@ -29,19 +29,40 @@ namespace pineforge {
 
 enum class PositionSide { FLAT, LONG, SHORT };
 
-// TradingView's broker carries MONEY at TEN SIGNIFICANT DIGITS, half-up —
-// 3 decimals at >= 1e6, 4 decimals below (round 8 family R, OANDA:EURUSD@15,
-// campaign notes log-20260905t164404z-85800609 and log-20260905t180249z-
-// 10358e84). Round 10 family AB (BINANCE:ETHUSDT.P@15 hard lane, the corpus
-// probe anomaly-equity-mirror-strategy-equity-01, campaign note
-// log-20260905t213120z-d5f9e282) lands the one consequence that probe needs:
-// the margin-100 LONG margin call on rounded money
-// (tv_money_long_margin_call, engine_fills.cpp). Family R's sizing /
-// admission consequences (rules 1, 2, 5 on round8/famR-eurusd) are NOT
-// here; they share this helper and tv_money_scope by name so the branches
-// merge onto one definition.
-// tv_money_round is the NEAREST DOUBLE of the decimal rounding (the
-// division by an exact power of ten is correctly rounded).
+// round 8 family R (OANDA:EURUSD@15, 45 strong probes; campaign notes
+// log-20260905t164404z-85800609 (diagnosis), log-20260905t180248z-0dce5ab0
+// (entry-leg admission), log-20260905t180249z-10358e84 (margin-call
+// trigger)): TradingView's broker carries MONEY at TEN SIGNIFICANT DIGITS,
+// half-up — 3 decimals at >= 1e6, 4 decimals below. Three consequences are
+// pinned and implemented, all scoped by tv_money_scope (below):
+//   1. SIZING — a default percent_of_equity order is floored from the
+//      ROUNDED equity (calc_qty): the lot count flips one lot early/late
+//      when the exact equity is within half a money unit of a lot boundary
+//      (~200 lab tv capital sweeps on OANDA:EURUSD 15 2025-04-01, scratch
+//      famr-adm-*: revc 998763.3420484 -> 922832.66, 998763.3420503 ->
+//      922832.67; S2 1001759.6342676 -> one lot BELOW the exact floor).
+//   2. ADMISSION — a default 100 %-of-equity, margin-100 MARKET entry is
+//      DROPPED iff the exact sizing equity is below the ROUNDED cost,
+//      E_s < tv_money_round(Q x tick(close_S)); for a reversal only the
+//      entry leg is dropped and the closing leg still fills (the fill-time
+//      gate in engine_fills.cpp, ahead of the exact fill-price check).
+//      Bare account: L06..L17 / FL00..02 (C = 1000000.0015396 ..
+//      1000000.0019980) rejected, L18 (1000000.0020196) admitted against
+//      round(1000000.0018862) = 1000000.002, flat p0000 (C == cost) admitted;
+//      with a history: 24/24 close-leg-only rejections of the taro probe and
+//      the every-bar sensors have E_s < round(cost), 0/3086 admissions do.
+//   3. MARGIN CALL — a margin-100 LONG is liquidated (one contract, the
+//      broker's minimum) at the first bar path point where the exact equity
+//      is <= the position value ROUNDED to 10 significant digits
+//      (process_margin_call): revL L18..L25 16/16, taro 6/6 one-unit trims.
+// Where equity ~ 1e6 and a lot is worth ~0.011 (EURUSD: qty step 0.01 at
+// price ~1.1) the 0.0005 rounding crosses a lot boundary on ~9 % of all-in
+// placements; on F / AAPL / indices (a lot is 10..250k) it never does.
+// NOT implemented (campaign note log-20260905t180249z-4bd857ad): the sweeps'
+// whole-order rejection band sig10(E) in [sig10(cost), sig10(cost)+0.0004]
+// — the same feature range holds 3086 admitted probe placements, so the
+// drop depends on state the placement does not expose; and TV's 1-unit
+// entry fill when the entry leg fails with Q == |position| + 1.00 exactly.
 inline double tv_money_round(double value) {
     if (!std::isfinite(value) || value == 0.0) return value;
     const double magnitude = std::floor(std::log10(std::abs(value)));
@@ -1803,6 +1824,18 @@ protected:
                                  * active_account_currency_fx();
         return std::isfinite(lot_value) && lot_value < 1.0;
     }
+    // The broker's required margin at a mark is money at ten significant
+    // digits where that can move a lot (famr-adm-rev-01000: the 4x trim of
+    // the fill bar's short is 3900.60 from the ROUNDED 1000527.321 required
+    // margin, 3900.56 from the exact 1000527.3207023 — one lot of restore
+    // quantity across the 0.01 floor; rev-00800 / -01079 / revb / S3 keep
+    // their trims either way). Exact outside the scope.
+    double tv_money_required_margin(double required, double mark) const {
+        // Same-currency ledgers only (a converted ledger is cent-rounded in
+        // TradingView's export; no tape pins the 10-digit form there).
+        return tv_money_scope(mark) && account_currency_fx_timestamps_.empty()
+            ? tv_money_round(required) : required;
+    }
 
     // A fill taken AT A RAW BAR PRICE — a market order at the bar close
     // (process_orders_on_close) or at the next open, a resting stop/limit
@@ -2228,8 +2261,13 @@ protected:
                 // how the already-open position was sized. The open lot is
                 // marked at the ROUNDED close (see above): a sub-tick print
                 // never reaches the broker ledger.
-                const double equity = percent_commission_live_equity(
+                // round 8 family R: the broker sizes from the equity at
+                // TEN SIGNIFICANT DIGITS (tv_money_round above) — the lot
+                // count flips one lot early/late whenever the exact equity
+                // sits within half a money unit of a lot boundary.
+                double equity = percent_commission_live_equity(
                     round_to_mintick(current_bar_.close));
+                if (tv_money_scope(basis)) equity = tv_money_round(equity);
                 if (!std::isfinite(equity)) return 0.0;
                 double cash = reserve_percent_commission(equity * (default_qty_value_ / 100.0)) / active_account_currency_fx();
                 // Reject (qty 0) on a non-finite / non-positive fill price — a
