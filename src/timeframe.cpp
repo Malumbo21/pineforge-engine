@@ -929,7 +929,9 @@ AggregatedBar feed_passthrough_mode(const Bar& input_bar, FeedState s) {
 
 AggregatedBar feed_ratio_mode(const Bar& input_bar, FeedState s,
                                int ratio, int64_t target_seconds,
-                               int64_t input_seconds) {
+                               int64_t input_seconds,
+                               int64_t next_input_ms,
+                               int64_t calling_close_ms) {
     AggregatedBar result;
     if (target_seconds > 0 && s.sub_bar_count > 0) {
         // Time-bucket aware ratio mode:
@@ -1037,6 +1039,56 @@ AggregatedBar feed_ratio_mode(const Bar& input_bar, FeedState s,
                         input_bar.timestamp, atz, asess, CalendarPeriod::DAY)) {
                     complete = true;
                 }
+            }
+            // Chart-close completion (round 8, family P): TradingView
+            // finalizes an intraday HTF bucket -- and the chart timeframe's
+            // own bucket -- on the chart bar whose close reaches the bucket
+            // end, whatever the finer slice holds. On the split-feed path
+            // the slice's last minute may not have printed (NYSE:F 1m
+            // feed: the 04-17 18:00Z bar ends 18:13Z), so neither the count
+            // nor the real-end rule fires and the bucket waited for the
+            // next chart bar's first auxiliary bar -- one chart bar late
+            // (masayanfx multi-time-score F@15: 20 '15', 6 '60' and 5 '240'
+            // bars; lab tv famp-sense-f15full vs the engine trace,
+            // 2026-09-05). The caller names the calling chart bar's nominal
+            // close and the next input bar: when that next bar lies beyond
+            // this bucket and the calling close reaches the bucket end,
+            // this input bar is the bucket's last and the bucket completes
+            // here. A single-feed run passes no calling close (0) and is
+            // bit-identical: its input bar is the chart bar, whose own end
+            // the real-end rule already tests.
+            if (!complete && input_seconds > 0 && calling_close_ms > 0
+                && next_input_ms > input_bar.timestamp && s.agg) {
+                const int64_t end_clock = (next_bucket + 1) * bucket_ms;
+                const int64_t close_clock =
+                    intraday_clock_ms(calling_close_ms, atz, asess);
+                if (close_clock >= end_clock
+                    && s.agg->bucket_open_ms(next_input_ms)
+                           != s.agg->bucket_open_ms(input_bar.timestamp)) {
+                    complete = true;
+                }
+            }
+            // Early-close completion (round 8, family P): on an exchange
+            // calendar the session's last chart bar finalizes the intraday
+            // HTF bucket it leaves open, early closes included -- the
+            // nominal session-close rule above cannot see a 12:15 CT
+            // Good Friday or a 12:00 CT Juneteenth / Independence Day /
+            // Black Friday / Christmas Eve close on CME_MINI:ES1! (the '60'
+            // and '240' series read one session late on 2025-06-19, 07-03,
+            // 11-28, 12-24, 2026-01-19 and 04-03: TradingView's famp-sense-
+            // es15full / nq15full tapes vs the engine trace, 2026-09-05).
+            // The caller's next input bar tells where the session ends:
+            // when it opens a later session-day, this bar was the day's
+            // last. Declared exchange sessions only; an OTC quote stream
+            // (set_early_close_completes(false)) keeps waiting for the
+            // period's nominal close exactly as its D/W/M buckets do.
+            if (!complete && input_seconds > 0 && target_seconds < kSecPerDay
+                && has_trading_session(asess)
+                && next_input_ms > input_bar.timestamp
+                && (!s.agg || s.agg->early_close_completes())
+                && crosses_boundary(input_bar.timestamp, next_input_ms,
+                                    CalendarPeriod::DAY, atz, asess)) {
+                complete = true;
             }
         }
         if (complete) {
@@ -1316,7 +1368,8 @@ AggregatedBar TimeframeAggregator::feed(const Bar& input_bar,
             return feed_passthrough_mode(input_bar, s);
         case Mode::RATIO:
             return feed_ratio_mode(input_bar, s, ratio_, target_seconds_,
-                                   input_seconds_);
+                                   input_seconds_, next_input_ms,
+                                   calling_close_ms);
         case Mode::CALENDAR:
             return feed_calendar_mode(input_bar, s, cal_period_, input_seconds_,
                                       next_input_ms, calling_close_ms);

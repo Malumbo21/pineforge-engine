@@ -35,6 +35,7 @@ set(TEST_SOURCES
     test_split_feed_partial_bucket
     test_ltf_lookahead_first_bucket
     test_htf_weekly_lookahead
+    test_htf_chart_close_completion
     test_native_wm_buckets
     test_native_daily_holiday
     test_o_close_pct_day_anchor
