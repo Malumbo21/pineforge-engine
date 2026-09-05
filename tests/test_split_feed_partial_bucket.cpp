@@ -244,23 +244,25 @@ void test_singleton_tail_reads_at_the_daily_close() {
     // bucket, the forced tail included, so no bucket advanced the RSI twice.
     CHECK(probe.dispatches_off == 1301, "one evaluator dispatch per published bucket");
 
-    // (e) The lookahead_on twin is untouched: its publication is gated to
-    // the calling bar's completion (one per daily bar).
-    CHECK(probe.on.size() == 3, "lookahead_on publishes once per daily bar");
-    CHECK(dense.on_count == 1 && thanks.on_count == 2 && friday.on_count == 3,
-          "each daily bar reads its own lookahead_on publication");
-    CHECK(within(dense.last_on.rsi, 45.14, kTape), "lookahead_on dense-day read unchanged");
-    // On Thanksgiving the 21:59 sub-bar both completes the 21:54 singleton
-    // (the boundary emission, published through the gate) and opens the
-    // 21:57 singleton, which lookahead_on leaves for Black Friday's first
-    // sub-bar: it stays one bucket behind on this shape, exactly as before.
-    // TV's lookahead_on merge of a finer TF is not what the tape pins
-    // (lookahead_off), so that branch is deliberately untouched here.
-    CHECK(thanks.last_on.label == utc(2025, 11, 27, 21, 54) && thanks.last_on.subs == 1,
-          "lookahead_on still publishes the 21:54 completion at the Thanksgiving close (unchanged)");
-    CHECK(friday.last_on.label == utc(2025, 11, 28, 19, 45),
-          "lookahead_on Black Friday publication = the 19:45 bucket");
-    CHECK(within(friday.last_on.rsi, 43.62, kTape), "lookahead_on Black Friday read unchanged");
+    // (e) The lookahead_on twin reads the calling bar's FIRST intrabar
+    // (calling_open_latches_first, round 7 r7-ltf-lookahead; lab tv
+    // notrade-ltf-sample-btc1d): every 3m bucket is published, in the same
+    // order as the lookahead_off twin's, and the chart body runs right
+    // after the slice's first bucket -- so each daily bar reads its own
+    // first bucket, not the previous day's last one, and the Thanksgiving
+    // singleton tail (a lookahead_off pin) does not concern it.
+    CHECK(probe.on.size() == probe.off.size(), "lookahead_on publishes every 3m bucket, like lookahead_off");
+    for (std::size_t i = 0; i < probe.on.size(); ++i) {
+        CHECK(probe.on[i].label == probe.off[i].label, "the lookahead_on publications are the same buckets, in order");
+    }
+    CHECK(dense.on_count == 1, "the 11-25 body runs after its slice's first 3m bucket");
+    CHECK(thanks.on_count == 459 + 1, "the Thanksgiving body runs after the dense day's 459 buckets and its own first");
+    CHECK(friday.on_count == 459 + 438 + 1, "the Black Friday body runs after its own first bucket");
+    CHECK(dense.last_on.label == probe.off[0].label, "11-25 reads its first bucket");
+    CHECK(thanks.last_on.label == probe.off[459].label, "Thanksgiving reads its first bucket");
+    CHECK(friday.last_on.label == probe.off[459 + 438].label, "Black Friday reads its first bucket");
+    CHECK(friday.last_on.label >= utc(2025, 11, 27, 23, 0), "Black Friday's first bucket opens in its own session (18:00 ET)");
+    CHECK(within(friday.last_on.rsi, probe.off[459 + 438].rsi, 1e-9), "the first bucket's RSI, as the lookahead_off twin published it");
 }
 
 // ---- the 2-minute shape -----------------------------------------------------

@@ -31,6 +31,7 @@ set(TEST_SOURCES
     test_aux_security_feed
     test_native_security_feed
     test_split_feed_partial_bucket
+    test_ltf_lookahead_first_bucket
     test_native_wm_buckets
     test_native_daily_holiday
     test_oanda_lazy_close

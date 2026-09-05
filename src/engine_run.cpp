@@ -1396,6 +1396,10 @@ void BacktestEngine::init_security_eval_states_for_run(
         state.current_sub_bar_count = 0;
         state.lower_tf_sub_bar_index = 0;
         state.lower_tf_input_buffer.clear();
+        state.first_bucket_published = false;
+        state.deferred_aux.clear();
+        state.slice_open_label = 0;
+        state.last_published_label = 0;
         state.historical_projections.clear();
         state.historical_projection_cursor = 0;
         state.historical_projection_feed_index = 0;
@@ -1655,6 +1659,16 @@ void BacktestEngine::run_simple_bar_loop(const Bar* input_bars, int n_input) {
         }
 
         dispatch_bar();
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+        // The rest of a first-bucket-latched evaluator's slice (its bars
+        // after the first published bucket): TradingView's lookahead_on
+        // read of a finer request is the calling bar's first intrabar, so
+        // the body above read that, and the TA state now catches up on the
+        // remaining sub-bars before the next chart bar's slice.
+        if (aux_security_feed_enabled()) {
+            feed_deferred_aux_security_for_chart_bar(i);
+        }
+#endif
         prev_in_session_ = session_ismarket_;
         update_equity_extremes();
         record_equity_point(current_bar_.timestamp);  // ts not mutated on this path

@@ -143,10 +143,15 @@ void test_native_chart_and_auxiliary_security_are_isolated() {
     assert((probe.lower_tf_at_chart_close
             == std::vector<std::vector<double>>{
                 {11.0, 12.0}, {21.0, 22.0}, {31.0, 32.0}}));
-    // Completion-aware security publication receives exactly the final
-    // auxiliary event of each native chart slice through the neutral bridge.
+    // A finer lookahead_on request reads the calling bar's FIRST intrabar
+    // (calling_open_latches_first, round 7): every completed requested bar
+    // is published and the chart body runs right after the slice's first
+    // one -- 1 on day 1, then day 1's second + day 2's first = 3, then 5.
+    // (Until round 7 the gate published the slice's LAST completion only:
+    // 1, 2, 3.)
     assert((probe.completion_publishes_at_chart_close
-            == std::vector<int>{1, 2, 3}));
+            == std::vector<int>{1, 3, 5}));
+    assert(probe.completion_publish_count == 6);
 
     // Orders created on chart bars fill at the next native chart opens. If
     // the auxiliary feed contaminated the broker, these would be 20/30.
