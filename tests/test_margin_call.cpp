@@ -700,11 +700,15 @@ static void test_long_100pct_margin_no_call() {
 }
 
 // A default 100%-of-equity MARKET order placed and filled from true flat.
-// A ZERO-commission fill is admitted only within one lot of the frozen sizing
-// notional: a larger gap-up is REJECTED at fill and silently dropped
-// (design-cntvxiao-gap-reject). A COMMISSIONED fill is never gap-rejected (its
-// opening fee is nonzero) and instead keeps the KI-61 fill-then-entry-bar
-// affordability-trim path.
+// A gap-up whose frozen-qty cost at the fill exceeds the sizing equity is
+// REJECTED at fill and silently dropped (design-cntvxiao-gap-reject) — with
+// or without a commission: the round-7 market-entry-admission pin (campaign
+// notes log-20260905t071818z-e57e7235 / log-20260905t071819z-ece9b623, lab
+// tv tapes scratchpad/r7/pins/macd1d-mktadmit-*, 0.1% commission, 206
+// placements, 0 violations) shows TradingView tests floored_qty x tick(fill)
+// <= equity with the fee EXCLUDED. A COMMISSIONED fill whose cost fits but
+// whose cost + fee does not (the fee-only shortfall) keeps the KI-61
+// fill-then-entry-bar affordability-trim path.
 class FrozenAllInFlatLongProbe : public MCEngine {
 public:
     explicit FrozenAllInFlatLongProbe(double commission_percent) {
@@ -743,8 +747,14 @@ static void test_zero_cost_frozen_all_in_true_flat_gap_is_rejected() {
     CHECK(eng.position_size() == 0.0);
 }
 
-static void test_commissioned_frozen_all_in_true_flat_gap_is_eligible() {
-    std::printf("test_commissioned_frozen_all_in_true_flat_gap_is_eligible\n");
+// Commission 10% + the same above-equity gap-up: signal sizing reserves the
+// fee, floor(1000/1.1/100) = 9, and the 120 fill costs 9 x 120 = 1080 > 1000
+// — the fee is not part of the test, so TV REJECTS the entry outright: no
+// fill, no entry-bar margin call, FLAT. (Until the round-7 pin the engine
+// filled 9 @ 120 and trimmed 4 on the entry bar — TV's z8830 bb-macd probes
+// on NYSE:F@1D 2025-09-19 and OANDA:XAUUSD@1D 2025-07-14 show no such row.)
+static void test_commissioned_frozen_all_in_true_flat_gap_is_rejected() {
+    std::printf("test_commissioned_frozen_all_in_true_flat_gap_is_rejected\n");
     std::vector<Bar> bars = {
         mk_bar(1000, 100.0, 100.0, 100.0, 100.0, 1.0),
         mk_bar(2000, 120.0, 125.0,  80.0, 110.0, 1.0),
@@ -752,17 +762,34 @@ static void test_commissioned_frozen_all_in_true_flat_gap_is_eligible() {
     FrozenAllInFlatLongProbe eng(/*commission_percent=*/10.0);
     eng.run(bars.data(), (int)bars.size());
 
-    // Signal sizing reserves the 10% entry fee: floor(1000/1.1/100)=9.
-    // At the 120 fill, margin plus the 108 fee is unaffordable. Restoring
-    // needs 1.566... lots, floored to one then multiplied by four.
+    CHECK(eng.trade_count() == 0);
+    CHECK(near(eng.position_size(), 0.0));   // was 5 (9 filled, 4 trimmed)
+}
+
+// Commission 10% + a gap-up that fits WITHOUT the fee: 9 x 110 = 990 <= 1000
+// admits, but 990 + the 99 opening fee is unaffordable, so the fill goes
+// through and the KI-61 entry-bar affordability trim fires: restoring needs
+// 9 - (1000 - 99)/110 = 0.809 lots, which floors to zero and takes the
+// opening event's one-contract fallback — one lot closes on the entry bar
+// at the fill, 8 are held. (The tapes' shape: NYSE:F 2025-07-29 896 @ 11.29
+// vs equity 10125.50, OANDA:XAUUSD 2025-10-22 2.93 @ 4110.085 vs 12043.12.)
+static void test_commissioned_frozen_all_in_true_flat_fee_only_shortfall_is_eligible() {
+    std::printf("test_commissioned_frozen_all_in_true_flat_fee_only_shortfall_is_eligible\n");
+    std::vector<Bar> bars = {
+        mk_bar(1000, 100.0, 100.0, 100.0, 100.0, 1.0),
+        mk_bar(2000, 110.0, 115.0,  80.0, 105.0, 1.0),
+    };
+    FrozenAllInFlatLongProbe eng(/*commission_percent=*/10.0);
+    eng.run(bars.data(), (int)bars.size());
+
     CHECK(eng.trade_count() == 1);
     CHECK(eng.exit_comment(0) == std::string("Margin call"));
     CHECK(eng.entry_bar(0) == 1);
     CHECK(eng.exit_bar(0) == 1);
-    CHECK(near(eng.entry_price(0), 120.0));
-    CHECK(near(eng.exit_price(0), 120.0));
-    CHECK(near(eng.trade_size(0), 4.0));
-    CHECK(near(eng.position_size(), 5.0));
+    CHECK(near(eng.entry_price(0), 110.0));
+    CHECK(near(eng.exit_price(0), 110.0));
+    CHECK(near(eng.trade_size(0), 1.0));
+    CHECK(near(eng.position_size(), 8.0));
 }
 
 // The short closes at zero PnL immediately before the long is placed, so both
@@ -1006,7 +1033,8 @@ static void test_cash_per_order_floor_zero_closes_one_contract() {
 // fill notional > equity, commission-independent, zero slack). The KI-61
 // lot-floored opening-affordability trim these fixtures once exercised is still
 // pinned by the frozen/default-sized path (test_commissioned_frozen_all_in_
-// true_flat_gap_is_eligible for commissioned-adverse admit+trim; the frozen
+// true_flat_fee_only_shortfall_is_eligible for the commissioned fee-only
+// admit+trim; the frozen
 // exemption tests for the sub-lot held case) plus test_explicit_qty_fill_
 // admission's GREEN-D.
 static void test_explicit_all_in_zero_comm_adverse_gap_declined() {
@@ -1032,7 +1060,7 @@ static void test_explicit_all_in_zero_comm_adverse_gap_declined() {
 // TV DECLINES this too — the pre-fix "fill 10@120 then 4x entry-bar trim to hold
 // 2" outcome is dead. No fill, no Margin-call rows. The commissioned admit+trim
 // KI-61 semantics remain pinned by the FROZEN path
-// (test_commissioned_frozen_all_in_true_flat_gap_is_eligible).
+// (test_commissioned_frozen_all_in_true_flat_fee_only_shortfall_is_eligible).
 static void test_explicit_all_in_commissioned_adverse_gap_declined() {
     std::printf("test_explicit_all_in_commissioned_adverse_gap_declined\n");
     std::vector<Bar> bars = {
@@ -3147,7 +3175,8 @@ int main() {
     test_short_margin_call_disabled();
     test_long_100pct_margin_no_call();
     test_zero_cost_frozen_all_in_true_flat_gap_is_rejected();
-    test_commissioned_frozen_all_in_true_flat_gap_is_eligible();
+    test_commissioned_frozen_all_in_true_flat_gap_is_rejected();
+    test_commissioned_frozen_all_in_true_flat_fee_only_shortfall_is_eligible();
     test_paired_short_close_default_long_gap_remains_eligible();
     test_fee_created_floor_zero_closes_one_contract();
     test_fee_created_floor_zero_caps_sub_one_position();

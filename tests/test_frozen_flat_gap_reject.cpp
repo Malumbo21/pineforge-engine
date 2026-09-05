@@ -3,20 +3,25 @@
  * frozen 100%-of-equity true-flat MARKET entry whose gapped fill price pushes
  * the frozen-quantity notional past the sizing equity at all.
  *
- * Rule (design-cntvxiao-gap-reject, PANEL-CLEARED): a pending MARKET entry
+ * Rule (design-cntvxiao-gap-reject, PANEL-CLEARED; widened to commissioned
+ * entries by the round-7 market-entry-admission pin): a pending MARKET entry
  * created by high-level strategy.entry with omitted qty (frozen default sizing,
  * percent_of_equity == 100%), direction-appropriate margin == 100, placed
  * TRUE-FLAT (created flat, not a same-bar paired close/reentry) and still FLAT
- * at fill, carrying ZERO opening commission, is silently dropped (no trade row)
- * at fill when:
+ * at fill, is silently dropped (no trade row) at fill when:
  *
  *   |frozen_default_qty| * slipped_fill * pv * fx * margin/100
  *     >  sizing_equity
  *        + max(1e-9, |sizing_equity| * 1e-12)
  *
  * Direction-symmetric (long AND short). ANY positive shortfall rejects — there
- * is NO one-lot amnesty; commissioned or pct<100 or gap-DOWN entries are
- * untouched (they keep the KI-61 fill-then-trim / hold path). See the gate in
+ * is NO one-lot amnesty and the opening commission is NOT part of the test
+ * (campaign notes log-20260905t071818z-e57e7235 / log-20260905t071819z-
+ * ece9b623, lab tv tapes scratchpad/r7/pins/macd1d-mktadmit-*: 0.1%
+ * commission, 206 placements, 0 violations; replayed on the registry bars by
+ * test_market_admission_commission). pct<100 or gap-DOWN entries are
+ * untouched, and a commissioned entry whose cost fits but whose cost + fee
+ * does not keeps the KI-61 fill-then-trim path. See the gate in
  * engine_fills.cpp apply_filled_order_to_state for the evidence trail.
  *
  * RED-4  SHORT true-flat zero-comm above-lot gap  -> rejected (FLAT, no rows).
@@ -26,7 +31,11 @@
  *        no rows).
  * GREEN-B strategy.exit bracket bound to a flat-dropped entry id is inert
  *        (no phantom exit fill, no crash).
- * GREEN-C commissioned twin: fills then takes the KI-61 4-lot Margin-call trim.
+ * RED-7  commissioned twin of RED-6 (10% fee, 9 x 120 = 1080 > 1000): rejected
+ *        (FLAT, no rows) — re-pinned by the round-7 tapes; it used to fill
+ *        and take a 4-lot Margin-call trim.
+ * GREEN-C commissioned fee-only shortfall (9 x 110 = 990 <= 1000 < 990 + 99):
+ *        fills then takes the KI-61 one-lot Margin-call trim.
  * GREEN-D pct=99 twin: fills (rule requires EXACTLY 100).
  * GREEN-E gap-DOWN true-flat: fills with the frozen qty.
  */
@@ -206,25 +215,48 @@ void test_dangling_exit_bracket_is_inert() {
     CHECK(eng.trade_count() == 0);
 }
 
-// GREEN-C. Commissioned twin of the zero-comm all-in reject. commission 10%
-// makes calc_commission(fill, frozen_qty) != 0, so the gap-reject rule does
-// NOT apply. Signal sizing reserves the fee: floor(1000/1.1/100) = 9. At the
-// 120 fill the position + 108 fee is unaffordable, so the KI-61 entry-bar
-// affordability trim fires (restore 1.566 -> floor 1 -> 4x = 4), leaving 5.
-// Mirrors test_commissioned_frozen_all_in_true_flat_gap_is_eligible.
-void test_commissioned_all_in_gap_fills_then_trims() {
-    std::printf("-- GREEN-C: commissioned all-in gap fills then trims --\n");
+// RED-7. Commissioned twin of RED-6. Signal sizing reserves the 10% fee:
+// floor(1000/1.1/100) = 9. The 120 fill costs 9 x 120 = 1080 > 1000, and the
+// round-7 tapes show the commission is not part of TV's test: the entry is
+// REJECTED outright — no fill, no entry-bar trim. (Before the pin the engine
+// filled 9 @ 120 and trimmed 4, the shape TV's z8830 probes never show.)
+// Mirrors test_commissioned_frozen_all_in_true_flat_gap_is_rejected.
+void test_commissioned_all_in_gap_rejected() {
+    std::printf("-- RED-7: commissioned all-in gap over equity rejected --\n");
     Probe eng(/*pct=*/100.0, /*capital=*/1000.0, /*qty_step=*/1.0,
               /*commission_pct=*/10.0, /*enable_mc=*/true);
     eng.script = "L.";
     std::vector<Bar> bars = {
         mk_bar(1000, 100, 100, 100, 100),   // frozen floor(1000/1.1/100)=9
-        mk_bar(2000, 120, 125,  80, 110),   // fills 9@120, then 4-lot trim
+        mk_bar(2000, 120, 125,  80, 110),   // 9*120 = 1080 > 1000 -> DROP
+    };
+    eng.run(bars.data(), (int)bars.size());
+    CHECK(eng.trade_count() == 0);                     // pre-pin: 1 margin call
+    CHECK(eng.position_side_ == PositionSide::FLAT);   // pre-pin: LONG 5
+    CHECK_NEAR(eng.position_size(), 0.0, 1e-9);
+}
+
+// GREEN-C. Commissioned fee-only shortfall: the same 9 lots at a 110 fill
+// cost 990 <= 1000 (admitted, the fee excluded), but 990 + the 99 opening fee
+// is unaffordable, so the KI-61 entry-bar affordability trim fires: restore
+// 9 - (1000 - 99)/110 = 0.809 -> floors to 0 -> the opening event's one-lot
+// fallback closes 1 @ 110, leaving 8. (Tape shape: NYSE:F 2025-07-29 896 @
+// 11.29 vs equity 10125.50, trimmed on the entry bar.)
+void test_commissioned_fee_only_shortfall_fills_then_trims() {
+    std::printf("-- GREEN-C: commissioned fee-only shortfall fills then trims --\n");
+    Probe eng(/*pct=*/100.0, /*capital=*/1000.0, /*qty_step=*/1.0,
+              /*commission_pct=*/10.0, /*enable_mc=*/true);
+    eng.script = "L.";
+    std::vector<Bar> bars = {
+        mk_bar(1000, 100, 100, 100, 100),   // frozen floor(1000/1.1/100)=9
+        mk_bar(2000, 110, 115,  80, 105),   // 9*110 = 990 <= 1000 -> fills, trims 1
     };
     eng.run(bars.data(), (int)bars.size());
     CHECK(eng.trade_count() == 1);
     CHECK(eng.exit_comment(0) == std::string("Margin call"));
-    CHECK_NEAR(eng.position_size(), 5.0, 1e-9);
+    CHECK_NEAR(eng.all_trades()[0].qty, 1.0, 1e-9);
+    CHECK(eng.position_side_ == PositionSide::LONG);
+    CHECK_NEAR(eng.position_size(), 8.0, 1e-9);
 }
 
 // GREEN-D. pct=99 twin of RED-3's arithmetic — the flag is set ONLY at exactly
@@ -276,7 +308,8 @@ int main() {
     test_rejected_short_emits_no_margin_call_rows();
     test_sub_lot_positive_shortfall_rejected();
     test_dangling_exit_bracket_is_inert();
-    test_commissioned_all_in_gap_fills_then_trims();
+    test_commissioned_all_in_gap_rejected();
+    test_commissioned_fee_only_shortfall_fills_then_trims();
     test_pct99_twin_fills();
     test_gap_down_true_flat_fills();
     std::printf("\n=== Results: %d passed, %d failed ===\n",

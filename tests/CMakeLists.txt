@@ -99,6 +99,7 @@ set(TEST_SOURCES
     test_stop_entry_placement_open_qty
     test_stop_decline_continue_path
     test_frozen_flat_gap_reject
+    test_market_admission_commission
     test_explicit_qty_fill_admission
     test_market_entry_affordability
     test_percent_equity_affordability
