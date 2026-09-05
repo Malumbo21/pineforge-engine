@@ -550,6 +550,67 @@ static void test_default_cut_oanda_1d_weekly() {
                     "D: the chart's own first bar is kept");
     std::printf("test_default_cut_oanda_1d_weekly: %s\n", (failures > before) ? "FAIL" : "ok");
 }
+
+// BINANCE:BTCUSDT 1D chart (UTC, 24x7) from the range start Tue 2025-04-01
+// under the flag's epoch 04-01 00:00Z, the 1m feed from Sun 03-30: "W" and
+// "M" on a daily chart are the chart dailies aggregated (the implicit native
+// feed), whose in-progress week is labelled by its first in-range stamp
+// (04-01) -- the flag's bucket-open cut kept it as weekly bar 0 (hungpixi-
+// macd-enhanced-mtf, lab tv famp-sense-hp-btc1d: TradingView's weekly EMA26
+// first reads on the 09-29 week, i.e. bar 0 is the 04-07 week). The week
+// that traded before the epoch is absent; April (opening exactly at the
+// epoch) and "D" (the chart's own timeframe) keep their first bar. The NSE
+// control: a 1D chart whose Monday never traded keeps its Tuesday-opening
+// week.
+static void test_flag_epoch_1d_chart_weekly_from_chart_dailies() {
+    int before = failures;
+    auto always = [](int, int) { return true; };
+    {
+        std::vector<Bar> chart;
+        for (int64_t t = utc_ms(2025, 4, 1); t < utc_ms(2025, 5, 10); t += 86'400'000) {
+            const double px = 80000.0 + static_cast<double>(chart.size());
+            chart.push_back(Bar{px, px, px, px, 1.0, t});
+        }
+        const auto aux = session_bars(utc_ms(2025, 3, 30), utc_ms(2025, 5, 10), 60'000, 0, always);
+        SplitGateHarness h("W", "D", "M");
+        h.set_syminfo_metadata("security_range_start_na_warmup",
+                               static_cast<double>(utc_ms(2025, 4, 1)));
+        run_split(h, chart, aux, "1D", "UTC", "24x7", "crypto");
+        CHECK(!h.completed[0].empty(), "flag 1D: W completed");
+        if (!h.completed[0].empty())
+            CHECK_EQ_MS(h.completed[0].front(), utc_ms(2025, 4, 7),
+                        "flag 1D: the week that opened Mon 03-31 (traded, before the epoch) is absent; W bar 0 is Mon 04-07");
+        CHECK(!h.completed[1].empty(), "flag 1D: D completed");
+        if (!h.completed[1].empty())
+            CHECK_EQ_MS(h.completed[1].front(), utc_ms(2025, 4, 1),
+                        "flag 1D: D is the chart's own series, its first bar kept");
+        CHECK(!h.completed[2].empty(), "flag 1D: M completed");
+        if (!h.completed[2].empty())
+            CHECK_EQ_MS(h.completed[2].front(), utc_ms(2025, 4, 1),
+                        "flag 1D: April opens exactly at the epoch and is kept");
+    }
+    {
+        // NSE-shaped 1D chart from Tue 04-01 (Monday 03-31 a holiday): the
+        // 1m feed never traded on Monday, the week is the range start's own.
+        std::vector<Bar> chart;
+        for (int64_t t = utc_ms(2025, 4, 1, 3, 45); t < utc_ms(2025, 5, 10); t += 86'400'000) {
+            const int wday = static_cast<int>(((t + 5 * 3'600'000) / 86'400'000 + 4) % 7);
+            if (wday == 0 || wday == 6) continue;
+            const double px = 22000.0 + static_cast<double>(chart.size());
+            chart.push_back(Bar{px, px, px, px, 1.0, t});
+        }
+        const auto aux = session_bars(utc_ms(2025, 4, 1, 3, 45), utc_ms(2025, 5, 10), 60'000, 5, nse_open);
+        SplitGateHarness h("W", "D", "M");
+        h.set_syminfo_metadata("security_range_start_na_warmup",
+                               static_cast<double>(utc_ms(2025, 4, 1)));
+        run_split(h, chart, aux, "1D", "Asia/Kolkata", "0915-1530", "index");
+        CHECK(!h.completed[0].empty(), "flag 1D NSE: W completed");
+        if (!h.completed[0].empty())
+            CHECK_EQ_MS(h.completed[0].front(), utc_ms(2025, 4, 1, 3, 45),
+                        "flag 1D NSE: the week opening on the holiday's Tuesday is kept");
+    }
+    std::printf("test_flag_epoch_1d_chart_weekly_from_chart_dailies: %s\n", (failures > before) ? "FAIL" : "ok");
+}
 #endif
 
 int main() {
@@ -564,6 +625,7 @@ int main() {
     test_default_cut_cme_15m_range_start();
     test_default_cut_nse_holiday_monday_keeps_the_week();
     test_default_cut_oanda_1d_weekly();
+    test_flag_epoch_1d_chart_weekly_from_chart_dailies();
 #endif
     if (failures) {
         std::printf("%d check(s) FAILED\n", failures);

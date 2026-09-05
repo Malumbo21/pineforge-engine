@@ -375,6 +375,46 @@ bool BacktestEngine::security_input_precedes_range_start(
         // range start on the bucket grid — 24x7 UTC midnight for every intraday
         // TF and D, Monday for W, the 1st for M — this is the timestamp cut.
         // Lower-TF (passthrough) evaluators keep the timestamp cut exactly.
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+        // A strictly-coarser-than-chart calendar evaluator whose partition is
+        // the chart's own dailies (a "W" / "M" on a 1D chart: the implicit
+        // native feed of prepare_native_security_feeds, which begins at the
+        // range start) labels the bucket in progress at the epoch by its
+        // first IN-RANGE stamp -- Tue 2025-04-01 for the week that opened Mon
+        // 03-31 -- so the bucket-open cut above keeps it as bar 0 and every
+        // SMA-seeded weekly EMA runs one bar early (round 8, family P:
+        // hungpixi-macd-enhanced-mtf on BINANCE:BTCUSDT 1D under the ladder's
+        // range-start-na-warmup candidate, lab tv famp-sense-hp-btc1d
+        // 2026-09-05: TradingView's weekly EMA26 first reads on the 09-29
+        // week and its signal EMA9 on the 11-24 week -- weekly bar 0 is the
+        // 04-07 week -- while the engine's read one week earlier; on the
+        // 11-24 week TradingView's hist[1] is still na (score -6) where the
+        // engine's is numeric (score -10), and the 11-25 reversal waited for
+        // 11-28). TradingView's rule is the default path's: the bucket is
+        // absent iff its NOMINAL open precedes the epoch and the symbol
+        // traded between the two (the auxiliary 1m feed is the evidence, so
+        // the NSE week whose holiday Monday never traded stays kept). The
+        // chart's own timeframe keeps the chart series' first bar, and a
+        // native partition with pre-range history (the 15m lanes' explicit
+        // daily feed) already opened that bucket before the epoch, so the
+        // rule below agrees with the cut above wherever both apply.
+        if (aux_security_feed_enabled() && !state.lower_tf_requested
+            && !state.lower_tf_array_requested) {
+            const CalendarPeriod period = calendar_period_for(state.tf);
+            const CalendarPeriod chart_period = calendar_period_for(script_tf_);
+            const bool strictly_coarser = period != CalendarPeriod::NONE
+                && static_cast<int>(period) > static_cast<int>(chart_period);
+            if (strictly_coarser) {
+                const int64_t nominal_open = session_period_open_ms(
+                    input_ts, syminfo_.timezone, syminfo_.session, period);
+                if (nominal_open < security_range_start_ms_
+                    && aux_security_traded_between(nominal_open,
+                                                   security_range_start_ms_)) {
+                    return true;
+                }
+            }
+        }
+#endif
         return state.aggregator.bucket_open_ms(input_ts) < security_range_start_ms_;
     }
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
