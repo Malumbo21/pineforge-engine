@@ -112,6 +112,27 @@ const Bar kEth0425_0045 = mk(2312.53, 2314.94, 2312.53, 2314.86, 1777077900000);
 const Bar kEth0425_0100 = mk(2314.87, 2317.5, 2314.29, 2316.9, 1777078800000);
 const Bar kEth0425_0115 = mk(2316.9, 2319.53, 2316.14, 2316.66, 1777079700000);
 
+// One-shot (omitted-offset) trail re-issued with a NEW activation the
+// carried extreme already exceeds (`lab tv` famz-oneshot-A1 / -B1; the
+// fast-scalper shape: strategy.exit(stop=close*0.98, trail_points=...)).
+const Bar kEth1001_2000 = mk(4332.23, 4335.35, 4314.99, 4321.59, 1759348800000);
+const Bar kEth1001_2015 = mk(4321.6, 4331.86, 4310.81, 4325.94, 1759349700000);
+const Bar kEth1001_2030 = mk(4325.94, 4327.2, 4323.0, 4326.18, 1759350600000);
+const Bar kEth1001_2045 = mk(4326.19, 4333.0, 4323.0, 4332.99, 1759351500000);
+const Bar kEth1001_2100 = mk(4333.0, 4333.47, 4321.0, 4323.54, 1759352400000);
+const Bar kEth1001_2115 = mk(4323.54, 4323.55, 4313.49, 4317.58, 1759353300000);
+const Bar kEth1001_2130 = mk(4317.58, 4317.58, 4297.91, 4307.73, 1759354200000);
+const Bar kEth1001_2145 = mk(4307.73, 4313.2, 4284.55, 4302.52, 1759355100000);
+const Bar kEth1001_2200 = mk(4302.52, 4327.45, 4302.52, 4316.88, 1759356000000);
+
+const Bar kEth1001_1045 = mk(4287.0, 4289.91, 4277.31, 4280.4, 1759315500000);
+const Bar kEth1001_1100 = mk(4280.4, 4295.28, 4280.4, 4295.19, 1759316400000);
+const Bar kEth1001_1115 = mk(4295.18, 4303.26, 4293.78, 4296.59, 1759317300000);
+const Bar kEth1001_1130 = mk(4296.6, 4300.52, 4289.16, 4292.03, 1759318200000);
+const Bar kEth1001_1145 = mk(4292.01, 4298.06, 4290.28, 4295.88, 1759319100000);
+const Bar kEth1001_1200 = mk(4295.88, 4301.18, 4289.24, 4295.18, 1759320000000);
+const Bar kEth1001_1215 = mk(4295.18, 4312.34, 4287.0, 4306.58, 1759320900000);
+
 // The probe's broker: 10x margin both sides, all-in percent_of_equity,
 // 0.0001 lots, mintick 0.01, no commission, market fills at the next open.
 class Goat : public BacktestEngine {
@@ -135,6 +156,9 @@ public:
     }
     int signal_bar = -1;
     bool signal_long = false;
+    // 0: the probe's fixed request; 1: trail_points alternates 100/101t per
+    // bar (tapes famz-trail-*-D); 2: trail_offset alternates 50/51t (-E).
+    int alternate = 0;
 
     void on_bar(const Bar& /*bar*/) override {
         if (bar_index_ == signal_bar) {
@@ -147,15 +171,17 @@ public:
             }
         }
         // SL $1, TP1 $1 (half), TP2 $3, trail 100t / 50t — every bar.
+        const double pts = alternate == 1 ? 100.0 + (bar_index_ % 2) : 100.0;
+        const double off = alternate == 2 ? 50.0 + (bar_index_ % 2) : 50.0;
         strategy_exit("TP1 Long", "Long", kNaN, kNaN, kNaN, kNaN, kNaN, 50.0,
                       "", kNaN, "", /*profit_ticks=*/100.0, kNaN);
-        strategy_exit("Exit Long", "Long", kNaN, kNaN, /*trail_points=*/100.0,
-                      /*trail_offset=*/50.0, kNaN, 100.0, "", kNaN, "",
+        strategy_exit("Exit Long", "Long", kNaN, kNaN, /*trail_points=*/pts,
+                      /*trail_offset=*/off, kNaN, 100.0, "", kNaN, "",
                       /*profit_ticks=*/300.0, /*loss_ticks=*/100.0);
         strategy_exit("TP1 Short", "Short", kNaN, kNaN, kNaN, kNaN, kNaN, 50.0,
                       "", kNaN, "", /*profit_ticks=*/100.0, kNaN);
-        strategy_exit("Exit Short", "Short", kNaN, kNaN, /*trail_points=*/100.0,
-                      /*trail_offset=*/50.0, kNaN, 100.0, "", kNaN, "",
+        strategy_exit("Exit Short", "Short", kNaN, kNaN, /*trail_points=*/pts,
+                      /*trail_offset=*/off, kNaN, 100.0, "", kNaN, "",
                       /*profit_ticks=*/300.0, /*loss_ticks=*/100.0);
     }
     bool flat() const { return position_side_ == PositionSide::FLAT; }
@@ -311,6 +337,124 @@ void test_long_0425_trails_from_entry_bar_high() {
     }
 }
 
+// A re-issue that moves the activation (trail_points 100 -> 101t at the
+// entry bar's close; the tape's bar_index parity puts 101t on the 07:15Z /
+// 00:45Z close) restarts the extreme from that close: S 2939.34 = 2938.84 +
+// 50t (tape famz-trail-S-20251225-D); L 2314.37 = the 01:00Z open 2314.87
+// - 50t, the restarted extreme walking on into the next bar (tape
+// famz-trail-L-20260425-D). A re-issue that changes only the offset keeps
+// the extreme and applies the new distance: S 2939.22 = 2938.71 + 51t
+// (-E), L 2314.43 = 2314.94 - 51t (-E).
+void test_changed_points_restart_changed_offset_keeps() {
+    std::printf("test_changed_points_restart_changed_offset_keeps\n");
+    struct Case { bool is_long; int alternate; double expect; const char* tape; };
+    const Case cases[] = {
+        {false, 1, 2939.34, "famz-trail-S-20251225-D"},
+        {false, 2, 2939.22, "famz-trail-S-20251225-E"},
+        {true, 1, 2314.37, "famz-trail-L-20260425-D"},
+        {true, 2, 2314.43, "famz-trail-L-20260425-E"},
+    };
+    for (const Case& c : cases) {
+        // The tapes' parity: the entry bar's close carries bar_index odd.
+        // Short: bars 06:45 (0), 07:00 signal (1), 07:15 entry (2) — pad one
+        // bar in front so the entry bar is odd. Long: 00:30 signal (0),
+        // 00:45 entry (1).
+        std::vector<Bar> bars = c.is_long
+            ? std::vector<Bar>{kEth0425_0030, kEth0425_0045, kEth0425_0100, kEth0425_0115}
+            : std::vector<Bar>{kEth1225_0645, kEth1225_0645, kEth1225_0700, kEth1225_0715,
+                               kEth1225_0730, kEth1225_0745};
+        Goat p(10000.0);
+        p.signal_bar = c.is_long ? 0 : 2;
+        p.signal_long = c.is_long;
+        p.alternate = c.alternate;
+        p.run(bars.data(), (int)bars.size());
+        std::printf("    %s\n", c.tape);
+        print_trades(p);
+        CHECK(p.last_error().empty());
+        CHECK(p.trade_count() == 2);
+        CHECK(p.flat());
+        if (p.trade_count() == 2) {
+            const Trade& trail = p.get_trade(1);
+            CHECK(trail.exit_bar_index == (c.is_long ? 2 : 4));
+            CHECK_NEAR(trail.exit_price, c.expect, 1e-9);
+        }
+    }
+}
+
+// The fast-scalper shape: a fixed-lot long with strategy.exit(stop=
+// close*0.98, trail_points=1500t) issued with the entry, re-issued at bar R
+// with trail_points=500t. The running high already exceeds entry + 5.00
+// and R's close does not: TradingView requires the NEW activation to be
+// reached after the re-issue (A1: entry 20:15Z @4321.6, re-issue 21:00Z
+// close 4323.54, exit @4326.60 on the 22:00Z bar — not at the 21:15Z open
+// 4323.54 the carried-best arming would print; B1: entry 11:15Z @4295.18,
+// re-issue 11:45Z, exit @4300.18 = the level on the 12:00Z bar, not its
+// open 4295.88).
+class OneShot : public BacktestEngine {
+public:
+    OneShot() {
+        initial_capital_ = 1'000'000.0;
+        syminfo_.pointvalue = 1.0;
+        syminfo_.mintick = 0.01;
+        syminfo_mintick_ = 0.01;
+        qty_step_ = 1.0;
+        default_qty_type_ = QtyType::FIXED;
+        default_qty_value_ = 1.0;
+        commission_type_ = CommissionType::PERCENT;
+        commission_value_ = 0.0;
+        pyramiding_ = 0;
+        slippage_ = 0;
+        process_orders_on_close_ = false;
+    }
+    int signal_bar = -1;
+    int reissue_bar = -1;
+    void on_bar(const Bar& bar) override {
+        if (bar_index_ == signal_bar) {
+            strategy_entry("L", true);
+            strategy_exit("x", "L", kNaN, bar.close * 0.98, /*trail_points=*/1500.0);
+        }
+        if (bar_index_ == reissue_bar) {
+            strategy_exit("x", "L", kNaN, bar.close * 0.98, /*trail_points=*/500.0);
+        }
+    }
+    bool flat() const { return position_side_ == PositionSide::FLAT; }
+};
+
+void test_one_shot_reissue_needs_its_new_activation() {
+    std::printf("test_one_shot_reissue_needs_its_new_activation\n");
+    struct Case { std::vector<Bar> bars; int signal; int reissue; int exit_bar; double exit; const char* tape; };
+    const Case cases[] = {
+        {{kEth1001_2000, kEth1001_2015, kEth1001_2030, kEth1001_2045, kEth1001_2100,
+          kEth1001_2115, kEth1001_2130, kEth1001_2145, kEth1001_2200},
+         0, 4, 8, 4326.60, "famz-oneshot-A1"},
+        {{kEth1001_1045, kEth1001_1100, kEth1001_1115, kEth1001_1130, kEth1001_1145,
+          kEth1001_1200, kEth1001_1215},
+         1, 4, 5, 4300.18, "famz-oneshot-B1"},
+    };
+    for (const Case& c : cases) {
+        OneShot p;
+        p.signal_bar = c.signal;
+        p.reissue_bar = c.reissue;
+        p.run(c.bars.data(), (int)c.bars.size());
+        std::printf("    %s\n", c.tape);
+        for (int i = 0; i < p.trade_count(); ++i) {
+            const Trade& t = p.get_trade(i);
+            std::printf("      trade %d: entry bar %d @ %.2f exit bar %d @ %.2f [%s]\n", i,
+                        t.entry_bar_index, t.entry_price, t.exit_bar_index, t.exit_price,
+                        t.exit_id.c_str());
+        }
+        CHECK(p.last_error().empty());
+        CHECK(p.trade_count() == 1);
+        CHECK(p.flat());
+        if (p.trade_count() == 1) {
+            const Trade& t = p.get_trade(0);
+            CHECK(t.entry_bar_index == c.signal + 1);
+            CHECK(t.exit_bar_index == c.exit_bar);
+            CHECK_NEAR(t.exit_price, c.exit, 1e-9);
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -320,6 +464,8 @@ int main() {
     test_long_1225_extreme_walks_the_exit_bar_path();
     test_long_0214_trail_fires_before_tp2();
     test_long_0425_trails_from_entry_bar_high();
+    test_changed_points_restart_changed_offset_keeps();
+    test_one_shot_reissue_needs_its_new_activation();
     std::printf("%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

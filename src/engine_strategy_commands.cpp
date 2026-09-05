@@ -1812,6 +1812,9 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
         double discarded_reserved_qty = std::numeric_limits<double>::quiet_NaN();
         int discarded_leg_count = 0;
         clear_existing_exit_order(id, from_entry, /*has_trail_request=*/false,
+                                  std::numeric_limits<double>::quiet_NaN(),
+                                  std::numeric_limits<double>::quiet_NaN(),
+                                  std::numeric_limits<double>::quiet_NaN(),
                                   discarded_seq, discarded_incarnation,
                                   discarded_reserved_qty, discarded_leg_count);
         return;
@@ -1854,6 +1857,7 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     double preserved_reserved_qty = std::numeric_limits<double>::quiet_NaN();
     int cleared_leg_count = 0;
     clear_existing_exit_order(id, from_entry, has_trail_request,
+                              trail_points, trail_offset, trail_price,
                               preserved_seq, replaced_incarnation,
                               preserved_reserved_qty, cleared_leg_count);
 
@@ -2825,11 +2829,16 @@ bool BacktestEngine::from_entry_holds_live_lot(const std::string& from_entry) co
 void BacktestEngine::clear_existing_exit_order(const std::string& id,
                                                const std::string& from_entry,
                                                bool has_trail_request,
+                                               double trail_points,
+                                               double trail_offset,
+                                               double trail_price,
                                                int64_t& preserved_seq_out,
                                                uint64_t& replaced_incarnation_out,
                                                double& preserved_reserved_qty_out,
                                                int& cleared_leg_count_out) {
     bool had_existing_order = false;
+    double resting_trail_points = std::numeric_limits<double>::quiet_NaN();
+    double resting_trail_price = std::numeric_limits<double>::quiet_NaN();
     preserved_seq_out = 0;
     replaced_incarnation_out = 0;
     preserved_reserved_qty_out = std::numeric_limits<double>::quiet_NaN();
@@ -2847,6 +2856,8 @@ void BacktestEngine::clear_existing_exit_order(const std::string& id,
             if (!std::isnan(o.qty)) {
                 preserved_reserved_qty_out = o.qty;
             }
+            resting_trail_points = o.trail_points;
+            resting_trail_price = o.trail_price;
         }
     }
 
@@ -2865,8 +2876,33 @@ void BacktestEngine::clear_existing_exit_order(const std::string& id,
     // engine rode down to TP2 2310.82). The extreme is the position's,
     // measured from its entry fill along every bar's path; an exit for an id
     // that holds none of it does not touch it.
-    if (has_trail_request && !had_existing_order && position_side_ != PositionSide::FLAT
-        && from_entry_holds_live_lot(from_entry)) {
+    //
+    // A re-issue that MOVES the resting trail's ACTIVATION (trail_points /
+    // trail_price) is a replaced order: TradingView measures the new trail
+    // from the re-issue, and the extreme restarts from that bar's close
+    // (`lab tv` famz-trail-S-20251225-D: trail_points alternating 100/101t
+    // per bar, entry bar L 2938.71 C 2938.84 -> "Trail Short" 2939.34 =
+    // close + 50t; famz-trail-L-20260425-D: entry bar H 2314.94 C 2314.86,
+    // next open 2314.87 -> 2314.37 = that open - 50t). winthetrade
+    // ema-9-vwap on CME_MINI:NQ1! 15m re-issues strategy.exit(trail_points=
+    // atr*2, trail_offset=atr*2) every bar (process_orders_on_close): the
+    // pre-fix engine matched all 55 such exits by restarting through the
+    // opposite side's call; without any restart 21 of them trail out early.
+    // A re-issue that changes ONLY trail_offset keeps the running extreme
+    // and applies the new distance (famz-trail-S-20251225-E: offset
+    // alternating 50/51t -> 2939.22 = the entry bar's low + 51t;
+    // famz-trail-L-20260425-E -> 2314.43 = high - 51t), and a re-issue with
+    // the same request modifies nothing (shurben5: identical every-bar
+    // re-issues keep the entry bar's extreme, famz-trail-*-{A,B,C}).
+    auto same_request = [](double a, double b) {
+        return (std::isnan(a) && std::isnan(b)) || a == b;
+    };
+    const bool trail_request_changed = had_existing_order
+        && !(same_request(resting_trail_points, trail_points)
+             && same_request(resting_trail_price, trail_price));
+    if (has_trail_request && position_side_ != PositionSide::FLAT
+        && from_entry_holds_live_lot(from_entry)
+        && (!had_existing_order || trail_request_changed)) {
         trail_best_price_ = current_bar_.close;
     }
 
