@@ -1322,12 +1322,17 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
     if (aux_security_feed_enabled()) {
         prepare_aux_security_chart_ranges(input_bars, n_input,
                                           effective_script_tf);
-    } else
-#endif
-    {
-        prepare_historical_security_lookahead_projections(
-            input_bars, n_input, effective_input_tf);
     }
+#endif
+    // The historical lookahead projection is built from the chart bars on
+    // both feed paths: a coarser-than-chart lookahead_on request leaks its
+    // period's FINAL values from the period's first chart bar whether the
+    // evaluator is fed the chart bars themselves or the auxiliary finer
+    // slice (round 7, family I: hungpixi's "W" f_count on the BTC / XAUUSD
+    // 1D lanes, which run split-feed for their "30" requests, read a
+    // progressive partial week while TradingView reads the week's final).
+    prepare_historical_security_lookahead_projections(
+        input_bars, n_input, effective_input_tf);
 
     if (!needs_aggregation && !bar_magnifier) {
         run_simple_bar_loop(input_bars, n_input);
@@ -1402,7 +1407,7 @@ void BacktestEngine::init_security_eval_states_for_run(
         state.last_published_label = 0;
         state.historical_projections.clear();
         state.historical_projection_cursor = 0;
-        state.historical_projection_feed_index = 0;
+        state.historical_projection_dispatched = false;
         state.native_feed_index = -1;
         state.native_bars_by_label.clear();
         state.aggregator = TimeframeAggregator();
@@ -1490,11 +1495,30 @@ void BacktestEngine::prepare_historical_security_lookahead_projections(
         // exposing a pre-range aggregate or shifting the first projected
         // bucket. An evaluator with no retained input gets no projection and
         // falls through to its (equally empty) progressive path.
+        // The instant a chart child is fed to this evaluator: the child
+        // itself on the single-feed path, its first auxiliary bar on the
+        // split-feed path -- the range-start cut and the dispatch key must
+        // see the same instant the feed will (an OANDA daily stamp sits at
+        // the 17:00 ET break, its slice starts at the 18:00 session open).
+        auto child_instant_ms = [&](int child) -> int64_t {
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+            if (aux_security_feed_enabled()) {
+                const std::size_t idx = static_cast<std::size_t>(child);
+                if (idx < aux_security_chart_begin_.size()
+                        && aux_security_chart_begin_[idx]
+                               < aux_security_bars_.size()) {
+                    return aux_security_bars_[aux_security_chart_begin_[idx]]
+                        .timestamp;
+                }
+            }
+#endif
+            return input_bars[child].timestamp;
+        };
         int projection_begin = 0;
         if (security_range_start_na_warmup_) {
             while (projection_begin < n_input
                     && security_input_precedes_range_start(
-                           state, input_bars[projection_begin].timestamp)) {
+                           state, child_instant_ms(projection_begin))) {
                 ++projection_begin;
             }
             if (projection_begin >= n_input) {
@@ -1508,7 +1532,7 @@ void BacktestEngine::prepare_historical_security_lookahead_projections(
         state.historical_projections.reserve(static_cast<std::size_t>(
             projection_count / expected_children + 1));
         state.historical_projection_cursor = 0;
-        state.historical_projection_feed_index = 0;
+        state.historical_projection_dispatched = false;
 
         auto crosses_requested_boundary = [&](int64_t from_ms,
                                                int64_t to_ms) {
@@ -1544,19 +1568,18 @@ void BacktestEngine::prepare_historical_security_lookahead_projections(
                                  bool is_complete) {
             state.historical_projections.push_back(
                 HistoricalSecurityProjection{
-                    aggregate, static_cast<std::size_t>(begin), is_complete});
+                    aggregate, child_instant_ms(begin), is_complete});
         };
 
-        int group_begin = 0;
+        int group_begin = projection_begin;
         Bar aggregate = input_bars[projection_begin];
         for (int i = projection_begin + 1; i < n_input; ++i) {
-            const int retained_child_index = i - projection_begin;
             if (crosses_requested_boundary(aggregate.timestamp,
                                            input_bars[i].timestamp)) {
                 // A later bucket proves this group is historical/confirmed,
                 // even when sparse input omitted its natural final child.
                 publish_group(group_begin, aggregate, true);
-                group_begin = retained_child_index;
+                group_begin = i;
                 aggregate = input_bars[i];
             } else {
                 merge(aggregate, input_bars[i]);
@@ -1579,7 +1602,7 @@ void BacktestEngine::clear_historical_security_lookahead_projections() {
     for (auto& state : security_eval_states_) {
         state.historical_projections.clear();
         state.historical_projection_cursor = 0;
-        state.historical_projection_feed_index = 0;
+        state.historical_projection_dispatched = false;
     }
 }
 

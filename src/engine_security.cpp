@@ -567,24 +567,34 @@ void BacktestEngine::feed_security_eval_state(
 
     if (historical_security_lookahead_projection_active_
             && !state.historical_projections.empty()) {
-        const std::size_t feed_index =
-            state.historical_projection_feed_index++;
+        // Keyed by the input's instant, not by a feed-call index: on the
+        // split-feed path this evaluator is fed the finer auxiliary slice
+        // (hundreds of inputs per chart bar), and the projection of a bucket
+        // is dispatched on the first input at or after its first retained
+        // child (that child's own first auxiliary bar) -- exactly the chart
+        // bar TradingView's lookahead_on leaks the bucket's FINAL values
+        // from. On the single-feed path the first input at or after the
+        // child's timestamp is that child itself, as the index cut was.
+        const int64_t input_ms = input_bar.timestamp;
         while (state.historical_projection_cursor + 1
                     < state.historical_projections.size()
                 && state.historical_projections[
                        state.historical_projection_cursor + 1]
-                       .first_child_index <= feed_index) {
+                       .first_child_ms <= input_ms) {
             ++state.historical_projection_cursor;
+            state.historical_projection_dispatched = false;
         }
         const auto& projection = state.historical_projections[
             state.historical_projection_cursor];
         state.feed_count++;
-        if (projection.first_child_index != feed_index) {
+        if (state.historical_projection_dispatched
+                || input_ms < projection.first_child_ms) {
             // gaps_off holds the first-child projection unchanged until the
             // next HTF bucket. No evaluator call means TA/security histories
             // also advance exactly once per projected bucket.
             return;
         }
+        state.historical_projection_dispatched = true;
 
         Bar projected_bar = projection.bar;
         // A projected bucket is the exchange's bar wherever a native feed
@@ -675,10 +685,22 @@ void BacktestEngine::feed_security_eval_state(
         // sub-bar. Count, real-end and session-close completions carry the
         // input bar's own bucket (the label matches) and are untouched, as
         // is lookahead_off (no peeks: every completion is a new slot).
+        // The emitted bucket is a boundary emission exactly when it is not
+        // the aggregator's CURRENT bucket: a boundary completion hands back
+        // the previous bucket and re-seats the aggregator on the one the
+        // input opened (feed_calendar_mode / feed_ratio_mode), while every
+        // eager completion (count, real end, session close, the calendar
+        // period's last input) leaves the completed bucket current. The
+        // former test compared the label against bar_label_ms(input), which
+        // is the intraday grid open for a fixed-TF bucket but the DAY stamp
+        // for a calendar W / M bucket -- so every weekly completion on its
+        // last daily bar looked like a boundary and committed a phantom copy
+        // of the week as one more requested bar (round 7, family I: the
+        // hungpixi weekly f_count carry decayed twice per week, hist ties
+        // compared the week with its own copy).
         const bool boundary_emission = state.lookahead_on
             && state.aggregator.is_active()
-            && ab.bar.timestamp
-                   != state.aggregator.bar_label_ms(input_bar.timestamp);
+            && ab.bar.timestamp != state.aggregator.current().timestamp;
         if (boundary_emission && state.current_sub_bar_count < 2) {
             state.current_sub_bar_count = 2;
         }
