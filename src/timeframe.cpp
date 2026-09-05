@@ -1164,6 +1164,28 @@ Bar TimeframeAggregator::last_completed() const {
     return last_completed_bar_;
 }
 
+bool TimeframeAggregator::has_pending_partial() const {
+    // The time-bucket ratio path is the one whose completions are all
+    // guarded by current_emitted_complete_ (feed_ratio_mode), so a bucket
+    // finalized here is never emitted a second time; the count-only
+    // fallback would re-complete it by count.
+    return mode_ == Mode::RATIO && target_seconds_ > 0
+        && sub_bar_count_ > 0 && !current_emitted_complete_;
+}
+
+AggregatedBar TimeframeAggregator::complete_pending_partial() {
+    AggregatedBar result;
+    result.bar = current_bar_;
+    result.sub_bar_count = sub_bar_count_;
+    result.is_complete = false;
+    if (!has_pending_partial()) return result;
+    last_completed_bar_ = current_bar_;
+    has_completed_ = true;
+    current_emitted_complete_ = true;
+    result.is_complete = true;
+    return result;
+}
+
 bool TimeframeAggregator::is_active() const {
     return mode_ != Mode::PASSTHROUGH;
 }

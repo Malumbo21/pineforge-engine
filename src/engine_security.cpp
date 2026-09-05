@@ -137,6 +137,7 @@ void BacktestEngine::validate_security_timeframes(const std::string& input_tf) {
         state.lower_tf_input_aggregation_ratio = 1;
         state.lower_tf_input_buffer.clear();
         state.publish_gate_tf_seconds = 0;
+        state.calling_close_completes_partial = false;
         if (state.tf.empty()) continue;
 
         int lower_ratio = 0;
@@ -273,6 +274,21 @@ void BacktestEngine::validate_security_timeframes(const std::string& input_tf) {
             // 100.0%.
             state.publish_gate_tf_seconds = requested_seconds;
         }
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+        else if (!is_calendar_month && !state.lookahead_on
+                 && aux_security_feed_enabled()
+                 && script_seconds > 0
+                 && requested_seconds < script_seconds) {
+            // Plain request.security, lookahead_OFF, target TF strictly
+            // finer than the script/chart TF, served by the auxiliary finer
+            // feed: TV's merge takes the LAST intrabar of the calling bar,
+            // whatever its sub-bar count -- see the field's note. The
+            // aggregator's own completions stay ungated (masayanfx above);
+            // only a bucket still partial on the calling bar's last
+            // auxiliary bar is finalized and published there.
+            state.calling_close_completes_partial = true;
+        }
+#endif
     }
 }
 
@@ -646,6 +662,35 @@ void BacktestEngine::feed_security_eval_state(
         state.current_bar = ab.bar;
         if (state.gaps_on) {
             clear_security(state.sec_id);
+        }
+    }
+
+    // The calling chart bar's last auxiliary bar left the finer bucket it
+    // opened (or merged into) partial: its count, real end and session
+    // close all lie beyond the chart bar's last sub-bar (the Thanksgiving
+    // 21:57 3m bucket holding the 21:59 minute alone; the 2-minute 20:57
+    // bucket of a day whose 20:59 minute did not trade). TradingView reads
+    // that bucket at the chart bar's close (lab tv dca-ltf-last-intrabar,
+    // 2026-09-05: 72.64, the 21:59 minute's RSI, where the previous bucket
+    // reads 38.87), so finalize it now, exactly as a count / real-end /
+    // session-close completion would have, and publish it as one more
+    // completed requested-context bar. The aggregator marks it emitted:
+    // the next chart bar's first sub-bar starts a fresh bucket without
+    // re-emitting this one, and a later sub-bar of the same bucket (not a
+    // completed chart bar's, but guarded) merges without completing it
+    // again. A dense feed whose final bucket completed on its count has no
+    // pending partial and is untouched (calling_close_completes_partial).
+    if (calling_bar_complete && state.calling_close_completes_partial
+        && state.aggregator.has_pending_partial()) {
+        AggregatedBar tail = state.aggregator.complete_pending_partial();
+        if (tail.is_complete) {
+            state.current_sub_bar_count = tail.sub_bar_count;
+            substitute_native_security_bar(state, tail.bar);
+            if (state.heikinashi) apply_ha(tail.bar, /*commit=*/true);
+            state.current_bar = tail.bar;
+            state.eval_complete_count++;
+            dispatch_security_eval(state, tail.bar, true,
+                                   state.eval_complete_count - 1);
         }
     }
 }

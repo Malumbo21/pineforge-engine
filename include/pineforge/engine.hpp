@@ -2505,6 +2505,30 @@ protected:
         // lookahead_off — the already-correct cases) and leaves behavior
         // unchanged.
         int publish_gate_tf_seconds = 0;
+        // Plain ``request.security`` with a requested TF strictly finer than
+        // script_tf, served by the auxiliary finer feed (the split-feed
+        // path), under ``lookahead_off``: TradingView surfaces the LAST
+        // intrabar of the calling chart bar at that bar's close whatever
+        // the bucket's sub-bar count -- on the OANDA:XAUUSD 1D chart the
+        // Thanksgiving 2025-11-26 bar's last 3m bucket (21:57Z, holding
+        // the 21:59Z minute alone before the 22:00Z session close) is the
+        // value ``request.security(tickerid, "3", ta.rsi(close, 14))``
+        // reads at the daily close (72.64, lab tv dca-ltf-last-intrabar,
+        // 2026-09-05), where the aggregator's count / real-end /
+        // session-close rules leave that bucket partial until the next
+        // chart bar's first sub-bar and the close read the 21:54Z bucket
+        // (38.87). When set, feed_security_eval_state
+        // finalizes and publishes the pending partial bucket on the
+        // calling bar's last auxiliary bar (TimeframeAggregator::
+        // complete_pending_partial), once: the next chart bar's first
+        // sub-bar resets the bucket without re-emitting it. Dense feeds
+        // whose final bucket completes on its count are untouched (no
+        // partial is pending), and so are lanes without the auxiliary
+        // slice, lookahead_on (its gated publication is untouched: on this
+        // shape it stays one bucket behind, as before -- the tape pins
+        // lookahead_off only), lower-TF arrays and calendar / same-TF
+        // requests. False (the default) means "not applicable".
+        bool calling_close_completes_partial = false;
         // One entry per projected HTF bucket, populated only for an explicitly
         // opted-in finite historical batch. Empty for every default/streaming
         // run and for sites outside the narrow HTF lookahead_on+gaps_off

@@ -265,6 +265,28 @@ public:
     /// Current in-progress bar.
     Bar current() const;
 
+    /// RATIO (fixed intraday target) only: whether the bucket in progress
+    /// holds sub-bars no completion has emitted yet -- the tail of a chart
+    /// bar whose last sub-bars never reached the bucket's count, real end
+    /// or session close (the 21:57Z 3m bucket of OANDA:XAUUSD's Thanksgiving
+    /// 2025-11-26 session holds only the 21:59Z minute). CALENDAR and
+    /// PASSTHROUGH answer false; so does a count-only ratio with no
+    /// wall-clock width.
+    bool has_pending_partial() const;
+
+    /// Finalize the pending partial bucket exactly as feed() finalizes a
+    /// bucket -- the sub-bars it holds ARE the bucket -- and return it
+    /// complete. TradingView surfaces the LAST intrabar of a chart bar at
+    /// that bar's close whatever its minute count (lab tv
+    /// dca-ltf-last-intrabar, 2026-09-05), so a request.security evaluator
+    /// served by a finer feed calls this when its calling chart bar
+    /// completes. The bucket is emitted once: the next boundary resets it
+    /// without re-emitting (current_emitted_complete), and a later sub-bar
+    /// of the same bucket merges without completing it again, as after any
+    /// early completion. Without a pending partial nothing changes and the
+    /// current bar is returned incomplete.
+    AggregatedBar complete_pending_partial();
+
     /// Last completed aggregated bar.
     Bar last_completed() const;
 
