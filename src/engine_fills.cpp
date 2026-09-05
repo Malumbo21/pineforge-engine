@@ -825,10 +825,14 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
     // A LONG at exactly 100% margin has no leverage-derived liquidation price:
     // compute_liquidation_price() returns na because m/100 - direction == 0.
     // Its only broker action is the non-price affordability event attached to
-    // the successful fill. The same event is consumed for the narrowly pinned
-    // SHORT shape: a high-level explicit-qty MARKET opening/add at 100% margin,
-    // whose individually admitted fills can over-allocate the combined short.
-    // Other short order shapes retain the ordinary finite-price cascade.
+    // the successful fill. The same event is consumed for the pinned SHORT
+    // shapes at 100% margin: a high-level explicit-qty MARKET opening/add
+    // (whose individually admitted fills can over-allocate the combined
+    // short) and the default-sized percent_of_equity 100 MARKET shapes —
+    // close-then-short, true-flat and direct reversal, with or without a
+    // commission since round 7 family M (the fill-price trim is TV's
+    // entry-bar checkpoint on either side). Other short order shapes retain
+    // the ordinary finite-price cascade.
     const bool long_full_margin =
         (position_side_ == PositionSide::LONG)
         && std::isfinite(margin_long_)
@@ -4683,9 +4687,10 @@ void BacktestEngine::apply_filled_order_to_state(
             && std::abs(margin_long_ / 100.0 - 1.0) < 1e-12;
         // Scope the new short event to the TV-pinned generic shape only:
         // high-level strategy.entry, explicit finite qty, pure MARKET order,
-        // SHORT at margin_short=100. Default-sized percent/cash entries,
-        // priced ENTRY orders, RAW strategy.order, and other margin settings
-        // retain their prior short-side event behavior (none).
+        // SHORT at margin_short=100. Priced ENTRY orders, RAW strategy.order,
+        // and other margin settings retain their prior short-side event
+        // behavior (none). Default-sized percent_of_equity 100 shorts take
+        // the shapes below (close-then-short, true-flat, direct reversal).
         const bool explicit_market_short_full_margin_after_fill =
             position_side_ == PositionSide::SHORT
             && std::isfinite(margin_short_)
@@ -4706,11 +4711,25 @@ void BacktestEngine::apply_filled_order_to_state(
             && std::abs(default_qty_value_ - 100.0) < 1e-12
             && std::isfinite(margin_short_)
             && std::abs(margin_short_ / 100.0 - 1.0) < 1e-12
-            && commission_type_ == CommissionType::PERCENT
-            && std::isfinite(commission_value_)
-            && commission_value_ > 0.0
+            // Round 7 family M (mechanism 3, market-logic-india low-lag
+            // strength oscillator OANDA:XAUUSD@1D 2025-12-04; family-G pin
+            // "a positive fill-time shortfall becomes the 1-lot entry-bar
+            // 'Margin call' trim at the entry price, PnL 0"): the fill
+            // checkpoint is not a commission artefact. A ZERO-commission
+            // close-then-short (strategy.close("Long") + strategy.entry
+            // ("Short"), sized 2.17 = floor(9,121.47 / 4,203.115) at the
+            // signal close) fills at the 4,206.465 open for 9,128.03 against
+            // the 9,125.49 the long just realized: TV trims 1.0 lot at
+            // 4,206.465 (the sub-lot one-contract fallback, PnL 0, TV 22)
+            // and carries 1.17 (TV 23), exactly as it trims the LONG side
+            // (TV 7 09-22, TV 20 11-20: 1.0 @ the entry price). The
+            // commissioned-only scope left the engine with no event here,
+            // so the whole 2.17 rode into the ordinary cascade instead
+            // (0.04 @ 4,219.62 + 0.04 @ 4,259.34) and every later qty
+            // drifted with the equity. The opening fee, when there is one,
+            // still enters the opening budget below.
             && std::isfinite(new_opening_commission)
-            && new_opening_commission > 0.0
+            && new_opening_commission >= 0.0
             && std::isfinite(order.frozen_default_qty)
             && order.frozen_default_qty > kQtyEpsilon
             && std::isfinite(order.sizing_equity)
@@ -4816,10 +4835,19 @@ void BacktestEngine::apply_filled_order_to_state(
             && order.created_bar < bar_index_
             && order.oca_name.empty()
             && order.oca_type == 0;
+        // The lifecycle tag keeps its commissioned meaning (no reader
+        // today; test_margin_call pins the zero-fee flat short untagged).
+        const bool commissioned_opening_fee =
+            commission_type_ == CommissionType::PERCENT
+            && std::isfinite(commission_value_)
+            && commission_value_ > 0.0
+            && std::isfinite(new_opening_commission)
+            && new_opening_commission > 0.0;
         if (successful_fresh_open) {
             commissioned_all_in_market_short_lifecycle_ =
-                default_market_short_close_then_open_after_fill
-                || default_market_flat_short_after_fill;
+                (default_market_short_close_then_open_after_fill
+                 || default_market_flat_short_after_fill)
+                && commissioned_opening_fee;
             default_market_direct_short_reversal_lifecycle_ =
                 default_market_direct_short_reversal_after_fill;
         } else if (accepted_additional_entry) {
@@ -4870,12 +4898,16 @@ void BacktestEngine::apply_filled_order_to_state(
             // true-flat placement and true-flat fill; successful admission on
             // sizing_price; and an actually zero opening fee. Checking the
             // just-created pyramid lot avoids inferring a reversal/paired
-            // reentry from trade count or discarding zero-PnL closes.
+            // reentry from trade count or discarding zero-PnL closes. Both
+            // sides: a zero-fee TRUE-FLAT default short is admitted on its
+            // sizing price and gap-rejected on its fill notional (family H),
+            // so it can carry no fill-time shortfall — the exemption keeps
+            // that shape's event inert now that the default short shapes
+            // are queued without a commission (round 7 family M).
             const bool frozen_all_in_true_flat_exemption =
                 successful_fresh_open
                 && order.opening_affordability_exemption_candidate
                 && order.type == OrderType::MARKET
-                && order.is_long
                 && std::isnan(order.qty)
                 && std::isfinite(order.frozen_default_qty)
                 && std::isfinite(order.sizing_equity)
