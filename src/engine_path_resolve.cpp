@@ -720,40 +720,58 @@ ExitTrailState compute_exit_trail_state(bool is_long, double trail_points,
     }
     s.exits_at_activation = std::isnan(s.trail_offset_price);
     // An EXPLICIT trail_offset=0 (or a sub-tick offset that truncates to 0
-    // ticks, see above) is TV's one-shot exit-at-activation trail:
-    // it FILLS at the activation crossing itself, so it can never survive
-    // into a later bar in the armed state — an armed zero-offset trail is an
-    // executed one. Deriving "armed" for it from the running post-entry
-    // extreme RETRO-ARMED the stop whenever an activation level refreshed
-    // from a newer close (strategy.exit re-issued per bar, e.g.
-    // trail_points = close * perc / syminfo.mintick, trail_offset = 0)
-    // dropped under a peak set beneath an older, higher level; the phantom
-    // stop then exited at the next bar's open (or at the stale level on an
-    // against-direction segment) — an exit TradingView never prints. TV rule
-    // (fitted 219/219 + 147/147 clean trailing exits on the boztilkiserhan
-    // WMA scalp/ADX tapes, both of which pass trail_offset=0 explicitly):
-    // level_t = entry +- prevBarClose*perc, live from the bar after entry,
-    // intrabar cross fills AT the level, at the open when the bar already
-    // opens past it. Both fill routes stay reachable below without any
-    // pre-arming (open-gap shortcut + with-direction segment cross), so
-    // only the retro-arming path is removed for this shape.
-    //
-    // An OMITTED trail_offset keeps the carried-best arming even though it
-    // shares the exit-at-activation FILL rule: TV treats its activation as
-    // durable order state measured against the position's running extreme.
-    // Discriminator (corpus bracket-exit-stop-limit-trail-same-bar-01,
-    // 2025-08-30 08:45): entry 4392.08, activation 4392.26 from
-    // trail_points=atr with NO offset argument, entry-bar high 4396.01
-    // crossed the level before the order's first live bar, whose open
-    // 4392.25 sits one tick BELOW the level — TV fills at that open, which
-    // only a carried armed state can produce. Offset>0 trails likewise keep
-    // the reconstruction: activation is durable for every trail that keeps
-    // running after it activates.
-    const bool one_shot_zero_offset_trail = zero_tick_offset;
-    if (!one_shot_zero_offset_trail && !std::isnan(s.best_price)) {
-        // The carried best is the raw running extreme; the activation test
-        // reads it tick-quantized (design-trail-activation-tick-bar), as the
-        // broker read the bars that produced it.
+    // ticks, see above) arms from the carried best too, and once armed it
+    // RIDES: the level is the raw running best itself (zero distance), an
+    // open at or past it fills at the open print, a with-direction leg
+    // raises it, an against-direction leg fills at it (directional level
+    // snap). An open BEYOND the best (or past a dormant activation) is
+    // decided by its print against the directionally snapped open
+    // (try_exit_open_gap_fill): a print on the stop side fills at the open,
+    // one beyond it rides. Only an activation FIRST reached intrabar, by a path leg, is
+    // the one-shot fill at the activation level (the trail_activation_level
+    // route in select_exit_segment_levels). Round 10 family AC, pinned with
+    // 14 `lab tv` tapes on NYSE:F 15m (scratchpad/r10/famAC/pins,
+    // 2026-09-06; boztilkiserhan-serhan1-wma-rsi-trailing-scalp, which
+    // re-issues strategy.exit(trail_points = close * 1.5% / mintick,
+    // trail_offset = 0) every bar):
+    //   long 2025-10-24 13:45Z @13.26, exit placed at that bar's close
+    //     13.485 with trail_points 21 (activation 13.47 <= the close):
+    //     14:00Z O 13.485 H 13.55 L 13.41 C 13.545 -> TV 13.49 = the open
+    //     PRINT (nearest tick; the floored open-level 13.48 is what the
+    //     one-shot open-gap shortcut printed, the probe's exitP90 and the
+    //     seed of its all-in equity knock-on); trail_points 23 -> 13.49,
+    //     24 -> 13.50, 26 -> 13.52 (= the entry bar's high: the extreme
+    //     restarts at the issuing close, so the high before the order
+    //     existed does not arm it), 27 -> 13.53: not reached by the
+    //     placement close, the activation fires one-shot where the 14:00Z
+    //     path reaches it;
+    //   long 10-20 19:45Z @11.99, placement close 12.005, trail_points 1
+    //     (activation 12.00 <= close): 10-21 13:30Z O 12.255 H 12.32
+    //     L 12.075 C 12.265 (high-first) -> TV 12.32 = the HIGH: the open
+    //     gaps ABOVE the level, the trail rides O->H and fills on H->L;
+    //     trail_points 5 (activation 12.04 between the close and the open):
+    //     12.32 again — the open ARMS it (observe_exit_trail_open) and it
+    //     rides; trail_points 27 (activation 12.26 vs the raw open 12.255,
+    //     tick-quantized 12.26): 12.26 — the open arming test is RAW, the
+    //     H leg reaches 12.26 and it fires one-shot there;
+    //   short 03-20 19:45Z @10.04, placement close 10.015, trail_points 5
+    //     (activation 9.99): 03-21 13:30Z O 9.915 H 9.98 L 9.86 C 9.975
+    //     (low-first) -> TV 9.86 = the LOW: open-armed, rides O->L, fills
+    //     on L->H (the shortcut printed ceil(9.915) = 9.92);
+    //   short 10-24 19:30Z @13.95, placement close 13.915, trail_points 2 /
+    //     3 (activation 13.93 / 13.92 >= close): 19:45Z O 13.915 -> TV
+    //     13.91 = nearest(13.915), the open breaching the placement-armed
+    //     level is an open PRINT (a directional ceil would print 13.92);
+    //   the NASDAQ:AAPL 04-22 13:30Z 196.135 -> 196.13 pin of
+    //     test_trail_fill_snap (open-armed, low-first bar) still holds: the
+    //     first leg crosses the open-level immediately, a level fill.
+    // The retro-arming defect this shape used to guard against (#148: an
+    // activation refreshed from a newer close dropping under an older,
+    // higher peak) is closed at the source since round 9 family Z: a fresh
+    // or moved trail request restarts trail_best_price_ at the issuing
+    // close (engine_strategy_commands.cpp), so the carried best IS the
+    // placement close on the order's first live bar.
+    if (!std::isnan(s.best_price)) {
         const double tick_best = tick_quantized_price(s.best_price, syminfo_mintick);
         s.trail_active = is_long ? (tick_best >= s.activation_level)
                                  : (tick_best <= s.activation_level);
@@ -809,32 +827,51 @@ bool try_exit_open_gap_fill(const Bar& bar, double tick_open, bool is_long,
     //
     // An EXPLICIT zero-offset trail rides the raw running best once armed
     // (round 10 family AC), so an open BEYOND the best does not gap through
-    // anything — it raises the best to itself. The level that open creates is
-    // the open snapped DIRECTIONALLY to the tick grid (long floor, short
-    // ceil), and the ordinary at-or-through test then runs against THAT
-    // level: an ON-GRID open IS its own level, so it is touched at the open
-    // and fills there whatever the bar's path; a SUB-TICK open sits strictly
-    // beyond the floored / ceiled level, nothing is touched at the open, and
-    // the trail rides the path from best = the raw open. Pinned by 47 `lab
-    // tv` tapes (scratchpad/r10/famAC/pins, pins2, pins4) that separate
-    // perfectly on that one variable and on no other — not the bar's path,
-    // its candle, the gap size, the symbol, nor whether the trail was dormant:
-    //   on-grid  NASDAQ:AAPL 05-12 13:30Z O 211.05 -> 211.05 (not the 211.26
-    //            high the ride booked), 04-08 186.65, 09-03 237.18, 10-31
-    //            276.90, 01-31 247.07; NYSE:F 03-23 13:30Z O 11.89 -> 11.89
-    //   sub-tick NYSE:F 10-21 13:30Z O 12.255 -> the 12.32 high, 09-29 13:30Z
-    //            O 12.075 -> 12.11 (the 12.115 high floored), 03-21 short
-    //            O 9.915 -> the 9.86 low
-    const bool zero_offset_open_is_level =
+    // anything — it raises the best to itself (arming the trail if it was
+    // dormant and the open sits past the activation). TradingView then places
+    // the fresh stop at that open snapped DIRECTIONALLY to the tick grid (long
+    // floor, short ceil) and tests it at once against the open's PRINT — the
+    // nearest tick (tick_quantized_price: floor(open / mintick + 0.5), the
+    // rounding bar_fill_price books and the production tick_open). The print
+    // sits AT the stop exactly when it rounds toward the stop side (long:
+    // print <= open, short: print >= open; an on-grid open is the trivial
+    // case, print == open == stop): the exit fills at the open as a LEVEL
+    // fill (open_is_trail_level, the consumer's directional snap books the
+    // stop = the print). When the print rounds away from the stop it is one
+    // tick beyond it, nothing is touched at the open, and the trail rides the
+    // path from best = the raw open (observe_exit_trail_open). Pinned by 76
+    // `lab tv` tapes (scratchpad/r10/famAC/pins..pins5) that separate on this
+    // one variable and on no other — not the bar's path, its candle, the gap
+    // size, the symbol, the side, nor whether the trail was dormant:
+    //   on-grid   NASDAQ:AAPL 05-12 13:30Z O 211.05 -> 211.05 (not the 211.26
+    //             high the ride booked), armed-before-the-bar 05-16 212.31,
+    //             07-23 215.00, 09-05 239.96; NYSE:F 05-20 10.80, 07-25 11.33,
+    //             03-16 11.84, short 03-31 9.58, 03-12 11.96, 03-23 11.89
+    //   sub-tick, print toward the stop (x / 0.01 fraction below .5 for a
+    //             long, at/above .5 for a short in doubles): long 04-28
+    //             272.335 -> 272.33, 12-19 271.835 -> 271.83; short 04-29
+    //             208.955 -> 208.96, 02-04 227.125 -> 227.13, 03-06 234.445
+    //             -> 234.45, 03-31 217.005 -> 217.01, 05-23 193.665 -> 193.67,
+    //             03-11 221.025 -> 221.03, 04-10 189.945 -> 189.95; NYSE:F
+    //             short 03-06 9.515 -> 9.52, 01-09 14.335 -> 14.34
+    //   sub-tick, print away from the stop: long NYSE:F 10-21 12.255 -> the
+    //             12.32 high, 09-29 12.075 -> 12.11 (the 12.115 high floored),
+    //             AAPL 05-29 203.575 -> 203.78, 07-30 211.895 -> 212.39, 09-25
+    //             253.205 -> 254.32, 08-22 226.185 -> 226.95; short NYSE:F
+    //             03-21 9.915 -> the 9.86 low, 03-13 9.575 -> 9.51
+    const bool zero_offset_open_arms =
         trail.has_trail && trail.zero_offset_rides
-        && price_is_on_tick_grid(bar.open, trail.mintick)
         && (trail.trail_active
-            || (is_long ? bar.open >= trail.activation_level
-                        : bar.open <= trail.activation_level));
+                ? (is_long ? bar.open > trail.best_price : bar.open < trail.best_price)
+                : (is_long ? bar.open >= trail.activation_level
+                           : bar.open <= trail.activation_level));
+    const double open_print = tick_quantized_price(bar.open, trail.mintick);
+    const bool zero_offset_print_at_level =
+        zero_offset_open_arms
+        && (is_long ? open_print <= bar.open : open_print >= bar.open);
     if (is_long) {
         if (!std::isnan(trail_level) && bar.open <= trail_level) return fill_at_open(false);
-        if (zero_offset_open_is_level && (std::isnan(trail.best_price)
-                                          || bar.open > trail.best_price)) {
+        if (zero_offset_print_at_level) {
             return fill_at_open(false, /*trail_level_at_open=*/true);
         }
         if (trail.exits_at_activation && !trail.zero_offset_rides
@@ -845,8 +882,7 @@ bool try_exit_open_gap_fill(const Bar& bar, double tick_open, bool is_long,
         if (has_limit && tick_open >= limit_price) return fill_at_open(true);
     } else {
         if (!std::isnan(trail_level) && bar.open >= trail_level) return fill_at_open(false);
-        if (zero_offset_open_is_level && (std::isnan(trail.best_price)
-                                          || bar.open < trail.best_price)) {
+        if (zero_offset_print_at_level) {
             return fill_at_open(false, /*trail_level_at_open=*/true);
         }
         if (trail.exits_at_activation && !trail.zero_offset_rides
@@ -938,11 +974,16 @@ void update_exit_trail_state(bool is_long, bool rising, bool falling,
 //   NYSE:F 1D long 2025-04-21 @9.47; 04-22 bar O 9.55 H 9.72: TV 9.54,
 //     engine 9.71.
 //
-// Only the OPEN itself arms here -- never the carried best: a one-shot
-// zero-offset trail must not retro-arm from a carried extreme (#148, see
-// compute_exit_trail_state), and an open already past its activation has
-// been filled by try_exit_open_gap_fill before this runs, so for the
-// exit-at-activation shapes this is a pure best-price observation.
+// Only the OPEN itself arms here -- the carried best was folded in by
+// compute_exit_trail_state. An omitted-offset exit-at-activation trail whose
+// open already sits past its activation has been filled by
+// try_exit_open_gap_fill before this runs, so for it this is a pure
+// best-price observation; an explicit zero-offset trail whose open print
+// did not already touch the level it creates (try_exit_open_gap_fill) is
+// ARMED here by such an open (best = open) and rides the path from it
+// (round 10 family AC: NYSE:F 10-21 13:30Z opens 12.255 past a 12.04
+// activation and TV fills at the bar's 12.32 high, 03-21 13:30Z short opens
+// 9.915 past 9.99 and fills at the 9.86 low).
 void observe_exit_trail_open(bool is_long, double open, ExitTrailState* trail) {
     if (!trail->has_trail) return;
     if (is_long) {
