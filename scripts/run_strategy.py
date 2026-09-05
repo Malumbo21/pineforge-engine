@@ -35,6 +35,13 @@ Usage examples
     # from polluting engine_trades.csv in strategies with early signals):
     python scripts/run_strategy.py corpus/basic/greedy \\
         --disable-trading-before-window
+
+With a TradingView tape (inputs.json::tv_trades_csv, default
+strategy_dir/tv_trades.csv) the emit window is TradingView's own: order
+commands are ignored before the chart bar that precedes TV's first entry
+bar (the bar the first entry was placed on), and the trades written are
+those entered inside the tape's span — _tv_entry_emit_window states the
+exact rule.
 """
 from __future__ import annotations
 
@@ -53,6 +60,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # The corpus ships a single committed feed (full-history 1m, Git LFS);
@@ -1805,7 +1813,19 @@ def _load_window_ms(csv_path: Path) -> tuple[int, int]:
 
 
 def _filter_trades_to_window(trades: list[dict], window: tuple[int, int] | None) -> list[dict]:
-    """Keep trades whose entries occur inside the comparison window."""
+    """Keep trades whose entry (fill) time lies inside ``window`` (inclusive).
+
+    main() hands it the REPORT window. With a TV tape in use that is
+    ``[first TV entry - one feed bar interval, last TV entry]`` — the bound
+    trades have always been reported from — and not the wider emit window
+    that gates the engine (_tv_entry_emit_window): the signal bar admitted
+    ahead of a weekend / session gap places the first entry's order, whose
+    fill on TV's first entry bar is reported; a fill on that signal bar
+    itself, which TV did not report, lies before the bound on every gap
+    tape and stays out; on a gapless feed the signal bar is one interval
+    before the first entry and its fills are reported exactly as before.
+    An explicit --emit-window-ohlcv / reference-feed window reports what it
+    gates."""
     if window is None:
         return trades
     start_ms, end_ms = window
@@ -2242,7 +2262,12 @@ def _parse_trade_dt(s: str, tz) -> int:
     return int(datetime.strptime(s, "%Y-%m-%d %H:%M").replace(tzinfo=tz).timestamp() * 1000)
 
 
-def _load_tv_entry_window(strategy_dir: Path, meta: dict, bar_interval_ms: int) -> tuple[int, int] | None:
+def _load_tv_entry_span(strategy_dir: Path, meta: dict) -> tuple[int, int] | None:
+    """TradingView's first and last entry time (UTC ms) on the tape named by
+    ``meta["tv_trades_csv"]`` (tv_trades.csv by default; rows stamped in
+    ``tv_trades_csv_tz``, _tv_tzinfo). None without a tape or without an
+    Entry row — the emit window then falls back to the reference feed's
+    span, as it always has."""
     tv_name = str(meta.get("tv_trades_csv", "tv_trades.csv"))
     tv_path = strategy_dir / tv_name
     if not tv_path.exists():
@@ -2256,7 +2281,140 @@ def _load_tv_entry_window(strategy_dir: Path, meta: dict, bar_interval_ms: int) 
                 entries.append(_parse_trade_dt(row["Date and time"], tz_offset))
     if not entries:
         return None
-    return min(entries) - bar_interval_ms, max(entries)
+    return min(entries), max(entries)
+
+
+def _feed_timestamps(csv_path: Path, *, ohlcv_start_ms: int | None = None,
+                     ohlcv_end_ms: int | None = None) -> list[int]:
+    """The chart feed's bar timestamps as the engine will see them: the CSV's
+    rows inside ``[ohlcv_start_ms, ohlcv_end_ms]`` (either bound optional,
+    both inclusive) in file order — the selection _load_bars makes for the
+    ctypes runner and _trim_ohlcv_csv for the container."""
+    try:
+        import numpy as _np
+    except ImportError:
+        _np = None
+    if _np is not None:
+        import warnings
+        with csv_path.open(newline="", encoding="utf-8") as f:
+            header = f.readline().strip().split(",")
+        with warnings.catch_warnings():
+            # An empty feed: _load_bars already warns once for the run.
+            warnings.filterwarnings("ignore", message="loadtxt: input contained no data")
+            ts = _np.loadtxt(csv_path, delimiter=",", skiprows=1,
+                             usecols=header.index("timestamp"), ndmin=1).astype("<i8")
+        keep = _np.ones(len(ts), dtype=bool)
+        if ohlcv_start_ms is not None:
+            keep &= ts >= int(ohlcv_start_ms)
+        if ohlcv_end_ms is not None:
+            keep &= ts <= int(ohlcv_end_ms)
+        return [int(t) for t in ts[keep]]
+    out: list[int] = []
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            ts_row = int(row["timestamp"])
+            if ohlcv_start_ms is not None and ts_row < int(ohlcv_start_ms):
+                continue
+            if ohlcv_end_ms is not None and ts_row > int(ohlcv_end_ms):
+                continue
+            out.append(ts_row)
+    return out
+
+
+class TvEntryWindow(NamedTuple):
+    """The window a TV tape defines over the loaded chart feed
+    (_tv_entry_emit_window)."""
+    start_ms: int             # emit window start: the engine's trade_start_time + the trace
+    end_ms: int               # TV's last entry
+    report_start_ms: int      # trades are written from here (first entry - one bar interval)
+    first_entry_ms: int       # TV's first entry as stamped on the tape
+    fill_bar_ms: int | None   # the loaded feed bar at/just before it: TV's first fill bar
+    signal_bar_ms: int | None  # the loaded feed bar before that one
+
+
+def _tv_entry_emit_window(feed_ts: list[int], first_entry_ms: int, last_entry_ms: int,
+                          bar_interval_ms: int) -> TvEntryWindow:
+    """The emit window a TV tape defines, walked over the loaded chart feed.
+
+    ``end`` is TV's last entry. ``report_start`` is ``first TV entry -
+    bar_interval_ms`` (the feed's first-row gap, _infer_bar_interval_ms):
+    the bound trades have always been reported from, and the ceiling of
+    ``start``. ``start`` — the engine's ``trade_start_time`` (strategy
+    commands are ignored before it less one script-TF bar:
+    trading_is_active, engine_strategy_commands.cpp) and the trace window —
+    is the loaded feed bar BEFORE the bar at or just before the first TV
+    entry, i.e. the bar the first entry's order was placed on when the fill
+    is the next bar's open, whenever that bar is earlier than
+    ``report_start``; never later (widen-only).
+
+    Why: ``first entry - one bar interval`` assumed the signal bar sits one
+    interval before the fill bar. Across a weekend, a holiday or an
+    overnight session break it does not, and the gate swallowed the
+    strategy.entry TradingView filled on the next session's first bar —
+    every ladder candidate produced 0 trades on six single-entry tapes
+    (round 7, ledger log-20260905t054904z-a9baf07e; signal bar vs the old
+    gate): jos-protrader NQ1@1D 2025-06-26 22:00Z vs 06-27 22:00Z (fill
+    06-29 22:00Z), rakesh NIFTY@1D 11-14 03:45Z vs 11-15 03:45Z, vasanth
+    F@1D 10-03 13:30Z vs 10-04 13:30Z, stockhunter2025 XAUUSD@1D 2026-01-08
+    22:00Z vs 01-09 22:00Z, heneralmomo25 XAUUSD@1D 10-30 21:00Z vs 10-31
+    22:00Z (the DST shift), ayusattv AAPL@15 04-09 19:45Z vs 04-10 13:00Z.
+    Walking the feed the engine is actually fed (after the probe's
+    ohlcv_start_ms / range-end bounds) handles every gap shape by
+    construction, no calendar arithmetic; on a gapless feed the preceding
+    bar IS one interval back and nothing changes.
+
+    Reported trades keep the old bound on purpose: the fill of an order
+    placed on the admitted signal bar lands on TV's first entry bar (at or
+    after ``report_start``) and is written; a fill on the signal bar
+    itself, which TV did not report, lies before ``report_start`` on every
+    gap tape above and stays out; on a gapless feed such a fill was inside
+    the one-interval bound already. Narrowing the bound to TV's first entry
+    bar was rejected: the grader aligns entries inside a one-hour window,
+    so an engine first fill one 15m bar early is a matched pair with an
+    entry-time delta today and would become an unmatched trade instead.
+
+    Degenerate shapes leave today's window untouched: no loaded bar at or
+    before the first entry (an entry earlier than the feed, an empty feed)
+    or a first entry on the feed's first row gives no preceding bar; a feed
+    whose first-row gap is wider than the gap before the first entry (a
+    feed starting on a Friday) keeps the wider legacy start. A first entry
+    past the feed's last bar admits the last two bars, which is harmless:
+    nothing at or after it exists to report."""
+    report_start_ms = first_entry_ms - bar_interval_ms
+    fill_index = -1
+    for index, ts in enumerate(feed_ts):
+        if ts > first_entry_ms:
+            break
+        fill_index = index
+    fill_bar_ms = feed_ts[fill_index] if fill_index >= 0 else None
+    signal_bar_ms = feed_ts[fill_index - 1] if fill_index >= 1 else None
+    start_ms = (report_start_ms if signal_bar_ms is None
+                else min(report_start_ms, signal_bar_ms))
+    return TvEntryWindow(start_ms, last_entry_ms, report_start_ms,
+                         first_entry_ms, fill_bar_ms, signal_bar_ms)
+
+
+def _describe_tv_entry_window(w: TvEntryWindow) -> str:
+    """The one line main() logs for a TV tape's window."""
+    reported = (f"entries reported from {_fmt_utc_ms(w.report_start_ms)} "
+                f"to {_fmt_utc_ms(w.end_ms)}")
+    if w.fill_bar_ms is None:
+        return (f"start {_fmt_utc_ms(w.start_ms)} (TV's first entry "
+                f"{_fmt_utc_ms(w.first_entry_ms)} precedes the loaded feed: "
+                f"unchanged); {reported}")
+    if w.signal_bar_ms is None:
+        return (f"start {_fmt_utc_ms(w.start_ms)} (TV's first entry "
+                f"{_fmt_utc_ms(w.first_entry_ms)} is on the loaded feed's first "
+                f"bar {_fmt_utc_ms(w.fill_bar_ms)}, no earlier bar: unchanged); "
+                f"{reported}")
+    if w.start_ms < w.report_start_ms:
+        return (f"start {_fmt_utc_ms(w.start_ms)} = the feed bar before TV's "
+                f"first entry bar {_fmt_utc_ms(w.fill_bar_ms)} (widened from "
+                f"{_fmt_utc_ms(w.report_start_ms)}: the gap before the first "
+                f"entry exceeds one bar interval); {reported}")
+    return (f"start {_fmt_utc_ms(w.start_ms)} (the feed bar before TV's first "
+            f"entry bar {_fmt_utc_ms(w.fill_bar_ms)} is "
+            f"{_fmt_utc_ms(w.signal_bar_ms)}, not earlier: unchanged); {reported}")
 
 
 def _infer_bar_interval_ms(csv_path: Path) -> int:
@@ -2441,20 +2599,23 @@ def main() -> int:
     ohlcv_path, run_kwargs = inputs_run_kwargs(
         params, strategy_dir, args.ohlcv.resolve(),
         default_chart_tz=args.chart_tz or "")
+    # emit_window gates the engine (trade_start_time) and the trace;
+    # report_window selects the trades written. They differ only for a TV
+    # tape (_tv_entry_emit_window), whose window is set below once the
+    # feed's range-end bound is known.
+    emit_window: tuple[int, int] | None = None
+    report_window: tuple[int, int] | None = None
     tv_window_used = False
+    tv_span: tuple[int, int] | None = None
     if args.no_trim_output:
-        emit_window = None
+        pass
     elif args.emit_window_ohlcv is not None:
-        emit_window = _load_window_ms(args.emit_window_ohlcv.resolve())
+        emit_window = report_window = _load_window_ms(args.emit_window_ohlcv.resolve())
     else:
-        emit_window = _load_tv_entry_window(strategy_dir, params, _infer_bar_interval_ms(ohlcv_path))
-        tv_window_used = emit_window is not None
-        if emit_window is None:
-            emit_window = _load_window_ms(REFERENCE_OHLCV)
-    trade_start_ms = None
-    if emit_window is not None and not args.allow_trading_before_window:
-        if tv_window_used or args.disable_trading_before_window:
-            trade_start_ms = emit_window[0]
+        tv_span = _load_tv_entry_span(strategy_dir, params)
+        tv_window_used = tv_span is not None
+        if tv_span is None:
+            emit_window = report_window = _load_window_ms(REFERENCE_OHLCV)
     # The measurement ENDS where TradingView's range ends
     # (_apply_range_end_regime): the feed is bounded at the bars opening at
     # or before the range's `to` from the tape's metrics.json — never the
@@ -2473,6 +2634,27 @@ def main() -> int:
     # no chart bar is lost.
     if tv_window_used:
         print(f"  range-end: {_apply_range_end_regime(strategy_dir, params, run_kwargs)}")
+        # The measurement STARTS on the feed bar preceding TV's first entry
+        # bar — the bar the first entry's order was placed on — found by
+        # walking the feed the engine is fed (both bounds applied), so a
+        # weekend / holiday / overnight gap before TV's first fill no longer
+        # hides the signal bar behind the gate; never later than the old
+        # ``first entry - one bar interval`` start, from which trades keep
+        # being reported (_tv_entry_emit_window has the rule and the six
+        # round-7 tapes).
+        assert tv_span is not None
+        tv_window = _tv_entry_emit_window(
+            _feed_timestamps(ohlcv_path,
+                             ohlcv_start_ms=run_kwargs.get("ohlcv_start_ms"),
+                             ohlcv_end_ms=run_kwargs.get("ohlcv_end_ms")),
+            tv_span[0], tv_span[1], _infer_bar_interval_ms(ohlcv_path))
+        emit_window = (tv_window.start_ms, tv_window.end_ms)
+        report_window = (tv_window.report_start_ms, tv_window.end_ms)
+        print(f"  emit-window: {_describe_tv_entry_window(tv_window)}")
+    trade_start_ms = None
+    if emit_window is not None and not args.allow_trading_before_window:
+        if tv_window_used or args.disable_trading_before_window:
+            trade_start_ms = emit_window[0]
 
     if args.runner == "docker":
         if args.trace_json is not None:
@@ -2505,7 +2687,7 @@ def main() -> int:
                            trade_start_time_ms=trade_start_ms,
                            **run_kwargs)
     raw_trade_count = len(report["trades"])
-    trades_to_write = _filter_trades_to_window(report["trades"], emit_window)
+    trades_to_write = _filter_trades_to_window(report["trades"], report_window)
     # The trades the verifier grades are the CSV's — run_strategy.py writes
     # no report JSON — and the summary line below counts what was written,
     # the range-end close rows among them.
@@ -2519,6 +2701,7 @@ def main() -> int:
                 "strategy": str(strategy_dir),
                 "ohlcv": str(ohlcv_path),
                 "emit_window": None if emit_window is None else {"start_ms": emit_window[0], "end_ms": emit_window[1]},
+                "report_start_ms": None if report_window is None else report_window[0],
                 "trace_names": report["trace_names"],
                 "trace": trace_to_write,
             }, f)

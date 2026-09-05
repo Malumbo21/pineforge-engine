@@ -208,6 +208,12 @@ add_test(
             ${PROJECT_SOURCE_DIR}/scripts/test_run_strategy_aux_feed.py
 )
 
+add_test(
+    NAME test_run_strategy_emit_window
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_run_strategy_emit_window.py
+)
+
 # When PINEFORGE_ENABLE_COVERAGE is ON we also instrument the test
 # binaries — header-only code (Series, na, color, log, math::pine_random)
 # is otherwise reported as 0% because it's only inlined into test TUs.
