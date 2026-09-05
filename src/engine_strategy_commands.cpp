@@ -550,9 +550,10 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             //      via long_full_margin_after_fill, so its long-only exemption
             //      remains invariant.
             //   2. gap-reject (design-cntvxiao-gap-reject, engine_fills.cpp):
-            //      direction-symmetric — drops a true-flat all-in zero-comm
-            //      entry whose gapped fill notional exceeds equity by >1 lot,
-            //      on EITHER side.
+            //      direction-symmetric — drops a true-flat all-in entry, with
+            //      or without a commission, whose gapped fill notional exceeds
+            //      equity at all (round-7 market-entry-admission pin), on
+            //      EITHER side.
             // The margin term is the direction-appropriate one so a short at
             // margin_short==100 qualifies exactly as a long at margin_long==100.
             const double affordability_margin =

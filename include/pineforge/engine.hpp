@@ -459,9 +459,10 @@ struct PendingOrder {
     // qty*sizing_price*pv*fx <= sizing_equity ONLY for percent-of-equity
     // sizing with pct <= 100, margin <= 100, and sizing_equity > 0 — under
     // that invariant THIS KI-54 gate never declines a flat open no matter how
-    // the bar gaps. (The narrower percent==100 zero-commission true-flat
-    // above-lot gap that TV DOES decline on the FILL notional is handled by a
-    // separate gap-reject carve-out that runs before this admit; see the gate.)
+    // the bar gaps. (The percent==100 true-flat gap whose cost exceeds equity
+    // — commission excluded from the test — that TV DOES decline on the FILL
+    // notional is handled by a separate gap-reject carve-out that runs before
+    // this admit; see the gate.)
     // It fails for CASH default sizing (no equity term), for pct > 100, for
     // margin > 100 (required scales past equity), and on a bankrupt account
     // (apply_qty_step returns qty UNFLOORED for qty <= 0, so |qty|*price ==
@@ -498,7 +499,9 @@ struct PendingOrder {
     //   2. gap-reject (design-cntvxiao-gap-reject, engine_fills.cpp):
     //      direction-symmetric — silently drops the entry at fill when the
     //      frozen-qty notional at the slipped fill price exceeds sizing_equity
-    //      by more than one lot, given zero actual opening commission.
+    //      at all (float guard only), commission EXCLUDED from the test
+    //      (round-7 market-entry-admission pin); a fee-only shortfall still
+    //      fills and takes the KI-61 trim.
     bool opening_affordability_exemption_candidate = false;
     // design-explicit-qty-fill-admission: fill-time TV admission re-check for an
     // EXPLICIT-qty (the caller passed a finite qty) true-flat MARKET entry — the

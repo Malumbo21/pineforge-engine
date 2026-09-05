@@ -3683,9 +3683,10 @@ void BacktestEngine::apply_filled_order_to_state(
     //     at the fill HERE was refuted against TV exports: it drops razor-thin
     //     gap-up entries that exact-count close-then-reenter strategies
     //     demonstrably take. (The one true-flat open TV DOES decline on the
-    //     FILL notional — a percent==100, zero-commission, above-lot gap — is
-    //     handled by the disjoint gap-reject carve-out above, which fires
-    //     before this admit; every OTHER flat open remains undeclinable here.)
+    //     FILL notional — a percent==100 gap whose cost exceeds equity,
+    //     commission excluded from the test — is handled by the disjoint
+    //     gap-reject carve-out above, which fires before this admit; every
+    //     OTHER flat open remains undeclinable here.)
     //   - TRUE REVERSAL (opposite position still open when the order
     //     processes): the FILL price, slipped the way the fill kernel
     //     will book it. Established independently by two from-the-feed
@@ -3871,13 +3872,15 @@ void BacktestEngine::apply_filled_order_to_state(
             std::isfinite(order.sizing_fx) && order.sizing_fx > 0.0
                 ? order.sizing_fx
                 : active_account_currency_fx();
-        // Gap-reject (design-cntvxiao-gap-reject, PANEL-CLEARED): a high-level
-        // strategy.entry with omitted qty, sized percent_of_equity at EXACTLY
-        // 100%, direction-appropriate margin == 100, placed TRUE-FLAT and still
-        // FLAT at THIS fill, carrying zero actual opening commission, is
-        // silently DROPPED (no trade row) when its frozen-qty cost at the
-        // SLIPPED FILL price exceeds the sizing-equity snapshot at all —
-        // exact TV affordability, NO one-lot amnesty:
+        // Gap-reject (design-cntvxiao-gap-reject, PANEL-CLEARED; widened to
+        // commissioned entries by the round-7 family-H market-entry-admission
+        // pin, below): a high-level strategy.entry with omitted qty, sized
+        // percent_of_equity at EXACTLY 100%, direction-appropriate margin ==
+        // 100, placed TRUE-FLAT and still FLAT at THIS fill, is silently
+        // DROPPED (no trade row) when its frozen-qty cost at the SLIPPED FILL
+        // price exceeds the sizing-equity snapshot at all — exact TV
+        // affordability, NO one-lot amnesty, and the opening COMMISSION is
+        // NOT part of the test:
         //
         //   |frozen_default_qty| * slipped_fill * pv * fx * margin/100
         //     >  sizing_equity
@@ -3887,15 +3890,38 @@ void BacktestEngine::apply_filled_order_to_state(
         // true-flat family. It runs BEFORE the KI-54 flat admit below —
         // which prices flat opens at the SIZING notional (undeclinable by the
         // floor invariant) and would let this fill through:
-        //   - positive gap, ZERO opening fee    -> REJECT here       (this rule)
-        //   - positive gap, NONZERO opening fee -> fill, KI-61 entry-bar trim
+        //   - cost > equity (a positive gap), ANY opening fee -> REJECT here
+        //   - cost <= equity < cost + fee (fee-only shortfall) -> fill, then
+        //     the KI-61 entry-bar margin-call trim
         // Evidence: cntvxiao TV 0/556 positive-shortfall gap admissions across
         // BOTH sides (70 short / 62 long); rejected shorts open at a
         // FAVORABLE price, so the reproducing discriminator is NOTIONAL over-
         // equity, not adverse gap sign. ycelestine77: 33/33 true-flat
         // sub-lot-shortfall rejects on open-uptick fill bars (+0.01..+0.32),
         // TV re-admits at the next gate-true close; cntvxiao census 0/556 TV
-        // positive-shortfall admissions. All provenance rides on the
+        // positive-shortfall admissions. Those tapes were commission-free and
+        // this arm used to run ONLY when calc_commission(slipped_fill, qty)
+        // == 0 — a commissioned gap filled and took the KI-61 trim. The
+        // round-7 family-H pin (campaign notes log-20260905t071818z-e57e7235
+        // and log-20260905t071819z-ece9b623; lab tv tapes scratchpad/r7/pins/
+        // macd1d-mktadmit-{f-long,f-short,xau-long}: percent_of_equity 100,
+        // 0.1% commission, an all-in entry every 4th bar on NYSE:F 1D long,
+        // NYSE:F 1D short and OANDA:XAUUSD 1D long, 2025-04-01..2026-05-01,
+        // 206 placements, 0 violations) shows TradingView runs the SAME check
+        // with a commission: floored_qty x tick(fill) <= equity admits and the
+        // fee is EXCLUDED — dropped at +0.008% over equity (761 x 12.11 =
+        // 9215.71 vs 9214.95, F 2025-09-30), filled at -0.005% under (2.93 x
+        // 4110.085 = 12042.55 vs 12043.12, XAUUSD 2025-10-22, then trimmed on
+        // the entry bar because cost + fee > equity); a dropped order is gone
+        // (no partial, no margin call, no later fill) until the entry
+        // condition fires again; qty = floor(equity / (tick(close) x (1 +
+        // comm))) reproduces every TV quantity. The two probes it repairs:
+        // z8830 bb-macd NYSE:F@1D (2025-09-18 signal: 907 x 11.77 = 10675.39
+        // > 10667.80, TV drops, the engine filled and margin-called) and
+        // OANDA:XAUUSD@1D (2025-07-14 fill: 3.00 x 3362.375 = 10087.12 >
+        // 10083.46). test_market_admission_commission replays the tapes on
+        // the registry bars. Only pct == 100 / margin 100 / flat placement is
+        // pinned, which is exactly this branch's scope. All provenance rides on the
         // direction-neutral opening_affordability_exemption_candidate flag (set
         // at placement, engine_strategy_commands.cpp): it already encodes
         // created-true-flat, percent_of_equity==100, direction-appropriate
@@ -3945,17 +3971,15 @@ void BacktestEngine::apply_filled_order_to_state(
             && order.type == OrderType::MARKET) {
             const double slipped_fill =
                 apply_fill_slippage(fill_price, order.is_long);
-            if (calc_commission(slipped_fill, order.frozen_default_qty) == 0.0) {
-                const double gap_notional = std::abs(order.frozen_default_qty)
-                                            * slipped_fill * syminfo_.pointvalue
-                                            * sizing_fx
-                                            * (margin_pct / 100.0);
-                const double float_guard =
-                    std::max(1e-9, std::abs(order.sizing_equity) * 1e-12);
-                if (gap_notional > order.sizing_equity + float_guard) {
-                    decline_and_cancel();
-                    return;
-                }
+            const double gap_notional = std::abs(order.frozen_default_qty)
+                                        * slipped_fill * syminfo_.pointvalue
+                                        * sizing_fx
+                                        * (margin_pct / 100.0);
+            const double float_guard =
+                std::max(1e-9, std::abs(order.sizing_equity) * 1e-12);
+            if (gap_notional > order.sizing_equity + float_guard) {
+                decline_and_cancel();
+                return;
             }
         }
         // A same-direction add (fractional OR all-in) IS gated, against
