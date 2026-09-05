@@ -163,7 +163,12 @@ double Stoch::compute(double src, double high, double low) {
         return na<double>();
     }
 
-    return (src - lo) / range * 100.0;
+    // TradingView: stoch = 100 * (close - lowest) / (highest - lowest) -- the
+    // multiplication FIRST. The round-6 pin-sma-tie2 tape (BINANCE:ETHUSDT.P
+    // 15, 436 stochRSI tie bars) resolves TV's k - d residues under this
+    // order at 364/436 and under (src - lo) / range * 100 at 132/436; the
+    // last-ulp difference is what the chained ta.sma ties are decided on.
+    return 100.0 * (src - lo) / range;
 }
 
 // --- Change ---
@@ -638,7 +643,12 @@ double Stoch::recompute(double src, double high, double low) {
 
     double range = hi - lo;
     if (range == 0.0) return na<double>();  // Pine division by zero (see compute)
-    return (src - lo) / range * 100.0;
+    // TradingView: stoch = 100 * (close - lowest) / (highest - lowest) -- the
+    // multiplication FIRST. The round-6 pin-sma-tie2 tape (BINANCE:ETHUSDT.P
+    // 15, 436 stochRSI tie bars) resolves TV's k - d residues under this
+    // order at 364/436 and under (src - lo) / range * 100 at 132/436; the
+    // last-ulp difference is what the chained ta.sma ties are decided on.
+    return 100.0 * (src - lo) / range;
 }
 
 // --- Change ---

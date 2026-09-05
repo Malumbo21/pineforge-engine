@@ -17,6 +17,145 @@
 #include <vector>
 
 namespace pineforge {
+
+// --- KahanWindowSum (window_sum.hpp): ta.sma / math.sum arithmetic ---
+
+// TradingView's sliding-window sum (ta.sma, math.sum), fitted 2026-09-05 on
+// the round-7 synthetic pins (scratchpad r7/pins/sma-pulse-*, sma-ident-*:
+// OANDA:EURUSD 15, pulse series of known doubles, lengths 3 and 20, three
+// range starts; 14,194 pulse decisions and 31,140 identity checks reproduced
+// bit-for-bit, division by `length` confirmed against multiplication by its
+// reciprocal). The tape facts that pin each piece:
+//
+//   * an all-zero window does NOT read 0: the residue of the values that left
+//     the window persists (1.9e-17, 9e-18, ... over 34 zero bars), so the sum
+//     is RUNNING, not a re-sum of the window;
+//   * the residue changes again exactly n and 2n bars after a pulse, i.e. the
+//     ring subtracts n bars later what Kahan's compensation made the value
+//     ACTUALLY contribute (y = x - c), not the raw value;
+//   * the sub runs before the add on a bar (an add-then-sub ring misses from
+//     bar 5), and a zero addend still folds the compensation (y = -c);
+//   * on the bar whose incoming value swallows the carried compensation
+//     (c != 0 and fl(x - c) == x -- the compensation is below half an ulp of
+//     x), the emitted sum is the newest-first direct re-sum of the window
+//     with c reset (block 63 of both tapes drops an 18-unit / 182-unit
+//     residue to exactly 1.1 there; block 69 reads (0.7 + 0.3) + 0.7000000000000001
+//     = 1.7000000000000002, the oldest-first order gives 1.7).
+//
+// The stochRSI consequence (round-7 family D, jayentriken): k = sma(stoch, 3)
+// and d = sma(k, 3) sit on ALGEBRAIC ties whenever stoch plateaus; TradingView
+// resolves each tie by this arithmetic's residue and ta.crossover fires on its
+// exact sign. The previous exact-order window re-sum (round 6) kept every such
+// tie exact and could never fire; a plain running sum fires on the wrong
+// half. Any other arithmetic is a guess; this one is the pinned rule.
+//
+// Reference (Python, r7/sma/sma-model.py):
+//   c_pre = c
+//   if t >= n: y = -y[t-n] - c; T = S + y; c = (T - S) - y; S = T
+//   y = x - c; T = S + y; c = (T - S) - y; S = T; store y
+//   if c_pre != 0 and (x - c_pre) == x: S = (x + x[1]) + ... + x[n-1]; c = 0
+//   sma = S / n
+
+KahanWindowSum::KahanWindowSum(int length)
+    : length_(length), count_(0), sum_(0.0), comp_(0.0),
+      saved_sum_(0.0), saved_comp_(0.0), saved_count_(0),
+      saved_evicted_value_(na<double>()), saved_evicted_addend_(na<double>()),
+      saved_pushed_(false) {}
+
+void KahanWindowSum::kahan_add(double v) {
+    double y = v - comp_;
+    double t = sum_ + y;
+    comp_ = (t - sum_) - y;
+    sum_ = t;
+}
+
+// The source enters the sum (its evicted predecessor already left), then the
+// swallowed-compensation re-sum. `comp_before` is c as the bar found it --
+// the rule reads the compensation carried INTO the bar, not the one left by
+// the eviction (pinned: the block-63 re-sum happens although the eviction of
+// a zero addend had just folded c to 0).
+void KahanWindowSum::enter(double src, double comp_before) {
+    double y = src - comp_;
+    double t = sum_ + y;
+    comp_ = (t - sum_) - y;
+    sum_ = t;
+    addends_.push_front(y);
+    values_.push_front(src);
+    if (comp_before != 0.0 && (src - comp_before) == src) {
+        double total = 0.0;
+        for (double v : values_) {   // newest first
+            total += v;
+        }
+        sum_ = total;
+        comp_ = 0.0;
+    }
+}
+
+double KahanWindowSum::push(double src) {
+    saved_sum_ = sum_;
+    saved_comp_ = comp_;
+    saved_count_ = count_;
+    saved_pushed_ = true;
+    const double comp_before = comp_;
+    if (count_ >= length_) {
+        // The window is full: the oldest compensated addend leaves before the
+        // new source enters (sub-then-add order, pinned).
+        saved_evicted_value_ = values_.back();
+        saved_evicted_addend_ = addends_.back();
+        values_.pop_back();
+        addends_.pop_back();
+        kahan_add(-saved_evicted_addend_);
+    } else {
+        saved_evicted_value_ = na<double>();
+        saved_evicted_addend_ = na<double>();
+    }
+    enter(src, comp_before);
+    count_++;
+    return sum_;
+}
+
+void KahanWindowSum::note_no_push() {
+    saved_pushed_ = false;
+}
+
+void KahanWindowSum::unpush() {
+    if (!saved_pushed_) return;
+    values_.pop_front();
+    addends_.pop_front();
+    if (!is_na(saved_evicted_addend_)) {
+        values_.push_back(saved_evicted_value_);
+        addends_.push_back(saved_evicted_addend_);
+    }
+    sum_ = saved_sum_;
+    comp_ = saved_comp_;
+    count_ = saved_count_;
+    saved_pushed_ = false;
+}
+
+double KahanWindowSum::repush(double src) {
+    if (!saved_pushed_) {
+        return push(src);
+    }
+    // Rewind to the pre-bar (S, c) and replay the bar with the new source
+    // against the same evicted addend; the ring fronts are overwritten in
+    // place so the window shape is untouched.
+    values_.pop_front();
+    addends_.pop_front();
+    sum_ = saved_sum_;
+    comp_ = saved_comp_;
+    count_ = saved_count_;
+    const double comp_before = comp_;
+    if (!is_na(saved_evicted_addend_)) {
+        kahan_add(-saved_evicted_addend_);
+    }
+    enter(src, comp_before);
+    count_++;
+    return sum_;
+}
+
+} // namespace pineforge
+
+namespace pineforge {
 namespace ta {
 
 // Thread-local so parallel in-process engines never cross-contaminate. Default
@@ -71,45 +210,8 @@ double RMA::compute(double src) {
 
 // --- SMA ---
 
-// Windows at or below this length re-sum the whole buffer every bar instead of
-// carrying an incremental running sum.
-//
-// A running sum (`running_sum += src - popped`) makes ta.sma HISTORY-DEPENDENT
-// to the last ULP: the emitted value at bar N is a function of every value ever
-// accumulated, and the periodic exact re-summation below only re-PHASES that
-// drift rather than removing it. For short chained windows the difference is
-// observable at the signal layer. The stochRSI shape
-//   k = ta.sma(stoch, 3);  d = ta.sma(k, 3)
-// sits on EXACT algebraic ties whenever the source plateaus: with
-// stoch = [a, b, x, a, b] the three k-windows are rotations of one multiset, so
-//   9*(k_t - d_t) = 2*s_t + s_{t-1} - 2*s_{t-3} - s_{t-4} = 0
-// EXACTLY, in infinite precision. ta.crossover/ta.crossunder are strict
-// inequalities, so no correct implementation at any precision may fire there.
-// Running-sum drift breaks those ties at +-1 ULP and manufactures crossings the
-// mathematics forbids, with a sign that depends on the resync phase rather than
-// on the data.
-//
-// Direct re-summation of the window is exact-order deterministic and
-// history-independent: identical windows always produce identical sums, so
-// algebraic ties survive as ties. Bounded to short windows so the per-bar cost
-// stays <= 16 additions instead of O(length); long windows keep the amortised
-// incremental path, where chained-tie geometry does not arise.
-static constexpr int kSmaDirectSumMaxLength = 16;
-
 SMA::SMA(int length)
-    : buffer(length), length(length), bar_count(0), running_sum(0.0) {}
-
-double SMA::recalculate_exact_sum() const {
-    double sum = 0.0;
-    std::size_t sz = buffer.size();
-    for (std::size_t i = 0; i < sz; ++i) {
-        double val = buffer[i];
-        if (!is_na(val)) {
-            sum += val;
-        }
-    }
-    return sum;
-}
+    : window_(length), length(length), bar_count(0) {}
 
 double SMA::compute(double src) {
     if (is_na(src)) {
@@ -117,50 +219,20 @@ double SMA::compute(double src) {
         // valid window. Once `length` valid values have been seen the buffer
         // mean is HELD and re-emitted on every bar including na-input bars;
         // before seeding an na input is still na. State is left untouched.
+        window_.note_no_push();
         if (bar_count >= length) {
-            return running_sum / length;
+            return window_.sum() / length;
         }
         return na<double>();
     }
 
-    double popped = buffer[length - 1];
-    buffer.push_front(src);
+    double sum = window_.push(src);
     bar_count++;
 
     if (bar_count < length) {
-        if (!is_na(src)) {
-            running_sum += src;
-        }
         return na<double>();
     }
-
-    if (bar_count == length) {
-        if (!is_na(src)) {
-            running_sum += src;
-        }
-        running_sum = recalculate_exact_sum();
-        return running_sum / length;
-    }
-
-    if (length <= kSmaDirectSumMaxLength) {
-        // Exact-order, history-independent window sum (see the note above
-        // kSmaDirectSumMaxLength): equal windows must produce equal sums so
-        // algebraic ties in chained short SMAs survive as ties.
-        running_sum = recalculate_exact_sum();
-        return running_sum / length;
-    }
-
-    if (!is_na(popped)) {
-        running_sum -= popped;
-    }
-    running_sum += src;
-
-    // Self-correct precision drift periodically using bitwise AND
-    if ((bar_count & 255) == 0) {
-        running_sum = recalculate_exact_sum();
-    }
-
-    return running_sum / length;
+    return sum / length;
 }
 
 // --- EMA ---
@@ -399,30 +471,19 @@ double SMA::recompute(double src) {
     if (is_na(src)) {
         return na<double>();
     }
-    if (buffer.size() == 0) {
+    if (window_.count() == 0) {
         return compute(src);
     }
 
-    double old_val = buffer[0];
-    buffer.update_front(src);
-
-    if (length <= kSmaDirectSumMaxLength) {
-        // Same exact-order window sum compute() uses, so a recompute()d bar and
-        // a freshly computed one with an identical window agree bit-for-bit.
-        running_sum = recalculate_exact_sum();
-    } else {
-        if (!is_na(old_val)) {
-            running_sum -= old_val;
-        }
-        if (!is_na(src)) {
-            running_sum += src;
-        }
-    }
+    // Replay the bar with the new source: the same evicted addend, the same
+    // pre-bar (sum, compensation), so a recompute()d bar and a freshly
+    // computed one with an identical window agree bit-for-bit.
+    double sum = window_.repush(src);
 
     if (bar_count < length) {
         return na<double>();
     }
-    return running_sum / length;
+    return sum / length;
 }
 
 // --- WMA ---

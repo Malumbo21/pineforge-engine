@@ -1,6 +1,7 @@
 #pragma once
 #include "na.hpp"
 #include "series.hpp"
+#include "window_sum.hpp"
 #include <deque>
 #include <cmath>
 #include <vector>
@@ -221,12 +222,9 @@ public:
 // --- SMA ---
 
 class SMA {
-    DynamicRingBuffer<double> buffer;
+    KahanWindowSum window_;
     int length;
     int bar_count;
-    double running_sum;
-
-    double recalculate_exact_sum() const;
 
 public:
     explicit SMA(int length);
