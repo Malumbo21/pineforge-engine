@@ -229,7 +229,12 @@ public:
     /// bucket when the next input bar opens a new period. RATIO and
     /// PASSTHROUGH ignore the hint, and so do ""/"24x7" sessions (a data
     /// hole before a 24x7 midnight is not an early close), so every caller
-    /// passing 0 and every session-less feed stay bit-identical.
+    /// passing 0 and every session-less feed stay bit-identical. The rule
+    /// applies where TradingView's session template knows the early close
+    /// -- exchange calendars; set_early_close_completes(false) switches a
+    /// symbol whose template does not (OANDA's cfd / forex streams) back to
+    /// the nominal close and the lazy completion on the next period's first
+    /// bar.
     AggregatedBar feed(const Bar& input_bar, int64_t next_input_ms);
 
     /// Current in-progress bar.
@@ -281,6 +286,32 @@ public:
                             CalendarPeriod feed_period);
     bool has_native_periods() const { return !native_stamps_.empty(); }
 
+    /// Whether a session ending BEFORE its nominal close completes the
+    /// running D/W/M bucket on that session's actual last input bar
+    /// (feed(bar, next_input_ms) seeing the next input bar open a new
+    /// period) -- true, the default -- or the bucket waits for the period's
+    /// nominal close (the 16:45 bar reaching 17:00, the last traded
+    /// session-day's close) and, when no input bar reaches it, completes
+    /// lazily on the next period's first bar (false). TradingView finalizes
+    /// on the actual last bar only where its session template carries the
+    /// early close: exchange calendars (stock / futures / index -- NYSE:F's
+    /// 13:00 half-days, CME's 12:00 CT early closes). OTC quote streams have
+    /// no holiday template: on OANDA:XAUUSD 15m (cfd, 1800-1700 ET) the Fri
+    /// 2025-07-04 session ends at the 12:45 ET bar, yet
+    /// request.security(tickerid, "D", x) lookahead_off surfaces that day on
+    /// Sun 07-06 18:00 -- the next session's first bar -- never on the 12:45
+    /// bar; so does the Mon 2026-02-16 day ending 14:15 (on Mon 18:00) and
+    /// the week holding the 07-04 close (lab tv oanda-{jul,julw,feb,febw}
+    /// pin, ledger log-20260905t034240z-30be11fe, 2026-09-05). The engine
+    /// sets it from syminfo.type (BacktestEngine::
+    /// session_template_knows_early_close: false for forex / cfd / crypto).
+    /// Read only by the CALENDAR next-input-bar rule without a native
+    /// partition: ""/"24x7" sessions never reach that rule, the nominal
+    /// rules are untouched, and an installed native period partition
+    /// (set_native_periods) stays authoritative either way.
+    void set_early_close_completes(bool on) { early_close_completes_ = on; }
+    bool early_close_completes() const { return early_close_completes_; }
+
     /// CALENDAR: whether `prev_ms` and `curr_ms` lie in different periods
     /// of this aggregator -- different native periods / W-M groups when
     /// native periods are installed, crosses_boundary on the nominal
@@ -330,6 +361,8 @@ private:
     std::vector<int64_t> native_stamps_;
     std::vector<int64_t> native_group_open_;
     int64_t native_last_bound_ = 0;   // nominal close of the last stamp's period
+    // set_early_close_completes: the next-input-bar completion applies.
+    bool early_close_completes_ = true;
 
     Bar current_bar_{};
     Bar last_completed_bar_{};

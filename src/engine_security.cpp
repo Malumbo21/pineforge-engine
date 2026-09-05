@@ -52,9 +52,20 @@ void BacktestEngine::register_security_eval(int sec_id, const std::string& reque
                     syminfo_.timezone, syminfo_.session);
             }
             // ratio <= 0: passthrough (same or unsupported lower TF)
+            state.aggregator.set_early_close_completes(
+                session_template_knows_early_close());
         }
     }
     security_eval_states_.push_back(std::move(state));
+}
+
+
+bool BacktestEngine::session_template_knows_early_close() const {
+    std::string kind = syminfo_.type;
+    for (char& c : kind) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return kind != "forex" && kind != "cfd" && kind != "crypto";
 }
 
 

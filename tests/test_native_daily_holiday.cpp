@@ -202,6 +202,11 @@ void run_es15(DProbe& probe, const std::vector<Bar>& chart,
               int64_t range_start_ms) {
     probe.set_syminfo_timezone("America/Chicago");
     probe.set_syminfo_session("1700-1600");
+    // CME_MINI:ES1! is an exchange-listed future: TradingView's session
+    // template knows its early closes, so the no-feed control completes a
+    // holiday session on its pause bar (test_oanda_lazy_close pins the OTC
+    // contrast).
+    probe.set_syminfo_type("futures");
     probe.set_syminfo_metadata("security_range_start_na_warmup",
                                static_cast<double>(range_start_ms));
     probe.set_syminfo_metadata("historical_security_lookahead_projection", 1.0);

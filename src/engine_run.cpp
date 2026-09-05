@@ -1412,6 +1412,11 @@ void BacktestEngine::init_security_eval_states_for_run(
             state.aggregator = TimeframeAggregator(state.tf, effective_input_tf,
                 syminfo_.timezone, syminfo_.session);
         }
+        // The symbol kind decides whether a shortened session's last chart
+        // bar completes a D/W/M bucket (exchange calendars) or the period
+        // waits for its nominal close (OTC streams: OANDA cfd / forex).
+        state.aggregator.set_early_close_completes(
+            session_template_knows_early_close());
     }
 }
 

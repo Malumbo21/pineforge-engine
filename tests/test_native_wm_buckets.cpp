@@ -179,9 +179,13 @@ void install_daily(WmProbe& probe, const std::vector<Bar>& daily,
 }
 
 void run15(WmProbe& probe, const std::vector<Bar>& chart, const char* tz,
-           const char* session, int64_t range_start_ms) {
+           const char* session, const char* type, int64_t range_start_ms) {
     probe.set_syminfo_timezone(tz);
     probe.set_syminfo_session(session);
+    // The lane's syminfo.type: an exchange-listed kind, whose TradingView
+    // session template knows the early closes, so a half-day's last chart
+    // bar completes the period (test_oanda_lazy_close pins the OTC case).
+    probe.set_syminfo_type(type);
     // The campaign's historical semantics: TV's deep-backtest range start
     // (KI-55) and the finite-batch lookahead_on projection.
     probe.set_syminfo_metadata("security_range_start_na_warmup",
@@ -248,7 +252,7 @@ void test_f_july_weekly_and_monthly() {
     install_daily(probe, vec(wm_data::kF1DJul));
     // TV's chart range 2025-07-23 .. 2025-08-09: the week of 07-21 and July
     // are already in progress at the range start.
-    run15(probe, vec(wm_data::kF15Jul), "America/New_York", "0930-1600",
+    run15(probe, vec(wm_data::kF15Jul), "America/New_York", "0930-1600", "stock",
           utc_ms(2025, 7, 23));
     CHECK(probe.rows.size() == 338, "338 chart bars");
     CHECK(probe.native_security_misses() == 0, "every bucket found its period");
@@ -323,7 +327,7 @@ void test_f_november_half_day_and_holiday() {
     probe.sites = {{"W", false}, {"W", true}, {"M", false}, {"M", true},
                    {"D", false}};
     install_daily(probe, vec(wm_data::kF1DNov), "1D");
-    run15(probe, vec(wm_data::kF15Nov), "America/New_York", "0930-1600",
+    run15(probe, vec(wm_data::kF15Nov), "America/New_York", "0930-1600", "stock",
           utc_ms(2025, 11, 12));
     CHECK(probe.rows.size() == 430, "430 chart bars");
     CHECK(probe.native_security_misses() == 0, "every bucket found its period");
@@ -392,7 +396,7 @@ void test_es_overnight_session_week() {
     install_daily(probe, vec(wm_data::kEs1DAug));
     // TV's range 2025-08-06 .. 2025-08-16: the week of 08-04 (opened Sun
     // 08-03 17:00 CT) is in progress at the range start.
-    run15(probe, vec(wm_data::kEs15Aug), "America/Chicago", "1700-1600",
+    run15(probe, vec(wm_data::kEs15Aug), "America/Chicago", "1700-1600", "futures",
           utc_ms(2025, 8, 6));
     CHECK(probe.rows.size() == 728, "728 chart bars");
     CHECK(probe.native_security_misses() == 0, "every bucket found its period");
@@ -444,7 +448,7 @@ void test_control_without_native_feed_is_the_intraday_aggregate() {
     WmProbe probe;
     probe.sites = {{"W", false}, {"W", true}, {"D", false}};
     const std::vector<Bar> chart = vec(wm_data::kF15Nov);
-    run15(probe, chart, "America/New_York", "0930-1600", utc_ms(2025, 11, 12));
+    run15(probe, chart, "America/New_York", "0930-1600", "stock", utc_ms(2025, 11, 12));
     CHECK(probe.native_security_substitutions() == 0, "nothing substituted");
     CHECK(probe.native_security_misses() == 0, "nothing missed");
 

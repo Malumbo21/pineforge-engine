@@ -3442,6 +3442,19 @@ public:
     // 5-digit FX symbol under the crypto default computed every pip-scaled
     // stop/target 10x too tight (finding 454). Empty is ignored.
     void set_syminfo_type(const std::string& t) { if (!t.empty()) syminfo_.type = t; }
+    /// Whether TradingView's session template for this symbol carries the
+    /// exchange's early closes and holidays, so a D/W/M request.security
+    /// bucket completes on a shortened session's actual last chart bar
+    /// (TimeframeAggregator::set_early_close_completes): exchange-listed
+    /// kinds (stock, futures, index, fund, dr, ...) yes -- NYSE:F's 12:45 ET
+    /// half-day bar and CME's 11:45 CT early-close bar are pinned; the OTC
+    /// quote streams -- forex, cfd, crypto -- no: their period ends at the
+    /// nominal close and a session ending early completes lazily on the
+    /// next period's first bar (OANDA:XAUUSD 15m, lab tv oanda pin, ledger
+    /// log-20260905t034240z-30be11fe). syminfo.type comes from the harness
+    /// (strategy_set_syminfo_type <- PINEFORGE_VERIFY_SYMTYPE); the
+    /// constructor default "crypto" keeps an untyped run on the lazy rule.
+    bool session_template_knows_early_close() const;
     // Generic string-field injection for the remaining OHLCV-less syminfo
     // members (ticker / tickerid / currency / basecurrency / description /
     // volumetype / type). Unknown keys and empty values are ignored; returns

@@ -1033,7 +1033,9 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
                 input_bar.timestamp, atz, asess, cal_period);
         }
     }
-    if (!complete && !native_periods && next_input_ms > input_bar.timestamp
+    const bool early_close_completes = !s.agg || s.agg->early_close_completes();
+    if (!complete && !native_periods && early_close_completes
+        && next_input_ms > input_bar.timestamp
         && has_trading_session(asess)) {
         // The nominal rules above end a period at its scheduled close and
         // model neither early closes nor exchange holidays: on NYSE:F the
@@ -1048,7 +1050,14 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
         // sessions only -- a data hole before a 24x7 midnight is a hole,
         // not a close, and 24x7 / UTC feeds stay bit-identical -- and the
         // full-session case is unchanged: the nominal rules already fire on
-        // that same bar.
+        // that same bar. Exchange sessions only, where TradingView's own
+        // session template carries the early close: on an OTC quote stream
+        // (set_early_close_completes(false) -- OANDA:XAUUSD, cfd, 1800-1700
+        // ET) the Fri 2025-07-04 data end at 12:45 ET is not a close for
+        // TradingView, which surfaces that D, and the week holding it, on
+        // the next session's first 18:00 bar: the nominal rules above plus
+        // the boundary completion, exactly as before this rule (lab tv
+        // oanda pin, ledger log-20260905t034240z-30be11fe, 2026-09-05).
         complete = crosses_boundary(input_bar.timestamp, next_input_ms,
                                     cal_period, atz, asess);
     }
