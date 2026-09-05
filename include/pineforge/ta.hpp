@@ -77,6 +77,29 @@ bool& ema_na_warmup_flag();
 // answers its own low and never reads the aliased 08:15 slot the plain ring
 // returned. For an every-bar caller the cache is exactly the positional
 // window, so nothing changes there.
+//
+// Never-written slots read 0 in a rescan, for every source kind (pinned
+// 2026-09-04 on BINANCE:BTCUSDT 1D and OANDA:XAUUSD 1D, cadence 13 / length
+// 10: ``low``, ``close - 2000``, ``sma(close, 5)``, ``low[1]``, ``hl2`` and
+// the sign-mixed ``sma(close, 5) - close`` each 13/13). A slot WRITTEN with
+// na POISONS the ring (pinned 2026-09-04 on OANDA:XAUUSD 1D, scratchpad
+// r6/pins/ringkind: leading-na sites 7 x 13/13, the market-logic replica
+// 32/32; and the every-bar NYSE:F 1D gap tape pin-lowest-na-everybar, 20/20;
+// ledger log-20260904t112527z-ea13dfcd): the rescan walks oldest first and a
+// written-na slot resets the running extremum, so the answer is the extremum
+// over the slots NEWER than the newest na slot in the window (never-written
+// 0 slots among them included) and na when the newest slot is itself na; the
+// na write also poisons the cache to ``(na, b)``, so the next valid call
+// restarts from its own src without reading the slots. ``ta.lowest(
+// sma(close, 14), 10)`` at cadence 13 answers na (bar 5 writes na), 2998
+// (bar 18: restart on src, the never-written slot behind it unread), 0, 0,
+// 0, 0 (rescans: never-written slots newer than the na slot), 3357.6 (bar
+// 83: the na slot re-entered at k = 1, src is the only live member), 3327.4
+// (new minimum), 2998, 2998, 2998, 2998 (the stale first valid write, once
+// newer than the na slot), 3112. Every-bar ``x = bar_index % 4 == 0 ? na :
+// low``: ``ta.lowest(x, 5) == ta.highest(x, 5)`` on the bar after every na
+// bar — a single live member — where the old "skip the gap" reading kept
+// the pre-gap extremum (bar 9: TV 9.20, the untouched cache 8.44).
 struct BarContext {
     bool installed = false;
     long long bar_index = 0;   // ring address: the context's current bar index
@@ -105,16 +128,15 @@ public:
         double value;   // na: window not formed yet, or no written non-na member
         int bars_back;  // k of the extremum slot (0 = the current bar)
     };
-    // na_src_answers_na: a direct ta.highest/lowest call answers na on an na
-    // source (pinned 2026-09-04, NYSE:F 1D every-bar ta.lowest over a source
-    // na on every 4th bar: na on exactly those bars, 11/11; OANDA:XAUUSD 15
-    // conditional calls likewise); the composites (Stoch, WPR, Range) keep the
-    // finding-331 oracle instead -- their extrema stay live over the non-na
-    // members -- and construct with false.
-    explicit ExtremeRing(int length, bool na_src_answers_na = true);
+    explicit ExtremeRing(int length);
     // advance = true  -> compute():   records src for the context's current bar
     // advance = false -> recompute(): rewrites the current bar's slot
-    // An na src is recorded as a gap (skipped by the extremum, never a member).
+    // An na src is WRITTEN: it answers na, poisons the cache and, in every
+    // later rescan, resets the running extremum (the poison rule documented
+    // at bar_context()). The composites (Stoch, WPR, Range) share the ring
+    // and the rule: their only oracle (finding 331, a stochRSI whose RSI is
+    // na for its warmup only) is a leading-na series, on which the poison
+    // answers exactly what "live over the non-na members" did.
     // Ties resolve to the OLDEST member (strict comparison, oldest slot first).
     Result update(double src, bool advance, bool want_max);
 
@@ -135,7 +157,6 @@ private:
     bool saved_cached_ = false;
     double saved_cval_ = 0.0;
     long long saved_cbar_ = 0;
-    bool na_src_answers_na_ = true;
 };
 
 class RMA {
@@ -270,7 +291,7 @@ class Highest {
     ExtremeRing ring_;
 
 public:
-    explicit Highest(int length, bool na_src_answers_na = true);
+    explicit Highest(int length);
     double compute(double src);
     double recompute(double src);
 };
@@ -281,7 +302,7 @@ class Lowest {
     ExtremeRing ring_;
 
 public:
-    explicit Lowest(int length, bool na_src_answers_na = true);
+    explicit Lowest(int length);
     double compute(double src);
     double recompute(double src);
 };
@@ -710,7 +731,7 @@ class HighestBars {
     ExtremeRing ring_;
 
 public:
-    explicit HighestBars(int length, bool na_src_answers_na = true);
+    explicit HighestBars(int length);
     double compute(double src);
     double recompute(double src);
 };
@@ -721,7 +742,7 @@ class LowestBars {
     ExtremeRing ring_;
 
 public:
-    explicit LowestBars(int length, bool na_src_answers_na = true);
+    explicit LowestBars(int length);
     double compute(double src);
     double recompute(double src);
 };
@@ -1136,7 +1157,7 @@ class Range {
     Highest highest_;
     Lowest lowest_;
 public:
-    explicit Range(int length) : highest_(length, false), lowest_(length, false) {}
+    explicit Range(int length) : highest_(length), lowest_(length) {}
     double compute(double src);
     double recompute(double src);
 };

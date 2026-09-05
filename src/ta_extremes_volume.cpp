@@ -26,14 +26,18 @@ namespace ta {
 //
 // TradingView's rule (see <pineforge/ta.hpp> bar_context()): a window call site
 // owns K = length + 1 slots addressed by bar_index % K; a call on bar b writes
-// slot[b % K] = src and reads the extremum over the WRITTEN slots (b - k) % K,
-// k in [0, length). Every-bar callers get the positional window (findings
-// 331/332 oracle, KI-55 family): an na input advances the window as a gap, the
-// extremum is taken over the non-na members, na while the window has not
-// formed or has no non-na member. Conditional callers (inside an ``if`` that
-// does not run every bar) keep stale values in the slots they did not rewrite,
-// skip never-written slots, and are na iff bar_index < length - 1 — pinned
-// 2026-09-03 on NYSE:F 1D (cadence-7 39/39, cadence-9 30/30 entry sizes).
+// slot[b % K] = src and reads the extremum over the slots (b - k) % K, k in
+// [0, length). Every-bar callers get the positional window; an na input is
+// written and POISONS the ring: the answer is the extremum over the members
+// newer than the newest na slot (na on the na bar itself), and na while the
+// window has not formed — pinned 2026-09-04 on NYSE:F 1D (every-bar
+// ta.lowest / ta.highest over `bar_index % 4 == 0 ? na : low`, 20/20: equal
+// on the bar after each gap, a single live member). Conditional callers
+// (inside an ``if`` that does not run every bar) keep stale values in the
+// slots they did not rewrite, read never-written slots as 0, and are na iff
+// bar_index < length - 1 — pinned 2026-09-03 on NYSE:F 1D (cadence-7 39/39,
+// cadence-9 30/30 entry sizes) and 2026-09-04 on BTCUSDT / XAUUSD 1D
+// (cadence 13, every source kind 13/13).
 // The slots are read through a cached extremum with an implied bar: a src
 // that strictly beats the cache takes it without reading the slots (aged or
 // not); otherwise an aged-out cache (by bars, not calls) rescans the slots
@@ -73,11 +77,10 @@ inline std::size_t ring_slot(long long bar, long long K) {
 
 }  // namespace
 
-ExtremeRing::ExtremeRing(int length, bool na_src_answers_na)
+ExtremeRing::ExtremeRing(int length)
     : length_(length),
       values_(length > 0 ? static_cast<std::size_t>(length) + 1 : 0, na<double>()),
-      written_(length > 0 ? static_cast<std::size_t>(length) + 1 : 0, 0),
-      na_src_answers_na_(na_src_answers_na) {}
+      written_(length > 0 ? static_cast<std::size_t>(length) + 1 : 0, 0) {}
 
 ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max) {
     Result out{na<double>(), 0};
@@ -122,10 +125,7 @@ ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max)
     const auto rescan = [&]() {
         // Oldest slot first with a strict comparison: ties resolve to the
         // oldest member, exactly as the deque scan did (only the *Bars
-        // offsets can tell). Never-written slots are skipped, not zero: the
-        // campaign grades against UI-scraped tapes whose chart carried
-        // pre-range writes (TradingView's deep-backtest export reads them
-        // as 0 -- a documented, deliberate deviation).
+        // offsets can tell).
         double best = na<double>();
         int best_k = 0;
         for (int k = length_ - 1; k >= 0; --k) {
@@ -134,13 +134,31 @@ ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max)
             // 1D (`if bar_index % 13 == 5: v = ta.lowest(low, 10)`: every call
             // answers 0 while the window holds never-written slots; the same
             // cadence's ta.highest(-close, 10) answers 0 too, ta.highest(high,
-            // 10) is unaffected). Every scraped tape in the population is a
-            // deep-backtest export that starts cold at the range start, so
-            // this is the rule the campaign grades against (the round-5
-            // "skip" reading was wrong: shiroi-qqe's stops on five 1D lanes
-            // are TV's SL = 0 from exactly these reads).
+            // 10) is unaffected) and re-pinned on OANDA:XAUUSD 1D for every
+            // source kind (low, close - 2000, sma(close, 5), low[1], hl2, the
+            // sign-mixed sma(close, 5) - close: 13/13 each). Every scraped
+            // tape in the population is a deep-backtest export that starts
+            // cold at the range start, so this is the rule the campaign
+            // grades against (the round-5 "skip" reading was wrong:
+            // shiroi-qqe's stops on five 1D lanes are TV's SL = 0 from
+            // exactly these reads).
             const double v = written_[i] ? values_[i] : 0.0;
-            if (is_na(v)) continue;              // written gap: skipped
+            if (is_na(v)) {
+                // A slot WRITTEN with na poisons the running extremum; the
+                // next (newer) slot restarts it -- so the answer is the
+                // extremum over the slots newer than the newest na slot in
+                // the window, never-written 0s among them included, and na
+                // when the newest slot is itself na (pinned 2026-09-04 on
+                // OANDA:XAUUSD 1D: `ta.lowest(sma(close, 14), 10)` at cadence
+                // 13 answers 0 on bars 31..70 -- never-written slots newer
+                // than bar 5's na -- 3357.6 = src on bar 83 when the na slot
+                // sits at k = 1, and 2998 on bars 109..148, the stale bar-18
+                // write once it is newer than the na slot; leading-na sites
+                // 7 x 13/13, the market-logic osc replica 32/32).
+                best = na<double>();
+                best_k = k;
+                continue;
+            }
             if (is_na(best) || (want_max ? v > best : v < best)) {
                 best = v;
                 best_k = k;
@@ -149,27 +167,30 @@ ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max)
         cval_ = best;
         cbar_ = bar - best_k;    // the implied bar of an aliased slot
     };
-    if (is_na(src) && cached_ && na_src_answers_na_) {
-        // An na source answers na and leaves the cache alone (pinned
-        // 2026-09-04 on OANDA:XAUUSD 15: a `ta.lowest(na, 10)` call between
-        // two valid calls answers na and the next valid call continues from
-        // the previous cache); the slot keeps its written na, which later
-        // rescans skip.
-        if (bar - origin < static_cast<long long>(length_) - 1) return out;
-        return out;
-    }
-    if (!cached_) {
+    if (!cached_ || is_na(src)) {
+        // The first call caches (src, b). An na src does the same on every
+        // call: the na write POISONS the cache -- (na, b) -- so the call
+        // answers na and the next valid call restarts from its own src
+        // below, whatever the cache held and however young it was (pinned
+        // 2026-09-04 on NYSE:F 1D, every-bar `x = bar_index % 4 == 0 ? na :
+        // low`: ta.lowest(x, 5) == ta.highest(x, 5) on the bar after each na
+        // bar, 20/20 -- bar 9 answers 9.20, its own low, where the untouched
+        // 3-bar-old cache would have said 8.44; and on OANDA:XAUUSD 15 the
+        // inserted `ta.lowest(na, 10)` calls answer na, 34/34).
         cached_ = true;
         cval_ = src;
         cbar_ = bar;
-    } else if (!is_na(src) && (is_na(cval_) || (want_max ? src > cval_ : src < cval_))) {
+    } else if (is_na(cval_) || (want_max ? src > cval_ : src < cval_)) {
         // A strictly new extremum takes the cache without reading the slots,
-        // aged-out cache or not (ETH bar 4990). Ties never displace it.
+        // aged-out cache or not (ETH bar 4990). Ties never displace it. A
+        // poisoned (na) cache is taken by any valid src -- the restart: bar
+        // 18 of the sma(close, 14) site answers 2998, its own src, although
+        // the never-written slot one behind it would read 0 in a rescan.
         cval_ = src;
         cbar_ = bar;
     } else if (bar - cbar_ >= static_cast<long long>(length_)) {
         // The cached extremum has aged out of the window (by bars, not
-        // calls): rescan the slots, aliasing included.
+        // calls): rescan the slots, aliasing and poison included.
         rescan();
     }
     // else: the cache is younger than `length` bars and src did not beat it.
@@ -184,8 +205,7 @@ ExtremeRing::Result ExtremeRing::update(double src, bool advance, bool want_max)
 
 // --- Highest ---
 
-Highest::Highest(int length, bool na_src_answers_na)
-    : ring_(length, na_src_answers_na) {}
+Highest::Highest(int length) : ring_(length) {}
 
 double Highest::compute(double src) {
     return ring_.update(src, /*advance=*/true, /*want_max=*/true).value;
@@ -197,8 +217,7 @@ double Highest::recompute(double src) {
 
 // --- Lowest ---
 
-Lowest::Lowest(int length, bool na_src_answers_na)
-    : ring_(length, na_src_answers_na) {}
+Lowest::Lowest(int length) : ring_(length) {}
 
 double Lowest::compute(double src) {
     return ring_.update(src, /*advance=*/true, /*want_max=*/false).value;
@@ -395,9 +414,12 @@ double Median::compute(double src) {
 // --- HighestBars ---
 // Same ring as Highest; the result is the slot distance k of the extremum
 // (0 = the current bar, negative offsets as TV reports them). An na input is
-// recorded as a positional gap and answers na on that bar.
+// written (it poisons the ring) and answers na on that bar; afterwards the
+// offset is the bars-since of the extremum among the non-poisoned members --
+// 0 on the restart bar, the rescan's k (a never-written 0 slot included)
+// once the cache has aged.
 
-HighestBars::HighestBars(int length, bool na_src_answers_na) : ring_(length, na_src_answers_na) {}
+HighestBars::HighestBars(int length) : ring_(length) {}
 
 double HighestBars::compute(double src) {
     const ExtremeRing::Result r = ring_.update(src, /*advance=*/true, /*want_max=*/true);
@@ -413,7 +435,7 @@ double HighestBars::recompute(double src) {
 
 // --- LowestBars ---
 
-LowestBars::LowestBars(int length, bool na_src_answers_na) : ring_(length, na_src_answers_na) {}
+LowestBars::LowestBars(int length) : ring_(length) {}
 
 double LowestBars::compute(double src) {
     const ExtremeRing::Result r = ring_.update(src, /*advance=*/true, /*want_max=*/false);

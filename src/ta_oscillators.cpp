@@ -131,7 +131,7 @@ bool Crossunder::compute(double a, double b) {
 // --- Stoch ---
 
 Stoch::Stoch(int length)
-    : highest(length, /*na_src_answers_na=*/false), lowest(length, /*na_src_answers_na=*/false) {}
+    : highest(length), lowest(length) {}
 
 double Stoch::compute(double src, double high, double low) {
     double hi = highest.compute(high);
@@ -541,7 +541,7 @@ double TSI::compute(double src) {
 // WPR (Williams %R)
 // ============================================================================
 
-WPR::WPR(int length) : highest_(length, false), lowest_(length, false) {}
+WPR::WPR(int length) : highest_(length), lowest_(length) {}
 
 double WPR::compute(double close, double high, double low) {
     double hh = highest_.compute(high);
