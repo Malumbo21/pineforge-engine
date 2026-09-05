@@ -2413,7 +2413,12 @@ protected:
     // --- request.security state ---
     struct HistoricalSecurityProjection {
         Bar bar{};
-        std::size_t first_child_index = 0;
+        // The instant the projection is dispatched on: the first retained
+        // chart child's timestamp on the single-feed path, that child's first
+        // auxiliary bar on the split-feed path (the requested-context
+        // evaluator is fed the finer slice there). Keyed by instant, not by
+        // feed-call index, so both paths consume one projection per bucket.
+        int64_t first_child_ms = 0;
         bool is_complete = false;
     };
 
@@ -2603,7 +2608,9 @@ protected:
         // bucket's first child.
         std::vector<HistoricalSecurityProjection> historical_projections;
         std::size_t historical_projection_cursor = 0;
-        std::size_t historical_projection_feed_index = 0;
+        // Which projection (cursor) has already been dispatched: every later
+        // input of the same bucket is a no-op for the evaluator.
+        bool historical_projection_dispatched = false;
         // Native higher-timeframe feed routing, rebuilt per run by
         // prepare_native_security_feeds(): the index into
         // native_security_feeds_ serving this state's requested timeframe
