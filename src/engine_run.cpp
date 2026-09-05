@@ -1342,6 +1342,12 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
 
     validate_security_timeframes(security_input_tf_);
 
+    // The run's first chart bar: the default range-start cut of every
+    // coarser-than-chart / chart-timeframe request.security aggregation
+    // (security_input_precedes_range_start). Cleared with the run so the
+    // stream path and a later run start from their own first bar.
+    security_first_chart_bar_ms_ = (n_input > 0) ? input_bars[0].timestamp : 0;
+
     init_security_eval_states_for_run(security_input_tf_);
     prepare_native_security_feeds(input_bars, n_input);
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
@@ -1552,7 +1558,8 @@ void BacktestEngine::prepare_historical_security_lookahead_projections(
             return input_bars[child].timestamp;
         };
         int projection_begin = 0;
-        if (security_range_start_na_warmup_) {
+        if (security_range_start_na_warmup_
+            || (security_first_chart_bar_ms_ > 0 && aux_security_feed_enabled())) {
             while (projection_begin < n_input
                     && security_input_precedes_range_start(
                            state, child_instant_ms(projection_begin))) {

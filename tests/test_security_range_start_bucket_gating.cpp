@@ -22,6 +22,21 @@
 // and D, Monday for W, the 1st for M — the cut is the plain timestamp cut, so
 // the existing corpus pins (test_security_range_start_na_warmup) hold.
 //
+// Since round 8 (family P) the bucket-open cut is also the engine's DEFAULT on
+// split-feed runs, keyed on the run's first chart bar and on whether the
+// auxiliary 1m feed traded between the bucket's nominal open and that bar
+// (TradingView dates a bar by its first traded bar: an NSE week whose Monday
+// was a holiday opens on Tuesday and is kept; lab tv famp-sense-*,
+// 2026-09-05). Single-feed runs keep their feed-start series (flag-off case
+// below, unchanged); the split-feed cases follow it.
+//
+// Since round 8 (family P) the same bucket-open cut is the engine's DEFAULT
+// for every coarser-than-chart and chart-timeframe evaluator, keyed on the
+// run's first chart bar (security_first_chart_bar_ms_): TradingView applies
+// it on every lane, exchange or OTC, 15m or 1D (lab tv famp-sense-*,
+// 2026-09-05). The flag keeps its explicit epoch and the EMA na-warmup.
+//
+//
 // It FAILS without the fix: the timestamp cut keeps the straddling remainder
 // as HTF bar 1, so every "first completed bucket" assertion below reports the
 // pre-range bucket's open instead.
@@ -336,6 +351,207 @@ static void test_intraday_mid_bucket_range_start_drops_whole_bucket() {
                 (failures > before) ? "FAIL" : "ok");
 }
 
+// ─── Default cut on the split feed (round 8, family P) ───────────────────────
+
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+#include <pineforge/pineforge.h>
+
+// Three lookahead_off evaluators registered at run time (the split feed
+// re-inits them on the auxiliary input tf); records every completed HTF bar's
+// label per id.
+class SplitGateHarness : public BacktestEngine {
+public:
+    std::vector<int64_t> completed[3];
+    std::string tfs[3];
+    SplitGateHarness(const char* tf0, const char* tf1, const char* tf2) {
+        tfs[0] = tf0; tfs[1] = tf1; tfs[2] = tf2;
+    }
+    void configure_security_evaluators() override {
+        security_eval_states_.clear();
+        for (int i = 0; i < 3; ++i) register_security_eval(i, tfs[i], input_tf_, false, false);
+    }
+    void evaluate_security(int sec_id, const Bar& bar, bool is_complete) override {
+        if (!is_complete || sec_id < 0 || sec_id > 2) return;
+        completed[sec_id].push_back(bar.timestamp);
+    }
+    void on_bar(const Bar&) override {}
+};
+
+// Session-shaped bars every `step_ms` from `begin` to `end`: `open_at` says
+// whether a local instant trades (wday 0 = Sunday, hour/minute local).
+template <typename OpenAt>
+static std::vector<Bar> session_bars(int64_t begin, int64_t end, int64_t step_ms,
+                                     int utc_offset_hours, OpenAt open_at) {
+    std::vector<Bar> bars;
+    for (int64_t t = begin; t < end; t += step_ms) {
+        const int64_t local = t + static_cast<int64_t>(utc_offset_hours) * 3'600'000;
+        const int64_t day = local / 86'400'000;
+        const int wday = static_cast<int>((day + 4) % 7);
+        const int minute_of_day = static_cast<int>((local % 86'400'000) / 60'000);
+        if (!open_at(wday, minute_of_day)) continue;
+        const double px = 100.0 + static_cast<double>(bars.size() % 50) * 0.25;
+        bars.push_back(Bar{px, px, px, px, 1.0, t});
+    }
+    return bars;
+}
+
+// CME_MINI:ES1! (America/Chicago 1700-1600, CDT): Sun 17:00 .. Fri 16:00 with
+// the 16:00-17:00 break.
+static bool cme_open(int wday, int minute) {
+    const int hour = minute / 60;
+    if (hour == 16) return false;
+    if (wday == 6) return false;
+    if (wday == 5 && hour >= 16) return false;
+    if (wday == 0 && hour < 17) return false;
+    return true;
+}
+// NSE:NIFTY (Asia/Kolkata 0915-1530): Mon .. Fri 09:15-15:30.
+static bool nse_open(int wday, int minute) {
+    if (wday == 0 || wday == 6) return false;
+    return minute >= 9 * 60 + 15 && minute < 15 * 60 + 30;
+}
+// OANDA:XAUUSD (America/New_York 1800-1700, EDT): Sun 18:00 .. Fri 17:00 with
+// the 17:00-18:00 break.
+static bool oanda_open(int wday, int minute) {
+    const int hour = minute / 60;
+    if (hour == 17) return false;
+    if (wday == 6) return false;
+    if (wday == 5 && hour >= 17) return false;
+    if (wday == 0 && hour < 18) return false;
+    return true;
+}
+
+static void run_split(SplitGateHarness& h, const std::vector<Bar>& chart,
+                      const std::vector<Bar>& aux, const char* chart_tf,
+                      const char* tz, const char* session, const char* type) {
+    strategy_set_syminfo_timezone(static_cast<pf_strategy_t>(&h), tz);
+    strategy_set_syminfo_session(static_cast<pf_strategy_t>(&h), session);
+    strategy_set_syminfo_type(static_cast<pf_strategy_t>(&h), type);
+    CHECK(strategy_set_aux_security_feed(static_cast<pf_strategy_t>(&h),
+                                         reinterpret_cast<const pf_bar_t*>(aux.data()),
+                                         static_cast<int>(aux.size()), "1") == 0,
+          "auxiliary feed installed");
+    h.run(chart.data(), static_cast<int>(chart.size()), chart_tf, chart_tf, false, 4,
+          MagnifierDistribution::ENDPOINTS);
+    CHECK(h.last_error().empty(), "split-feed run succeeds");
+    if (!h.last_error().empty()) std::printf("   engine error: %s\n", h.last_error().c_str());
+}
+
+// ES-shaped 15m chart from the deep-backtest range start Tue 2025-04-01
+// 00:00Z (19:00 CDT Monday, inside the 04-01 trade date that opened Mon 03-31
+// 17:00 CDT) with the 1m feed from Sun 03-30 17:00 CDT. TradingView (lab tv
+// famp-sense-es15full / nq15full): "60" keeps the 00:00Z hour, "240" starts
+// at 02:00Z (the 22:00Z bucket of 03-31 is absent), "D" starts at the 04-02
+// trade date (04-01 22:00Z; the first non-na highest(20)[1] is the 05-01
+// 20:45Z bar), "W" at the week opening Sun 04-06 17:00 CDT (first non-na
+// 08-29 20:45Z).
+static void test_default_cut_cme_15m_range_start() {
+    int before = failures;
+    const auto chart = session_bars(utc_ms(2025, 4, 1, 0, 0), utc_ms(2025, 4, 18, 21, 0),
+                                    900'000, -5, cme_open);
+    const auto aux = session_bars(utc_ms(2025, 3, 30, 22, 0), utc_ms(2025, 4, 18, 21, 0),
+                                  60'000, -5, cme_open);
+    {
+        SplitGateHarness h("60", "240", "D");
+        run_split(h, chart, aux, "15", "America/Chicago", "1700-1600", "futures");
+        CHECK(!h.completed[0].empty(), "60 completed");
+        if (!h.completed[0].empty())
+            CHECK_EQ_MS(h.completed[0].front(), utc_ms(2025, 4, 1, 0, 0),
+                        "60: the 00:00Z hour opens on the first chart bar and is kept");
+        CHECK(!h.completed[1].empty(), "240 completed");
+        if (!h.completed[1].empty())
+            CHECK_EQ_MS(h.completed[1].front(), utc_ms(2025, 4, 1, 2, 0),
+                        "240: the 22:00Z bucket in progress at the range start is absent");
+        CHECK(!h.completed[2].empty(), "D completed");
+        if (!h.completed[2].empty()) {
+            CHECK_EQ_MS(h.completed[2].front(), utc_ms(2025, 4, 1, 22, 0),
+                        "D: the 04-01 trade date in progress at the range start is absent");
+            if (h.completed[2].size() >= 2)
+                CHECK_EQ_MS(h.completed[2][1], utc_ms(2025, 4, 2, 22, 0), "D: the 04-03 trade date follows");
+        }
+    }
+    {
+        SplitGateHarness h("W", "W", "W");
+        run_split(h, chart, aux, "15", "America/Chicago", "1700-1600", "futures");
+        CHECK(!h.completed[0].empty(), "W completed");
+        if (!h.completed[0].empty())
+            CHECK_EQ_MS(h.completed[0].front(), utc_ms(2025, 4, 6, 22, 0),
+                        "W: the week that opened Sun 03-30 is absent; bar 0 opens Sun 04-06 17:00 CDT");
+    }
+    std::printf("test_default_cut_cme_15m_range_start: %s\n", (failures > before) ? "FAIL" : "ok");
+}
+
+// NSE:NIFTY 15m from Tue 2025-04-01 09:15 IST: Monday 03-31 was a holiday,
+// so the week's first traded bar IS the range start and TradingView keeps it
+// (famp-sense-nifty15full: "W" first non-na 08-22 09:45Z, the same bar as the
+// engine before this cut). The same chart with a 1m feed that traded on
+// Monday drops the week (TradingView's NYSE:F 15m: 08-29).
+static void test_default_cut_nse_holiday_monday_keeps_the_week() {
+    int before = failures;
+    const auto chart = session_bars(utc_ms(2025, 4, 1, 3, 45), utc_ms(2025, 4, 25, 10, 0),
+                                    900'000, 5, nse_open);
+    {
+        // The 1m feed also begins on Tuesday: nothing traded on the holiday.
+        const auto aux = session_bars(utc_ms(2025, 4, 1, 3, 45), utc_ms(2025, 4, 25, 10, 0),
+                                      60'000, 5, nse_open);
+        SplitGateHarness h("W", "D", "60");
+        run_split(h, chart, aux, "15", "Asia/Kolkata", "0915-1530", "index");
+        CHECK(!h.completed[0].empty(), "W completed (holiday Monday)");
+        if (!h.completed[0].empty())
+            CHECK_EQ_MS(h.completed[0].front(), utc_ms(2025, 4, 1, 3, 45),
+                        "W: the week opening on the holiday's Tuesday is the range start's own and is kept");
+        CHECK(!h.completed[1].empty(), "D completed");
+        if (!h.completed[1].empty())
+            CHECK_EQ_MS(h.completed[1].front(), utc_ms(2025, 4, 1, 3, 45), "D: 04-01 is day 0");
+    }
+    {
+        // Control: the 1m feed traded on Monday 03-31 -> the week was in
+        // progress at the range start and is absent.
+        auto monday_open = [](int wday, int minute) { return nse_open(wday, minute); };
+        const auto aux = session_bars(utc_ms(2025, 3, 31, 3, 45), utc_ms(2025, 4, 25, 10, 0),
+                                      60'000, 5, monday_open);
+        SplitGateHarness h("W", "D", "60");
+        run_split(h, chart, aux, "15", "Asia/Kolkata", "0915-1530", "index");
+        CHECK(!h.completed[0].empty(), "W completed (traded Monday)");
+        if (!h.completed[0].empty())
+            CHECK_EQ_MS(h.completed[0].front(), utc_ms(2025, 4, 7, 3, 45),
+                        "W: a week that traded before the range start is absent; bar 0 is Mon 04-07");
+    }
+    std::printf("test_default_cut_nse_holiday_monday_keeps_the_week: %s\n", (failures > before) ? "FAIL" : "ok");
+}
+
+// OANDA:XAUUSD 1D chart from the 04-01 21:00Z bar (the 04-02 session; the
+// range start 04-01 00:00Z drops the 03-31-stamped bar from the chart itself)
+// with the 1m feed from Sun 03-30 22:00Z: the week that opened Sun 03-30
+// 17:00 EDT traded and is absent, "W" bar 0 opens Sun 04-06 (famp-sense-xau1d:
+// first non-na 08-28 21:00Z), while "D" -- the chart's own timeframe -- keeps
+// its first bar.
+static void test_default_cut_oanda_1d_weekly() {
+    int before = failures;
+    std::vector<Bar> chart;
+    for (int64_t t = utc_ms(2025, 4, 1, 21, 0); t < utc_ms(2025, 5, 3, 0, 0); t += 86'400'000) {
+        const int64_t day = (t + 0) / 86'400'000;
+        const int wday = static_cast<int>((day + 4) % 7);           // stamp's UTC weekday
+        if (wday == 5 || wday == 6) continue;                      // no Fri/Sat-stamped sessions
+        const double px = 3000.0 + static_cast<double>(chart.size());
+        chart.push_back(Bar{px, px, px, px, 1.0, t});
+    }
+    const auto aux = session_bars(utc_ms(2025, 3, 30, 22, 0), utc_ms(2025, 5, 2, 21, 0),
+                                  60'000, -4, oanda_open);
+    SplitGateHarness h("W", "D", "240");
+    run_split(h, chart, aux, "1D", "America/New_York", "1800-1700", "cfd");
+    CHECK(!h.completed[0].empty(), "W completed on the 1D chart");
+    if (!h.completed[0].empty())
+        CHECK_EQ_MS(h.completed[0].front(), utc_ms(2025, 4, 6, 21, 0),
+                    "W: the week that opened Sun 03-30 17:00 EDT is absent; bar 0 is the Sun 04-06 stamp");
+    CHECK(!h.completed[1].empty(), "D completed on the 1D chart");
+    if (!h.completed[1].empty())
+        CHECK_EQ_MS(h.completed[1].front(), utc_ms(2025, 4, 1, 21, 0),
+                    "D: the chart's own first bar is kept");
+    std::printf("test_default_cut_oanda_1d_weekly: %s\n", (failures > before) ? "FAIL" : "ok");
+}
+#endif
+
 int main() {
     test_bucket_open_utc_grid();
     test_bucket_open_forex_session();
@@ -344,6 +560,11 @@ int main() {
     test_utc_grid_aligned_range_start_is_timestamp_cut();
     test_utc_straddling_buckets_are_dropped();
     test_intraday_mid_bucket_range_start_drops_whole_bucket();
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+    test_default_cut_cme_15m_range_start();
+    test_default_cut_nse_holiday_monday_keeps_the_week();
+    test_default_cut_oanda_1d_weekly();
+#endif
     if (failures) {
         std::printf("%d check(s) FAILED\n", failures);
         return 1;

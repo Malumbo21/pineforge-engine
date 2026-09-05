@@ -1239,6 +1239,28 @@ protected:
     // lookahead projection builder.
     bool security_range_start_na_warmup_ = false;
     int64_t security_range_start_ms_ = 0;
+    // The run's first chart bar (0 outside a run). Without the flag above
+    // this is the default cut for every coarser-than-chart and chart-
+    // timeframe request.security aggregation: TradingView's deep-backtest
+    // series of a timeframe hold the bars of that timeframe whose OPEN lies
+    // at or after the range start, and the bucket in progress at the range
+    // start is absent -- on every lane (round 8, family P: masayanfx
+    // multi-time-score; lab tv famp-sense-{es15full,nq15full,f15full,
+    // nifty15full,nifty1d,xau1d,xau15,eur15,eth15,btc1d}, 2026-09-05: "D"
+    // on CME_MINI:ES1! 15m first reads on the 05-01 20:45Z bar (bucket 0 is
+    // the 04-02 trade date; the 04-01 date opened 03-31 22:00Z before the
+    // 04-01 00:00Z range start), "240" on 04-04 13:45Z (the 22:00Z bucket
+    // dropped), "W" on the 08-29 / 08-28 bar on every 15m and 1D lane (the
+    // Mon 03-31 week dropped), while "60" on a 00:00Z start and "D" on the
+    // NYSE / NSE lanes (the chart's first bar IS the session open) keep
+    // their first bucket). Whether the bucket was in progress is read from
+    // the auxiliary 1m feed (did it trade between the bucket's nominal open
+    // and the first chart bar? the NSE week whose Monday was a holiday opens
+    // on Tuesday and is kept), so only split-feed runs apply the cut; a
+    // single-feed run keeps its feed-start series. Lower-TF evaluators are
+    // untouched (their slices begin at the first chart bar anyway), and the
+    // flag above keeps its explicit epoch plus the EMA na-warmup semantics.
+    int64_t security_first_chart_bar_ms_ = 0;
     // Timestamp of the input bar that FOLLOWS the one being fed to the
     // request.security evaluators; 0 = unknown (streams, the feed's last
     // bar). A historical run holds its whole feed, and the calendar
@@ -2910,13 +2932,22 @@ protected:
     void dispatch_security_eval(SecurityEvalState& state, const Bar& bar,
                                 bool publish, int64_t bar_index);
     // KI-55 range-start gate for one evaluator: true when the input bar at
-    // `input_ts` belongs to an HTF bucket that opened before
-    // security_range_start_ms_ (always false while the flag is off). The
+    // `input_ts` belongs to an HTF bucket that opened before the cut --
+    // security_range_start_ms_ under the flag, else the run's first chart
+    // bar for a coarser-than-chart / chart-timeframe evaluator
+    // (security_first_chart_bar_ms_, split-feed runs, the auxiliary feed
+    // proving the bucket traded before it; false for lower-TF evaluators). The
     // progressive feed and the historical lookahead projection builder must
     // agree on this predicate so projected child indexes line up with the
     // per-state feed cursor.
     bool security_input_precedes_range_start(const SecurityEvalState& state,
                                              int64_t input_ts) const;
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+    // True when the auxiliary request.security feed holds a bar in
+    // [from_ms, to_ms): the evidence that an HTF bucket whose nominal open
+    // precedes the run's first chart bar was in progress at the range start.
+    bool aux_security_traded_between(int64_t from_ms, int64_t to_ms) const;
+#endif
     void feed_security_eval_state(
         SecurityEvalState& state, const Bar& input_bar,
         bool calling_bar_complete = false);

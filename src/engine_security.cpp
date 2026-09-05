@@ -362,23 +362,75 @@ void BacktestEngine::publish_security_eval_state_at_calling_boundary(
 
 bool BacktestEngine::security_input_precedes_range_start(
         const SecurityEvalState& state, int64_t input_ts) const {
-    if (!security_range_start_na_warmup_) {
+    if (security_range_start_na_warmup_) {
+        // TradingView's deep-backtest request.security series are built from the
+        // HTF bars whose OPEN lies inside the loaded chart range: a bucket that
+        // opened before the range start is not a partial first bar, it is absent.
+        // Keying the cut on the bucket open (session_period_open_ms for D/W/M,
+        // the session-anchored intraday grid otherwise) reproduces that; keying
+        // on the input timestamp would let the pre-range remainder of that bucket
+        // pose as HTF bar 1 and shift every SMA-seeded EMA/RSI/ATR/Stoch by one
+        // bucket (OANDA:EURUSD 1700-1700: the week opening Sun 17:00 ET before
+        // the range start, the month opening Feb 28 17:00 ET before it). With a
+        // range start on the bucket grid — 24x7 UTC midnight for every intraday
+        // TF and D, Monday for W, the 1st for M — this is the timestamp cut.
+        // Lower-TF (passthrough) evaluators keep the timestamp cut exactly.
+        return state.aggregator.bucket_open_ms(input_ts) < security_range_start_ms_;
+    }
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+    // Default cut (round 8, family P), split-feed runs only: a coarser-than-
+    // chart or chart-timeframe series starts at the first bucket that OPENS at
+    // or after the run's first chart bar -- the deep-backtest range start --
+    // and the bucket in progress at that instant is absent, exactly as
+    // TradingView's is (security_first_chart_bar_ms_). "In progress" is a
+    // fact about trading, not the calendar: TradingView dates a bar by its
+    // first traded bar, so the NSE week whose Monday 2025-03-31 was a holiday
+    // opens on Tuesday 04-01 -- the range start -- and is kept (famp-sense-
+    // nifty15full: "W" first reads 08-22), while the NYSE week that traded
+    // Monday 03-31 (F: 08-29), the CME trade date that opened Mon 22:00Z
+    // (ES/NQ "D": 05-01) and the OANDA week that opened Sun 21:00Z (XAUUSD
+    // 1D "W": 08-28) are absent. The auxiliary 1m feed holds the pre-range
+    // bars (the lanes' finer feeds begin in 2021), so the bucket whose
+    // nominal open precedes the first chart bar is dropped iff the feed
+    // traded between that open and the first chart bar. A finer-than-chart
+    // evaluator is never cut (its slice begins at the first chart bar), and
+    // a single-feed run has no evidence and keeps its feed-start series.
+    if (security_first_chart_bar_ms_ <= 0 || !aux_security_feed_enabled()
+        || state.lower_tf_requested || state.lower_tf_array_requested
+        || script_tf_seconds_ <= 0) {
         return false;
     }
-    // TradingView's deep-backtest request.security series are built from the
-    // HTF bars whose OPEN lies inside the loaded chart range: a bucket that
-    // opened before the range start is not a partial first bar, it is absent.
-    // Keying the cut on the bucket open (session_period_open_ms for D/W/M,
-    // the session-anchored intraday grid otherwise) reproduces that; keying
-    // on the input timestamp would let the pre-range remainder of that bucket
-    // pose as HTF bar 1 and shift every SMA-seeded EMA/RSI/ATR/Stoch by one
-    // bucket (OANDA:EURUSD 1700-1700: the week opening Sun 17:00 ET before
-    // the range start, the month opening Feb 28 17:00 ET before it). With a
-    // range start on the bucket grid — 24x7 UTC midnight for every intraday
-    // TF and D, Monday for W, the 1st for M — this is the timestamp cut.
-    // Lower-TF (passthrough) evaluators keep the timestamp cut exactly.
-    return state.aggregator.bucket_open_ms(input_ts) < security_range_start_ms_;
+    const int requested_seconds = safe_tf_to_seconds(state.tf);
+    const bool coarser_or_chart = requested_seconds == -1
+        || requested_seconds >= script_tf_seconds_;
+    if (!coarser_or_chart) {
+        return false;
+    }
+    const CalendarPeriod period = calendar_period_for(state.tf);
+    const int64_t nominal_open = period != CalendarPeriod::NONE
+        ? session_period_open_ms(input_ts, syminfo_.timezone, syminfo_.session,
+                                 period)
+        : session_intraday_bucket_open_ms(input_ts, requested_seconds,
+                                          syminfo_.timezone, syminfo_.session);
+    if (nominal_open >= security_first_chart_bar_ms_) {
+        return false;
+    }
+    return aux_security_traded_between(nominal_open, security_first_chart_bar_ms_);
+#else
+    return false;
+#endif
 }
+
+
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+bool BacktestEngine::aux_security_traded_between(int64_t from_ms,
+                                                 int64_t to_ms) const {
+    auto it = std::lower_bound(
+        aux_security_bars_.begin(), aux_security_bars_.end(), from_ms,
+        [](const Bar& bar, int64_t ts) { return bar.timestamp < ts; });
+    return it != aux_security_bars_.end() && it->timestamp < to_ms;
+}
+#endif
 
 
 void BacktestEngine::feed_security_eval_state(
