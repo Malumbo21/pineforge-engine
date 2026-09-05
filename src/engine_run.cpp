@@ -1317,7 +1317,7 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
     validate_security_timeframes(security_input_tf_);
 
     init_security_eval_states_for_run(security_input_tf_);
-    prepare_native_security_feeds();
+    prepare_native_security_feeds(input_bars, n_input);
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
     if (aux_security_feed_enabled()) {
         prepare_aux_security_chart_ranges(input_bars, n_input,
@@ -1506,6 +1506,14 @@ void BacktestEngine::prepare_historical_security_lookahead_projections(
             // tests/synthetic feeds beginning at zero correct via the fixed-TF
             // bucket fallback; real feeds take the calendar-aware path.
             if (from_ms != 0 && to_ms != 0) {
+                // A native feed's own period partition (TradingView's daily
+                // stamps: a CME holiday session merged into the next trade
+                // date's bar) bounds the projected buckets exactly as it
+                // bounds the completion path, so the leaked bar is the
+                // merged one from the holiday session's first chart bar.
+                if (state.aggregator.has_native_periods()) {
+                    return state.aggregator.period_changes(from_ms, to_ms);
+                }
                 return tf_change(from_ms, to_ms, state.tf,
                                  syminfo_.timezone, syminfo_.session);
             }

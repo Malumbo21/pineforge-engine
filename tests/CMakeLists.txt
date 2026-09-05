@@ -31,6 +31,7 @@ set(TEST_SOURCES
     test_aux_security_feed
     test_native_security_feed
     test_native_wm_buckets
+    test_native_daily_holiday
     test_historical_security_lookahead_projection
     test_pooc_global_full_exit
     test_security_range_start_na_warmup

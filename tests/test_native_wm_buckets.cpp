@@ -396,10 +396,12 @@ void test_es_overnight_session_week() {
           utc_ms(2025, 8, 6));
     CHECK(probe.rows.size() == 728, "728 chart bars");
     CHECK(probe.native_security_misses() == 0, "every bucket found its period");
-    // W off 1 + W on 1 + D off: the six session-days completed before the
-    // tape ends (the first session's bucket opened before the range start;
-    // the last one never completes).
-    CHECK(probe.native_security_substitutions() == 8, "8 substitutions");
+    // W off 1 + W on 1 + D off: the seven session-days completed on the tape
+    // (the first session's bucket opened before the range start; the last
+    // one, Friday's, completes on the chart's last bar -- its 15:45 CT bar
+    // closing at the 16:00 session close, as TradingView's esd-aug tape
+    // reads it there: t0 = Thu 08-14 17:00, c 6471.5).
+    CHECK(probe.native_security_substitutions() == 9, "9 substitutions");
 
     // W off: the week completes on Fri 15:45 CT (16:00 close) with Friday's
     // settlement 6471.5, not the 15m print 6467.25.
@@ -422,6 +424,18 @@ void test_es_overnight_session_week() {
                "D off reads Thursday on Thu 15:45 CT");
     check_ohlc(probe.at(cdt(2025, 8, 14, 17, 0), 2).x0, kEsThu0814,
                "D off holds Thursday on the 17:00 CT open");
+    // The chart's last bar is Friday's 15:45 CT bar: under the native
+    // partition the day completes there (no next bar to compare, but its
+    // close reaches the session-day's 16:00 close) -- the esd-aug tape reads
+    // Friday's settlement 6471.5 on it (test_native_daily_holiday pins the
+    // whole window).
+    check_ohlc(probe.at(cdt(2025, 8, 15, 15, 30), 2).x0, kEsThu0814,
+               "D off still reads Thursday on Fri 15:30 CT");
+    check_ohlc(probe.at(cdt(2025, 8, 15, 15, 45), 2).x0,
+               Ohlc{6489.25, 6508.75, 6461.5, 6471.5},
+               "D off reads Friday on the chart's last bar, Fri 15:45 CT");
+    CHECK(probe.at(cdt(2025, 8, 15, 15, 45), 2).t0 == cdt(2025, 8, 14, 17, 0),
+          "Friday's bar is stamped Thu 17:00 CT");
 }
 
 // ---- control: no native feed keeps the intraday aggregate -------------------

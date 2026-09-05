@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <cstdint>
+#include <vector>
 #include "bar.hpp"
 
 namespace pineforge {
@@ -244,6 +245,48 @@ public:
     /// and PASSTHROUGH.
     CalendarPeriod calendar_period() const;
 
+    /// TradingView's own period partition for a CALENDAR aggregator, from
+    /// the native request.security feed of the aggregated timeframe: the
+    /// stamps (Unix ms, strictly increasing) are the exchange's native bars'
+    /// opens, and trade_instants[k] is an instant inside the session-day the
+    /// k-th native bar COMPLETES on -- its last input bar (the stamp itself
+    /// when no input bar falls in the period), the trade date TradingView
+    /// files the bar under. Installed, they replace the nominal session
+    /// calendar as the period key: an input bar belongs to the native bar
+    /// whose stamp is the latest at or before it, so a D period is exactly
+    /// that native bar's span. On CME_MINI:ES1! a holiday session that
+    /// pauses at 12:00 CT and reopens at 17:00 the same day (Labor Day,
+    /// Thanksgiving, Independence Day) is folded by TradingView into the
+    /// NEXT trade date's daily bar with no stamp of its own (lab tv esd pin,
+    /// 2026-09-05: the Sun 08-31 17:00 stamp runs to Tue 09-02 15:45 and is
+    /// Tuesday's bar), so no D period closes at the pause, none opens at the
+    /// reopen, and a data hole inside a native day is not a close. A W / M
+    /// period groups the native days by the nominal week / month of their
+    /// trade date (the holiday session belongs to the next trade date, so to
+    /// its week). bar_label_ms is the stamp of the bar's native period,
+    /// bucket_open_ms the group's first stamp, period_changes compares
+    /// those, and feed(bar, next_input_ms) completes the running bucket on
+    /// the last input bar before the next native stamp. The partition covers
+    /// the feed: an input bar before the first stamp keeps the nominal key,
+    /// and so does one at or after the LAST stamp's nominal period close
+    /// (session_period_close_ms of feed_period, the feed's own timeframe --
+    /// DAY for a daily feed), since without a next stamp nothing proves the
+    /// last native bar reaches further; a chart day the feed does not hold
+    /// stays a nominal session-day bucket with no native bar to substitute.
+    /// Empty vectors (the default) leave every nominal rule bit-identical;
+    /// RATIO / PASSTHROUGH ignore the call. Mismatched sizes or
+    /// non-increasing stamps install nothing.
+    void set_native_periods(std::vector<int64_t> stamps,
+                            std::vector<int64_t> trade_instants,
+                            CalendarPeriod feed_period);
+    bool has_native_periods() const { return !native_stamps_.empty(); }
+
+    /// CALENDAR: whether `prev_ms` and `curr_ms` lie in different periods
+    /// of this aggregator -- different native periods / W-M groups when
+    /// native periods are installed, crosses_boundary on the nominal
+    /// session calendar otherwise. RATIO / PASSTHROUGH: false.
+    bool period_changes(int64_t prev_ms, int64_t curr_ms) const;
+
     /// Open (Unix ms) of the target-TF bucket an input bar stamped `ms`
     /// belongs to, on the aggregator's anchor clock (syminfo tz + session):
     /// CALENDAR -> session_period_open_ms of the bar's D/W/M period (the
@@ -281,6 +324,13 @@ private:
     std::string anchor_tz_ = "UTC";    // syminfo.timezone (exchange clock)
     std::string anchor_session_;       // syminfo.session ("" or "24x7" = none)
 
+    // Native period partition (set_native_periods): the stamps, and per
+    // stamp the open of the W / M group it belongs to (the stamp itself
+    // for DAY). Empty unless a native feed installed them.
+    std::vector<int64_t> native_stamps_;
+    std::vector<int64_t> native_group_open_;
+    int64_t native_last_bound_ = 0;   // nominal close of the last stamp's period
+
     Bar current_bar_{};
     Bar last_completed_bar_{};
     int sub_bar_count_ = 0;
@@ -289,6 +339,8 @@ private:
 
     void reset_current(const Bar& bar);
     void merge_into_current(const Bar& bar);
+    // Index of the native period holding `ms` (-1 before the first stamp).
+    int native_index(int64_t ms) const;
 };
 
 } // namespace pineforge

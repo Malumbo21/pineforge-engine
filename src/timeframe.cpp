@@ -923,11 +923,16 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
     }
 
     // Does the new bar fall in a different calendar period than
-    // the current group's first bar?
+    // the current group's first bar? (The owner's period key: the native
+    // period partition when a native feed installed one, the nominal
+    // session calendar otherwise -- see TimeframeAggregator::period_changes.)
     const std::string& atz = s.anchor_tz ? *s.anchor_tz : anchor_utc();
     const std::string& asess = s.anchor_session ? *s.anchor_session : empty_session();
-    if (crosses_boundary(s.current_bar.timestamp, input_bar.timestamp,
-                          cal_period, atz, asess)) {
+    const bool native_periods = s.agg && s.agg->has_native_periods();
+    if (native_periods
+            ? s.agg->period_changes(s.current_bar.timestamp, input_bar.timestamp)
+            : crosses_boundary(s.current_bar.timestamp, input_bar.timestamp,
+                               cal_period, atz, asess)) {
         if (s.current_emitted_complete) {
             feed_reset_current(s, input_bar);
             result.bar = s.current_bar;
@@ -972,7 +977,15 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
     // reaches the session end: that is TV's own bucket-final bar.
     feed_merge_into_current(s, input_bar);
     bool complete = false;
-    if (input_seconds > 0) {
+    if (native_periods && next_input_ms > input_bar.timestamp) {
+        // TradingView's own period partition is installed and the next input
+        // bar is known: the bucket completes on the last input bar before
+        // the next native stamp -- and only there. The nominal rules below
+        // are not consulted: they would close a CME holiday session at its
+        // 12:00 CT pause or split it from the 17:00 reopen, where TradingView
+        // keeps one daily bar (lab tv esd pin, 2026-09-05).
+        complete = s.agg->period_changes(input_bar.timestamp, next_input_ms);
+    } else if (input_seconds > 0) {
         const std::string& atz = s.anchor_tz ? *s.anchor_tz : anchor_utc();
         const std::string& asess = s.anchor_session ? *s.anchor_session : empty_session();
         int64_t next_ms = input_bar.timestamp + input_seconds * 1000;
@@ -1020,7 +1033,7 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
                 input_bar.timestamp, atz, asess, cal_period);
         }
     }
-    if (!complete && next_input_ms > input_bar.timestamp
+    if (!complete && !native_periods && next_input_ms > input_bar.timestamp
         && has_trading_session(asess)) {
         // The nominal rules above end a period at its scheduled close and
         // model neither early closes nor exchange holidays: on NYSE:F the
@@ -1038,6 +1051,22 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
         // that same bar.
         complete = crosses_boundary(input_bar.timestamp, next_input_ms,
                                     cal_period, atz, asess);
+    }
+    if (!complete && native_periods && cal_period == CalendarPeriod::DAY
+        && input_seconds > 0 && next_input_ms <= input_bar.timestamp) {
+        // The feed's last bar under a native period partition (no next bar
+        // to compare): a bar whose close reaches its session-day's close is
+        // the day's last chart bar on a wrapped session too -- ES1! "D"
+        // completes on a chart ending at Fri 15:45 CT (16:00 close), as
+        // TradingView's tape does on that bar (esd-aug, 08-15 15:45). The
+        // nominal rules above cannot see it: a 1700-1600 session-day rolls
+        // at 17:00, not at its 16:00 close. Without a native feed the feed's
+        // last bar keeps the nominal rules bit-identical.
+        const std::string& atz = s.anchor_tz ? *s.anchor_tz : anchor_utc();
+        const std::string& asess = s.anchor_session ? *s.anchor_session : empty_session();
+        complete = input_bar.timestamp + input_seconds * 1000
+            >= session_period_last_traded_close_ms(input_bar.timestamp, atz,
+                                                   asess, CalendarPeriod::DAY);
     }
     if (complete) {
         s.last_completed_bar = s.current_bar;
@@ -1107,11 +1136,74 @@ CalendarPeriod TimeframeAggregator::calendar_period() const {
     return mode_ == Mode::CALENDAR ? cal_period_ : CalendarPeriod::NONE;
 }
 
+void TimeframeAggregator::set_native_periods(std::vector<int64_t> stamps,
+                                             std::vector<int64_t> trade_instants,
+                                             CalendarPeriod feed_period) {
+    native_stamps_.clear();
+    native_group_open_.clear();
+    native_last_bound_ = 0;
+    if (mode_ != Mode::CALENDAR || stamps.empty()
+        || stamps.size() != trade_instants.size()) {
+        return;
+    }
+    for (std::size_t k = 1; k < stamps.size(); ++k) {
+        if (stamps[k] <= stamps[k - 1]) return;
+    }
+    native_group_open_.reserve(stamps.size());
+    // A native bar's W / M group is the nominal period of its TRADE DATE --
+    // the session-day it completes on (its last input bar), not the
+    // session-day of its stamp: the ES1! bar stamped Thu 07-03 17:00 CT that
+    // TradingView runs through the Independence-Day session to Mon 07-07
+    // 15:45 is Monday's bar and Monday's week. Consecutive stamps of one
+    // nominal period share the group's first stamp as their open; DAY
+    // groups are the stamps themselves.
+    int64_t prev_period = 0;
+    for (std::size_t k = 0; k < stamps.size(); ++k) {
+        int64_t open = stamps[k];
+        if (cal_period_ != CalendarPeriod::DAY) {
+            const int64_t period = session_period_open_ms(
+                trade_instants[k], anchor_tz_, anchor_session_, cal_period_);
+            if (k > 0 && period == prev_period) open = native_group_open_.back();
+            prev_period = period;
+        }
+        native_group_open_.push_back(open);
+    }
+    // The last native bar reaches at least its nominal period; a later
+    // input bar has no stamp to prove more and keeps the nominal calendar.
+    native_last_bound_ = session_period_close_ms(
+        stamps.back(), anchor_tz_, anchor_session_,
+        feed_period == CalendarPeriod::NONE ? cal_period_ : feed_period);
+    native_stamps_ = std::move(stamps);
+}
+
+int TimeframeAggregator::native_index(int64_t ms) const {
+    const auto it = std::upper_bound(native_stamps_.begin(),
+                                     native_stamps_.end(), ms);
+    if (it == native_stamps_.begin()) return -1;
+    if (it == native_stamps_.end() && ms >= native_last_bound_) return -1;
+    return static_cast<int>(it - native_stamps_.begin()) - 1;
+}
+
+bool TimeframeAggregator::period_changes(int64_t prev_ms, int64_t curr_ms) const {
+    if (mode_ != Mode::CALENDAR) return false;
+    if (native_stamps_.empty()) {
+        return crosses_boundary(prev_ms, curr_ms, cal_period_, anchor_tz_,
+                                anchor_session_);
+    }
+    return bucket_open_ms(prev_ms) != bucket_open_ms(curr_ms);
+}
+
 int64_t TimeframeAggregator::bucket_open_ms(int64_t ms) const {
     switch (mode_) {
-        case Mode::CALENDAR:
+        case Mode::CALENDAR: {
+            // The native period's W / M group open (its stamp for DAY) when
+            // a native feed installed the partition; nominal before the
+            // first stamp and without one.
+            const int k = native_index(ms);
+            if (k >= 0) return native_group_open_[static_cast<std::size_t>(k)];
             return session_period_open_ms(ms, anchor_tz_, anchor_session_,
                                           cal_period_);
+        }
         case Mode::RATIO:
             // Same grid feed_ratio_mode keys on (and time("<intraday tf>")
             // reads): exchange-tz ms since local-midnight + day stamp,
@@ -1130,16 +1222,22 @@ int64_t TimeframeAggregator::bar_label_ms(int64_t ms) const {
             // The session-anchored intraday grid open (bucket_open_ms), which
             // is `ms` itself whenever the grid-opening sub-bar traded.
             return bucket_open_ms(ms);
-        case Mode::CALENDAR:
+        case Mode::CALENDAR: {
             // The D/W/M bar is dated by its first TRADED session-day (a
             // holiday-Monday equity week is Tuesday's bar, exactly as the
             // first-present sub-bar already implied), but within that
             // session-day by the DAY STAMP: the forex daily / weekly bar
             // whose tape starts at 17:04 ET is still the 17:00 ET bar, and
             // the 1800-1700 day that trades from 18:00 ET is its 17:00 ET
-            // stamped bar (session_day_stamp_offset_minutes).
+            // stamped bar (session_day_stamp_offset_minutes). Under a
+            // native partition the day stamp IS the native stamp of the
+            // period holding `ms` (the Sun 17:00 CT stamp of a merged
+            // Labor-Day bar, through Tuesday).
+            const int k = native_index(ms);
+            if (k >= 0) return native_stamps_[static_cast<std::size_t>(k)];
             return session_period_open_ms(ms, anchor_tz_, anchor_session_,
                                           CalendarPeriod::DAY);
+        }
         case Mode::PASSTHROUGH:
             return ms;
     }

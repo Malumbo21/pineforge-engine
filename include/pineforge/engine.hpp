@@ -2514,7 +2514,10 @@ protected:
         // the label this state's aggregator stamps on the same bucket --
         // TimeframeAggregator::bar_label_ms of the native bar's covered
         // session instant -- so a completed bucket finds its exchange bar by
-        // the timestamp the aggregate already carries.
+        // the timestamp the aggregate already carries. The same call installs
+        // the feed's stamps into this state's aggregator as its period
+        // partition (TimeframeAggregator::set_native_periods): the bucket's
+        // span, label and completion bar are the native bar's own.
         int native_feed_index = -1;
         std::unordered_map<int64_t, Bar> native_bars_by_label;
     };
@@ -3183,7 +3186,7 @@ private:
     // built after the evaluators' aggregators exist for this run, and the
     // substitution a completed bucket applies. Returns whether `bar` was
     // replaced by its native sibling.
-    void prepare_native_security_feeds();
+    void prepare_native_security_feeds(const Bar* input_bars, int n_input);
     bool substitute_native_security_bar(SecurityEvalState& state, Bar& bar,
                                         bool count_miss = true);
     void prepare_historical_security_lookahead_projections(

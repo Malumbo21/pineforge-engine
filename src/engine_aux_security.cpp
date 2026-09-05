@@ -317,6 +317,24 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
 // the 15m print 6467.25). So a "W" / "M" evaluator with no feed of its own
 // derives its buckets from the installed daily feed, keyed exactly as its
 // aggregator labels the same period.
+//
+// The native feed also decides WHERE a period begins and ends. TradingView's
+// daily bar on CME_MINI:ES1! is the span from one native stamp to the bar
+// before the next: a holiday session that pauses at 12:00 CT and reopens at
+// 17:00 the same day (Labor Day, Thanksgiving, Independence Day) has no
+// stamp of its own and is folded into the NEXT trade date's daily bar, which
+// advances on that session's last bar and carries TradingView's own o/h/l/c/v
+// (pinned 2026-09-05 by lab tv, es-daily-timing, ledger
+// log-20260905t031053z-f283208c: the Sun 08-31 17:00 stamp runs to Tue 09-02
+// 15:45, o 6478.75 h 6491.5 l 6371.75 c 6425.5 v 1802584; the Wed 11-26 17:00
+// stamp to Fri 11-28 12:00 across the Thanksgiving pause, reopen and the
+// registry's Thu 20:45 -> Fri 07:15 hole; the Thu 07-03 17:00 stamp to Mon
+// 07-07 15:45 with o 6307.75 = the Sunday open and h 6315 below the holiday
+// session's 6322.75 -- values no chart aggregate produces). Every evaluator
+// that reads the feed therefore takes its stamps as its aggregator's period
+// partition (TimeframeAggregator::set_native_periods), each period's trade
+// date being the session-day of its last chart bar, so the derived W / M
+// buckets group the merged day with its next trade date's week / month.
 
 bool BacktestEngine::set_native_security_feed(const std::string& timeframe,
                                               const Bar* bars, int n) {
@@ -369,13 +387,62 @@ bool BacktestEngine::set_native_security_feed(const std::string& timeframe,
 }
 
 
-void BacktestEngine::prepare_native_security_feeds() {
+void BacktestEngine::prepare_native_security_feeds(const Bar* input_bars,
+                                                   int n_input) {
     diag_native_security_substitutions_ = 0;
     diag_native_security_misses_ = 0;
+    if (native_security_feeds_.empty()) {
+        for (auto& state : security_eval_states_) {
+            state.native_feed_index = -1;
+            state.native_bars_by_label.clear();
+        }
+        return;
+    }
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+    // The evaluators are fed the auxiliary slice on the split-feed path: the
+    // period's last chart bar is the last auxiliary bar.
+    if (aux_security_feed_enabled()) {
+        input_bars = aux_security_bars_.data();
+        n_input = static_cast<int>(aux_security_bars_.size());
+    }
+#endif
+    if (input_bars == nullptr || n_input < 0) n_input = 0;
+    // Per feed: its stamps and, per stamp, the period's trade instant -- the
+    // last input bar before the next stamp (the stamp itself when no input
+    // bar lies in the period, e.g. beyond the chart), whose session-day is
+    // the trade date TradingView files the bar under (the merged Labor-Day
+    // bar stamped Sun 17:00 CT is Tuesday's). Both sequences are sorted, so
+    // one merge pass over the input bars serves every stamp.
+    struct NativePeriods {
+        std::vector<int64_t> stamps;
+        std::vector<int64_t> trade_instants;
+    };
+    std::vector<NativePeriods> periods(native_security_feeds_.size());
+    for (std::size_t f = 0; f < native_security_feeds_.size(); ++f) {
+        const auto& bars = native_security_feeds_[f].bars;
+        NativePeriods& np = periods[f];
+        np.stamps.reserve(bars.size());
+        np.trade_instants.reserve(bars.size());
+        int j = 0;
+        for (std::size_t k = 0; k < bars.size(); ++k) {
+            const int64_t stamp = bars[k].timestamp;
+            const int64_t next = (k + 1 < bars.size())
+                ? bars[k + 1].timestamp
+                : std::numeric_limits<int64_t>::max();
+            int64_t last_in_period = stamp;
+            while (j < n_input && input_bars[j].timestamp < next) {
+                if (input_bars[j].timestamp >= stamp) {
+                    last_in_period = input_bars[j].timestamp;
+                }
+                ++j;
+            }
+            np.stamps.push_back(stamp);
+            np.trade_instants.push_back(last_in_period);
+        }
+    }
     for (auto& state : security_eval_states_) {
         state.native_feed_index = -1;
         state.native_bars_by_label.clear();
-        if (native_security_feeds_.empty()) continue;
         // Only an aggregating (coarser-than-input) request has buckets to
         // substitute; passthrough, lower-TF emulation and input passthrough
         // read the feed itself.
@@ -398,11 +465,19 @@ void BacktestEngine::prepare_native_security_feeds() {
             return state.aggregator.bar_label_ms(covered_ms);
         };
         // (a) A feed of the requested timeframe itself: one native bar per
-        // bucket. A later native bar under one label (a session the run's
-        // calendar coalesces) is the period's final print: keep it.
+        // bucket, its stamps the evaluator's period partition (a calendar
+        // aggregator; an intraday RATIO grid keeps its own buckets, so the
+        // stamps are inert there). A later native bar under one label (a
+        // session the run's calendar coalesces) is the period's final print:
+        // keep it.
         for (std::size_t i = 0; i < native_security_feeds_.size(); ++i) {
             if (native_security_feeds_[i].seconds != requested_seconds) continue;
             state.native_feed_index = static_cast<int>(i);
+            if (state.aggregator.calendar_period() != CalendarPeriod::NONE) {
+                state.aggregator.set_native_periods(
+                    periods[i].stamps, periods[i].trade_instants,
+                    calendar_period_for(native_security_feeds_[i].tf));
+            }
             const auto& bars = native_security_feeds_[i].bars;
             state.native_bars_by_label.reserve(bars.size());
             for (const Bar& bar : bars) {
@@ -414,23 +489,29 @@ void BacktestEngine::prepare_native_security_feeds() {
         if (state.native_feed_index >= 0) continue;
         // (b) A calendar week / month with no feed of its own: TradingView's
         // W/M bar is the native daily bars of the period aggregated (see the
-        // header above), so build it from the installed daily feed. A daily
-        // bar belongs to the W/M period of the session it covers -- the
-        // session_period_key attribution the calendar aggregator itself
-        // splits on (a 13:30Z-stamped NYSE:F bar is its session date's week;
-        // a 22:00Z-stamped ES1! bar opens the 17:00 CT session of the NEXT
-        // trading date, so Sunday's bar is Monday's and starts the week) --
-        // and the bucket is labelled by its first daily bar's session-day
-        // stamp, which is where the aggregator labels the bucket the chart's
-        // first bar of that period opens (a holiday Monday leaves both on
-        // Tuesday). Periods the daily feed only partly covers yield partial
-        // buckets, exactly as a partly covered chart would.
+        // header above), so build it from the installed daily feed, whose
+        // stamps become this evaluator's period partition as well. A daily
+        // bar belongs to the W/M period of its TRADE DATE -- the session-day
+        // its last chart bar falls in, the aggregator's own group under the
+        // native partition (a 13:30Z-stamped NYSE:F bar is its session
+        // date's week; a 22:00Z-stamped ES1! bar opens the 17:00 CT session
+        // of the NEXT trading date, so Sunday's bar is Monday's and starts
+        // the week; the Thu 07-03 17:00 stamp that runs through the
+        // Independence-Day session to Mon 07-07 is Monday's week) -- and the
+        // bucket is labelled by the group's first stamp, which is where the
+        // aggregator labels the bucket the chart's first bar of that period
+        // opens (a holiday Monday leaves both on Tuesday). Periods the daily
+        // feed only partly covers yield partial buckets, exactly as a partly
+        // covered chart would.
         const CalendarPeriod period = state.aggregator.calendar_period();
         if (period != CalendarPeriod::WEEK && period != CalendarPeriod::MONTH) {
             continue;
         }
         for (std::size_t i = 0; i < native_security_feeds_.size(); ++i) {
             if (native_security_feeds_[i].seconds != kSecPerDay) continue;
+            state.aggregator.set_native_periods(periods[i].stamps,
+                                                periods[i].trade_instants,
+                                                CalendarPeriod::DAY);
             const auto& days = native_security_feeds_[i].bars;
             bool open = false;
             int64_t period_open = 0;
@@ -439,8 +520,7 @@ void BacktestEngine::prepare_native_security_feeds() {
             for (const Bar& day : days) {
                 const int64_t covered = session_covered_instant_ms(
                     day.timestamp, syminfo_.timezone, syminfo_.session);
-                const int64_t key = session_period_open_ms(
-                    covered, syminfo_.timezone, syminfo_.session, period);
+                const int64_t key = state.aggregator.bucket_open_ms(covered);
                 if (!open || key != period_open) {
                     if (open) state.native_bars_by_label[label] = bucket;
                     open = true;
