@@ -177,6 +177,18 @@ static const BarRow kAaplAlgoai0620[] = {
     {1750428000000LL, 199.83, 199.93, 198.98, 199.55},  // [5] 14:00
 };
 
+// NASDAQ:AAPL 15, 2025-10-29 19:00Z .. 2025-10-30 14:15Z.
+static const BarRow kAaplAlgoai1030[] = {
+    {1761764400000LL, 269.52, 269.62, 268.28, 268.64},  // [0] 10-29 19:00
+    {1761765300000LL, 268.65, 268.96, 268.3, 268.32},   // [1] 19:15 signal
+    {1761766200000LL, 268.27, 269.2, 267.8, 269.2},     // [2] 19:30 entry bar
+    {1761767100000LL, 269.21, 270.38, 269.05, 269.84},  // [3] 19:45 reversal signal
+    {1761831000000LL, 271.96, 274.11, 270.61, 271.21},  // [4] 10-30 13:30 gap open
+    {1761831900000LL, 271.18, 271.86, 270.84, 271.075}, // [5] 13:45
+    {1761832800000LL, 271.08, 271.37, 270.01, 270.3},   // [6] 14:00
+    {1761833700000LL, 270.3, 270.5, 268.99, 269.08},    // [7] 14:15
+};
+
 // NASDAQ:AAPL 15, 2025-07-17 19:15Z .. 2025-07-21 14:00Z.
 static const BarRow kAaplScalper[] = {
     {1752779700000LL, 210.825, 211.06, 210.825, 210.99}, // [0] 07-17 19:15
@@ -383,6 +395,72 @@ void test_algoai_0620_half_tick_open_slice_64_then_stop() {
 }
 
 // ---------------------------------------------------------------------------
+// C. M2 — algoai 10-30 13:30Z: the pin tape aapl15-mcopen1-stop-algoai (fixed
+// 2891 short @268.27 from the 10-29 19:15Z signal, capital 775,794.02, stop
+// 273.69) plus the probe's own declined reversal: an all-in Long placed at the
+// 10-29 19:45Z close (E_s 771,303.79 / 269.84 -> Q 2858; 2858 x 271.96 >
+// E_s at the 10-30 open -> dropped). TV prints the same three rows with and
+// without the reversal: 76 @269.20 (entry bar), 1 @271.96 (open slice), then
+// 'X' 2814 @273.69 AT ITS LEVEL — decline -> dormant -> slice -> revive.
+// ---------------------------------------------------------------------------
+void test_algoai_1030_declined_reversal_open_slice_revives_stop() {
+    std::printf("-- C. algoai 10-30 13:30Z: 1 @271.96 open slice, then 'X' 2814 @273.69 at its level --\n");
+    Probe p(775794.02);
+    p.all_in();
+    p.script = [](Probe& e, int bar) {
+        if (bar == 1) {
+            e.entry_market("S", false, 2891.0);
+            e.exit_stop("X", "S", 273.69);
+        }
+        if (bar == 3) e.entry_default("L", true);   // declined at the open
+    };
+    std::vector<Bar> bars = to_bars(kAaplAlgoai1030);
+    p.run(bars.data(), (int)bars.size());
+    print_trades(p);
+    CHECK(p.trade_count() == 3);
+    CHECK(p.margin_call_rows() == 2);
+    CHECK(p.long_rows() == 0);
+    check_trade(p, 0, false, 2, 268.27, 76.0, 2, 269.20, "Margin call", -70.68);
+    check_trade(p, 1, false, 2, 268.27, 1.0, 4, 271.96, "Margin call", -3.69);
+    check_trade(p, 2, false, 2, 268.27, 2814.0, 4, 273.69, "X", -15251.88);
+    CHECK(p.flat());
+}
+
+// ---------------------------------------------------------------------------
+// D. M2 — fast-scalper 07-21 13:30Z (probe rows TV#160/161): 4889 short
+// @210.71 with the tape's capital 1,056,333.80 (no slice before 07-21), stop
+// re-issued at the 07-18 18:45Z crossunder to 213.08 (a frozen full-position
+// qty), an all-in Long reversal placed at the 19:45Z close (E_s 1,053,816 /
+// 211.23 -> Q 4988; 4988 x 212.06 > E_s -> dropped at the 07-21 open). The
+// dormant stop does not fill on the O-L-H path; the high 214.86 breaches:
+// 268 @214.86 'Margin call' AND the revived, marketable stop closes the 4621
+// remainder @214.86 on the same bar.
+// ---------------------------------------------------------------------------
+void test_scalper_0721_declined_reversal_cascade_revives_stop_same_bar() {
+    std::printf("-- D. fast-scalper 07-21 13:30Z: 268 @214.86 slice + 'X' 4621 @214.86 same bar --\n");
+    Probe p(1056333.80);
+    p.all_in();
+    p.script = [](Probe& e, int bar) {
+        if (bar == 1) {
+            e.entry_market("S", false, 4889.0);
+            e.exit_stop("X", "S", 212.83);
+        }
+        if (bar == 24) e.exit_stop("X", "S", 213.08);   // re-issued in position
+        if (bar == 28) e.entry_default("L", true);      // declined at the open
+    };
+    std::vector<Bar> bars = to_bars(kAaplScalper);
+    p.run(bars.data(), (int)bars.size());
+    print_trades(p);
+    CHECK(p.trade_count() == 2);
+    CHECK(p.margin_call_rows() == 1);
+    CHECK(p.long_rows() == 0);
+    CHECK(p.rows_exiting_on(29) == 2);
+    check_trade(p, 0, false, 2, 210.71, 268.0, 29, 214.86, "Margin call", -1112.20);
+    check_trade(p, 1, false, 2, 210.71, 4621.0, 29, 214.86, "X", -19177.15);
+    CHECK(p.flat());
+}
+
+// ---------------------------------------------------------------------------
 // E. M2 control — aapl15-mcext-stop-scalper-b: fixed 5012 short from the
 // 07-17 19:30Z signal (fill 19:45Z @210.71, capital 1,056,333.80), stop
 // 212.83, NO reversal: 1 @210.75 (entry bar), 20 @210.87 (07-18 open), 108
@@ -416,6 +494,8 @@ int main() {
     std::printf("--- aapl15_margin_brackets (round 7 family N) ---\n");
     test_willow_half_tick_open_slice_412();
     test_algoai_0620_half_tick_open_slice_64_then_stop();
+    test_algoai_1030_declined_reversal_open_slice_revives_stop();
+    test_scalper_0721_declined_reversal_cascade_revives_stop_same_bar();
     test_scalper_b_control_stop_at_level_no_slice();
     std::printf("\n=== Results: %d passed, %d failed ===\n",
                 tests_passed, tests_failed);
