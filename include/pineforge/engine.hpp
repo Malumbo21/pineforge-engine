@@ -102,6 +102,13 @@ enum class PositionSide { FLAT, LONG, SHORT };
 //      b28, revd00..03, revL L24..L33, S100..S103, S307..S317). NOT
 //      implemented: TV's 1-unit entry fill when the entry leg fails with
 //      Q == |position| + 1.00 exactly (revL L23, taro 2025-09-15 16:15Z).
+// Round 10 family AB (BINANCE:ETHUSDT.P@15 hard lane, the corpus probe
+// anomaly-equity-mirror-strategy-equity-01, campaign note
+// log-20260905t213120z-d5f9e282) met rule 3 on an EXPLICIT-qty 1x long on a
+// USDT book and landed it on main first (5239a36) under these helper names;
+// round10/famR-main carries rules 1, 2, 4 and 5 on top of that one
+// definition (tests/test_tv_money_long_margin_call_eth.cpp beside
+// test_tv_money_precision.cpp and test_tv_money_band.cpp).
 // tv_money_round is the NEAREST DOUBLE of the decimal rounding (the
 // division by an exact power of ten is correctly rounded): rule 5 compares
 // its result with a tick-built price at the ulp, so a floor(x/u+0.5)*u
