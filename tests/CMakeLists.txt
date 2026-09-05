@@ -179,6 +179,7 @@ set(TEST_SOURCES
     test_trail_fill_snap
     test_trail_ref_entry_bar_extreme
     test_trail_close_restart_no_fold
+    test_famx_declined_reversal_trail_leg
     test_trail_activation_tick_bar
     test_session_predicates_daily_chart
 )
