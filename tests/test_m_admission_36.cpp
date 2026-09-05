@@ -382,8 +382,187 @@ void test_market_logic_tape() {
 }
 
 // ---------------------------------------------------------------------------
+// B. jaysharmaofficial alphamojo supertrend HA-with-buffer @ BINANCE:BTCUSDT
+//    1D. strategy(initial_capital=100000, pyramiding=0), fixed 1-contract
+//    default, no commission:
+//      if ta.change(haDirection) < 0: strategy.entry("My Long Entry Id",
+//          long, stop = haHigh * (1 + 0.0005))
+//      if ta.change(haDirection) > 0: strategy.entry("My Short Entry Id",
+//          short, stop = haLow * (1 - 0.0005))
+// ---------------------------------------------------------------------------
+void test_jaysharma_tape() {
+    std::printf("B. jaysharma BTCUSDT@1D tape replay (stop-entry reversal admission)\n");
+    const std::vector<Bar> bars = to_bars(kBtcDaily);
+    std::map<int64_t, std::pair<bool, double>> flips;
+    for (const Flip& f : kJayFlips) flips[f.ts] = {f.is_long, f.ha_extreme};
+    Probe p(100000.0, 0.01, 0.00001, QtyType::FIXED, 1.0);
+    p.script = [&](Probe& e, const Bar& bar) {
+        auto it = flips.find(bar.timestamp);
+        if (it == flips.end()) return;
+        const bool is_long = it->second.first;
+        const double extreme = it->second.second;
+        const double buffer = 0.05 / 100.0;
+        if (is_long) {
+            e.entry_stop("My Long Entry Id", true, extreme + extreme * buffer);
+        } else {
+            e.entry_stop("My Short Entry Id", false, extreme - extreme * buffer);
+        }
+    };
+    p.run(bars.data(), (int)bars.size());
+    const std::vector<Row> got = p.rows();
+    const std::vector<Row> want = to_rows(kJaySharmaTape);
+    check_rows_match("jaysharma BTCUSDT@1D", got, want);
+
+    // TV 1 / TV 2-6: the 08-26 sell stop REVERSES the 04-27 long at the
+    // level — admitted against 100000 + 13972.86, not 100000.
+    const int64_t t0826 = 1756166400000LL;
+    const std::vector<Row> apr27 = rows_entered_at(got, 1745712000000LL);
+    CHECK(apr27.size() == 1);
+    if (apr27.size() == 1) {
+        CHECK(apr27[0].is_long);
+        CHECK_NEAR(apr27[0].entry_price, 95246.6, 1e-6);
+        CHECK(apr27[0].exit_ts == t0826);
+        CHECK_NEAR(apr27[0].exit_price, 109219.46, 1e-6);
+        CHECK(apr27[0].kind == kExitClose);
+        CHECK_NEAR(apr27[0].pnl, 13972.86, 5e-3);
+    }
+    const std::vector<Row> aug26 = rows_entered_at(got, t0826);
+    CHECK(aug26.size() == 5);
+    if (aug26.size() == 5) {
+        // The entry bar's post-fill high (family L): 0.05516 @112371.
+        CHECK(!aug26[0].is_long);
+        CHECK(aug26[0].exit_ts == t0826);
+        CHECK_NEAR(aug26[0].exit_price, 112371.0, 1e-6);
+        CHECK_NEAR(aug26[0].qty, 0.05516, 1e-9);
+        CHECK(aug26[0].kind == kExitMarginCall);
+        // TV 6: the remainder closed by the 10-02 flip's buy stop at
+        // 121082.59 (ceil-snapped 121022.07 x 1.0005) on 10-03.
+        CHECK(aug26[4].exit_ts == 1759449600000LL);
+        CHECK_NEAR(aug26[4].exit_price, 121082.59, 1e-6);
+        CHECK_NEAR(aug26[4].qty, 0.76084, 1e-9);
+        CHECK(aug26[4].kind == kExitClose);
+    }
+    // The 10-03 buy stop's OPENING leg never fills: rejected at placement on
+    // the 10-02 close (1 x 120529.35 > equity 102905.5 - 8605), it rests
+    // close-only. TV's next row is the 01-30 short from flat.
+    CHECK(rows_entered_at(got, 1759449600000LL).empty());
+    // TV 7 / TV 8: the 01-30 short from flat and the 04-22 long reversal
+    // (admitted: 78372.17 <= 102905.5 + 4969.46), open at the range end.
+    const std::vector<Row> jan30 = rows_entered_at(got, 1769731200000LL);
+    CHECK(jan30.size() == 1);
+    if (jan30.size() == 1) {
+        CHECK(!jan30[0].is_long);
+        CHECK_NEAR(jan30[0].entry_price, 83341.63, 1e-6);
+        CHECK(jan30[0].exit_ts == 1776816000000LL);
+        CHECK_NEAR(jan30[0].exit_price, 78372.17, 1e-6);
+    }
+    const std::vector<Row> apr22 = rows_entered_at(got, 1776816000000LL);
+    CHECK(apr22.size() == 1);
+    if (apr22.size() == 1) {
+        CHECK(apr22[0].is_long);
+        CHECK(apr22[0].kind == kExitOpenAtEnd);
+        CHECK_NEAR(apr22[0].exit_price, 78231.13, 1e-6);
+    }
+    CHECK(p.is_long_pos());
+    CHECK_NEAR(p.pos_qty(), 1.0, 1e-9);
+}
+
+// ---------------------------------------------------------------------------
 // C. Controls.
 // ---------------------------------------------------------------------------
+
+// C1. A stop reversal whose cost exceeds realized + the open position's PnL
+//     at the fill is DECLINED, although realized alone would admit it:
+//     capital 220, short 1 @100; buy stop 105 x 2 placed at the 100 close
+//     (placement 2 x 100 = 200 <= 220) gaps through to 108: cost 216 <=
+//     220 realized, but 220 + (100 - 108) = 212 < 216 -> declined, the
+//     short is held.
+void test_control_reversal_exceeding_marked_equity_declines() {
+    std::printf("C1. stop reversal over realized + open PnL at the fill declines\n");
+    const std::vector<Bar> bars = synth_bars({
+        {100.0, 101.0, 99.0, 100.0},
+        {100.0, 101.0, 99.0, 100.0},
+        {108.0, 109.0, 107.0, 108.0},
+        {108.0, 109.0, 107.0, 108.0},
+    });
+    Probe p(220.0, 0.01, 1.0, QtyType::FIXED, 1.0);
+    p.script = [](Probe& e, const Bar& bar) {
+        if (bar.timestamp == 1735689600000LL) e.entry_market("S", false, 1.0);
+        if (bar.timestamp == 1735689600000LL + 86400000LL) {
+            e.entry_stop("L", true, 105.0, 2.0);
+        }
+    };
+    p.run(bars.data(), (int)bars.size());
+    CHECK(p.closed_count() == 0);
+    CHECK(p.is_short());
+    CHECK_NEAR(p.pos_qty(), 1.0, 1e-9);
+    CHECK_NEAR(p.pos_entry(), 100.0, 1e-9);
+    CHECK(p.open_at_end_count() == 1);
+}
+
+// C2. The mirror (jaysharma in miniature): capital 100, long 1 @100; sell
+//     stop 108 x 1 placed at the 110 close (placement 1 x 110 <= 100 + 10)
+//     touched at 108: cost 108 > 100 realized (the old basis declined it)
+//     but <= 100 + (108 - 100) = 108 -> admitted: the long closes @108
+//     (+8) and the short opens @108.
+void test_control_reversal_admitted_on_marked_equity() {
+    std::printf("C2. stop reversal admitted against realized + the closing leg's profit\n");
+    const std::vector<Bar> bars = synth_bars({
+        {100.0, 101.0, 99.0, 100.0},
+        {100.0, 101.0, 99.0, 100.0},
+        {100.0, 112.0, 99.0, 110.0},
+        {110.0, 111.0, 107.0, 108.0},
+    });
+    Probe p(100.0, 0.01, 1.0, QtyType::FIXED, 1.0);
+    p.script = [](Probe& e, const Bar& bar) {
+        if (bar.timestamp == 1735689600000LL) e.entry_market("L", true, 1.0);
+        if (bar.timestamp == 1735689600000LL + 2 * 86400000LL) {
+            e.entry_stop("S", false, 108.0, 1.0);
+        }
+    };
+    p.run(bars.data(), (int)bars.size());
+    CHECK(p.closed_count() == 1);
+    if (p.closed_count() == 1) {
+        const Row r = p.rows()[0];
+        CHECK(r.is_long);
+        CHECK_NEAR(r.entry_price, 100.0, 1e-9);
+        CHECK(r.exit_ts == 1735689600000LL + 3 * 86400000LL);
+        CHECK_NEAR(r.exit_price, 108.0, 1e-9);
+        CHECK(r.kind == kExitClose);
+        CHECK_NEAR(r.pnl, 8.0, 1e-9);
+    }
+    CHECK(p.is_short());
+    CHECK_NEAR(p.pos_qty(), 1.0, 1e-9);
+    CHECK_NEAR(p.pos_entry(), 108.0, 1e-9);
+}
+
+// C3. A FLAT stop entry is unchanged: buy stop 105 x 2 placed at the 100
+//     close, gapped through to 108 (cost 216): admitted at capital 216,
+//     declined at 215 (family E fresh-gap-once: dropped, no partial).
+void test_control_flat_stop_unchanged() {
+    std::printf("C3. flat stop admission unchanged (216 admits, 215 declines)\n");
+    const std::vector<Bar> bars = synth_bars({
+        {100.0, 101.0, 99.0, 100.0},
+        {108.0, 109.0, 107.0, 108.0},
+        {108.0, 109.0, 107.0, 108.0},
+    });
+    for (double capital : {216.0, 215.0}) {
+        Probe p(capital, 0.01, 1.0, QtyType::FIXED, 1.0);
+        p.script = [](Probe& e, const Bar& bar) {
+            if (bar.timestamp == 1735689600000LL) e.entry_stop("L", true, 105.0, 2.0);
+        };
+        p.run(bars.data(), (int)bars.size());
+        if (capital == 216.0) {
+            CHECK(p.is_long_pos());
+            CHECK_NEAR(p.pos_qty(), 2.0, 1e-9);
+            CHECK_NEAR(p.pos_entry(), 108.0, 1e-9);
+        } else {
+            CHECK(p.flat());
+            CHECK(p.closed_count() == 0);
+            CHECK(p.open_at_end_count() == 0);
+        }
+    }
+}
 
 // C4. A zero-commission TRUE-FLAT default short (percent_of_equity 100):
 //     the family-H gap-reject still drops an over-equity fill outright (no
@@ -441,6 +620,10 @@ void test_control_true_flat_default_short_unchanged() {
 
 int main() {
     test_market_logic_tape();
+    test_jaysharma_tape();
+    test_control_reversal_exceeding_marked_equity_declines();
+    test_control_reversal_admitted_on_marked_equity();
+    test_control_flat_stop_unchanged();
     test_control_true_flat_default_short_unchanged();
     std::printf("%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed == 0 ? 0 : 1;

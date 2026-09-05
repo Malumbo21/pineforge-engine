@@ -3622,12 +3622,32 @@ bool BacktestEngine::use_default_stop_placement_qty(
 // 1/4/1/12 on fresh-0919-replace, TV's own slices). Scope: an ENTRY with a
 // stop trigger and no limit; margin_pct > 0; positive fill qty; not a
 // reversal that already lost its entry leg at placement (close-only
-// orders open nothing). The available equity is realized-only
-// (current_equity()), unchanged from KI-62. The qty is exactly the fill
-// kernel's: the default percent <= 100 stop's placement quantity when
-// use_default_stop_placement_qty says dispatch consumes it, otherwise
-// calc_qty_for_type at the fill price. Admission therefore never approves
-// one quantity and executes another.
+// orders open nothing). The available equity is realized equity for a
+// flat fill and — round 7 family M, mechanism 6 (jaysharmaofficial
+// alphamojo supertrend-HA BINANCE:BTCUSDT@1D 2025-08-26) — the family-G
+// sizing equity for a REVERSAL fill: realized plus the open opposite
+// position marked at the fill price. The reversal's closing leg costs
+// nothing (family-E pin: "a still-open opposite position adds nothing")
+// and is realized at this very fill, so the new leg is admitted against
+// realized + that leg's profit. TV admits the fixed 1 BTC sell stop at
+// 109,219.46 (haLow x 0.9995, touched: L 108,666.66) against 100,000 +
+// 13,972.86 (the 04-27 long 95,246.60 closed at the level) = 113,972.86
+// and then margin-calls the short in slices as BTC rises (0.05516 @
+// 112,371 on the entry bar's post-fill high, 0.043 / 0.0212 / 0.1198
+// later); the realized-only basis (100,000 < 109,219.46) declined the
+// whole reversal and held the long to 01-30 (3 engine trades vs TV's 8).
+// Scope: a reversal BY DESIGN — the stop was placed against the live
+// opposite position it now flips (created_position_side == the live side;
+// the probe's shape, and every family-E reversal tape). A stop placed
+// FLAT that meets an opposite position opened after it (the true-flat
+// dual-stop pair of test_stop_decline_continue_path, where the later leg
+// can merely reduce the first) keeps the realized-only basis it had, as
+// does a same-direction add (no pin either way). The qty is exactly the
+// fill kernel's: the default percent
+// <= 100 stop's placement quantity when use_default_stop_placement_qty
+// says dispatch consumes it, otherwise calc_qty_for_type at the fill
+// price. Admission therefore never approves one quantity and executes
+// another.
 bool BacktestEngine::stop_entry_margin_admission_declines(
         const PendingOrder& order, double fill_price, const Bar& /*bar*/) const {
     if (order.type != OrderType::ENTRY
@@ -3651,7 +3671,22 @@ bool BacktestEngine::stop_entry_margin_admission_declines(
     const double required = fill_qty * cost_basis * syminfo_.pointvalue
                             * active_account_currency_fx()
                             * (margin_pct / 100.0);
-    const double available = current_equity();
+    // Round 7 family M: a reversal fill is admitted against realized equity
+    // plus the opposite position marked at the fill it closes at (the
+    // family-G sizing equity) when the stop was placed against that very
+    // side; a flat fill has no open position (open_profit() is 0 there), a
+    // same-direction add and a flat-placed stop meeting a later opposite
+    // position keep the realized-only basis.
+    const PositionSide requested_side =
+        order.is_long ? PositionSide::LONG : PositionSide::SHORT;
+    const bool reversal_fill =
+        position_side_ != PositionSide::FLAT
+        && position_side_ != requested_side
+        && order.created_position_side == position_side_;
+    const double available = reversal_fill
+        ? current_equity() + open_profit(fill_price)
+        : current_equity();
+    if (!std::isfinite(available)) return false;
     const double eps = std::max(1e-9, std::abs(available) * 1e-12);
     return fill_qty > 0.0 && required > available + eps;
 }
