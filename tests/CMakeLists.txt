@@ -181,6 +181,7 @@ set(TEST_SOURCES
     test_trail_close_restart_no_fold
     test_famx_declined_reversal_trail_leg
     test_famae_lot_sizing_ten_digit_equity
+    test_famae_declined_reversal_trail_gap
     test_trail_activation_tick_bar
     test_session_predicates_daily_chart
 )
