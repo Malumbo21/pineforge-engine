@@ -3533,6 +3533,7 @@ private:
     // (id, from_entry) before the erase. TV re-issues MODIFY every live leg
     // (each keeping its own entry binding) rather than collapsing them into
     // one, so strategy_exit needs the census to re-arm the same multiplicity.
+    bool from_entry_holds_live_lot(const std::string& from_entry) const;
     void clear_existing_exit_order(const std::string& id,
                                    const std::string& from_entry,
                                    bool has_trail_request,

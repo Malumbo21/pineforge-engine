@@ -2794,6 +2794,18 @@ uint64_t BacktestEngine::queue_deferred_close_order(
 // a fresh trail (no prior order, in-position), and erase the matching
 // pending EXIT order so the caller can push a freshly built
 // replacement.
+// True when ``from_entry`` names a lot of the live position (or is empty:
+// "every entry"). A strategy.exit bound to an id with no open lot is inert
+// for the current position (round 9 family Z, see clear_existing_exit_order).
+bool BacktestEngine::from_entry_holds_live_lot(const std::string& from_entry) const {
+    if (position_side_ == PositionSide::FLAT) return false;
+    if (from_entry.empty()) return true;
+    for (const auto& lot : pyramid_entries_) {
+        if (lot.entry_id == from_entry && lot.qty > kQtyEpsilon) return true;
+    }
+    return false;
+}
+
 void BacktestEngine::clear_existing_exit_order(const std::string& id,
                                                const std::string& from_entry,
                                                bool has_trail_request,
@@ -2822,7 +2834,23 @@ void BacktestEngine::clear_existing_exit_order(const std::string& id,
         }
     }
 
-    if (has_trail_request && !had_existing_order && position_side_ != PositionSide::FLAT) {
+    // A trail started fresh on a live position (no resting exit under this
+    // (id, from_entry)) restarts the running extreme from the issuing bar's
+    // close — but only when the request is FOR the live position. round 9
+    // family Z (shurben5-tradingview-bot-goat, BINANCE:ETHUSDT.P 15m): a
+    // script that re-issues both sides' layered exits on every bar calls
+    // strategy.exit("Exit Long", from_entry="Long", trail_points=...) while
+    // SHORT; no "Long" lot is open, TradingView places nothing for it, and
+    // the SHORT's trailing extreme must keep the entry bar's low (2025-12-25
+    // 07:15Z: low 2938.71, close 2938.84 -> TV "Trail Short" 2939.21 =
+    // low + 50t on the next bar; the close-restart printed 2939.34.
+    // 2026-04-24 22:15Z: low 2311.53, close 2311.85 -> TV 2312.03 on the
+    // 22:30Z opening rise; the restarted 2312.35 was never touched and the
+    // engine rode down to TP2 2310.82). The extreme is the position's,
+    // measured from its entry fill along every bar's path; an exit for an id
+    // that holds none of it does not touch it.
+    if (has_trail_request && !had_existing_order && position_side_ != PositionSide::FLAT
+        && from_entry_holds_live_lot(from_entry)) {
         trail_best_price_ = current_bar_.close;
     }
 
