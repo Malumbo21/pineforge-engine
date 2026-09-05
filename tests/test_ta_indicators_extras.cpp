@@ -213,15 +213,54 @@ static void test_change_cross_family() {
     CHECK(crossover.compute(3.0, 2.0));   // previous <=, current >
     CHECK(!crossover.recompute(2.0, 3.0));
 
-    // The first valid bar after na is NOT an edge: TradingView fires neither
-    // crossover nor crossunder there (lab tv cross-na-edge-btc1d, 2026-09-05;
-    // pinned bar by bar in tests/test_ltf_lookahead_first_bucket.cpp). The
-    // edge needs a valid previous value on the other side.
+    // A series that never had a value is no edge: TradingView fires neither
+    // crossover nor crossunder on the first valid bar of a series that was
+    // na from the start (lab tv cross-na-edge-btc1d f54e24aa, 2026-09-05;
+    // pinned bar by bar in tests/test_ltf_lookahead_first_bucket.cpp).
     ta::Crossover crossover_after_na;
     CHECK(!crossover_after_na.compute(na<double>(), 2.0));
     CHECK(!crossover_after_na.compute(3.0, 2.0));
     CHECK(!crossover_after_na.compute(1.0, 2.0));
     CHECK(crossover_after_na.compute(3.0, 2.0));
+
+    // A na gap in the middle of history is transparent: the first two-value
+    // bar after it compares against the LAST bar that had two values --
+    // TradingView bridges the gap whatever its length and whichever side
+    // (or both) went na (lab tv vwap-cross-gap-shapes 4b4fba1f and
+    // vwap-cross-var-na-edge fa60d948, BINANCE:ETHUSDT.P 15m 2025-04-08..11,
+    // 2026-09-05: the van007trader-vwap-deviation-score-dyna shape, a var
+    // z-score reset to na at every session start and crossing +/-2 on the
+    // session's first valid bar). It is the pair from that bar, not each
+    // side's own last value (vwap-cross-pair-vs-series 8c674996), and a bar
+    // whose own value is na never crosses (vwap-cross-na-current 7423ad14).
+    ta::Crossover crossover_gap;
+    CHECK(!crossover_gap.compute(1.0, 2.0));           // pre-gap pair: 1 <= 2
+    CHECK(!crossover_gap.compute(na<double>(), 2.0));  // gap, a-side
+    CHECK(!crossover_gap.compute(na<double>(), na<double>()));
+    CHECK(!crossover_gap.compute(1.5, na<double>()));  // gap, b-side
+    CHECK(crossover_gap.compute(5.0, 2.0));            // 5 > 2 vs (1, 2): edge
+    CHECK(!crossover_gap.compute(5.0, 2.0));
+    CHECK(!crossover_gap.compute(na<double>(), 2.0));  // pre-gap pair: 5 > 2
+    CHECK(!crossover_gap.compute(5.0, 2.0));           // held above: no edge
+    // The pair, not each side's last value: a = 10 (both valid), then
+    // (0, na), then (5, 2) -- (10, 2) says no cross even though 0 <= 2.
+    ta::Crossover crossover_pair;
+    CHECK(!crossover_pair.compute(10.0, 2.0));
+    CHECK(!crossover_pair.compute(0.0, na<double>()));
+    CHECK(!crossover_pair.compute(5.0, 2.0));
+    // ... and (0, 2), then (10, na), then (5, 2) crosses.
+    ta::Crossover crossover_pair2;
+    CHECK(!crossover_pair2.compute(0.0, 2.0));
+    CHECK(!crossover_pair2.compute(10.0, na<double>()));
+    CHECK(crossover_pair2.compute(5.0, 2.0));
+    // recompute() across a transparent bar restores the pre-gap pair.
+    ta::Crossover crossover_gap_re;
+    CHECK(!crossover_gap_re.compute(1.0, 2.0));
+    CHECK(!crossover_gap_re.compute(na<double>(), 2.0));
+    CHECK(!crossover_gap_re.recompute(na<double>(), 2.0));
+    CHECK(crossover_gap_re.compute(5.0, 2.0));
+    CHECK(!crossover_gap_re.recompute(1.5, 2.0));
+    CHECK(crossover_gap_re.recompute(5.0, 2.0));
 
     ta::Crossunder crossunder;
     CHECK(!crossunder.compute(3.0, 2.0));
@@ -234,11 +273,39 @@ static void test_change_cross_family() {
     CHECK(!crossunder_after_na.compute(-1.0, -2.0));
     CHECK(crossunder_after_na.compute(-3.0, -2.0));
 
+    ta::Crossunder crossunder_gap;
+    CHECK(!crossunder_gap.compute(-1.0, -2.0));          // pre-gap pair: -1 >= -2
+    CHECK(!crossunder_gap.compute(na<double>(), -2.0));
+    CHECK(!crossunder_gap.compute(na<double>(), na<double>()));
+    CHECK(crossunder_gap.compute(-5.0, -2.0));           // -5 < -2 vs (-1, -2): edge
+    CHECK(!crossunder_gap.compute(na<double>(), -2.0));
+    CHECK(!crossunder_gap.compute(-5.0, -2.0));          // held below: no edge
+    ta::Crossunder crossunder_pair;
+    CHECK(!crossunder_pair.compute(-10.0, -2.0));
+    CHECK(!crossunder_pair.compute(0.0, na<double>()));
+    CHECK(!crossunder_pair.compute(-5.0, -2.0));         // (-10, -2), not (0, -2)
+
     ta::Cross cross;
     CHECK(!cross.compute(1.0, 2.0));
     CHECK(cross.compute(3.0, 2.0));       // up-cross
     CHECK(cross.compute(1.0, 2.0));       // down-cross
     CHECK(cross.recompute(1.5, 2.0));
+
+    // ta.cross: a na bar is transparent like a tied bar -- the remembered
+    // sign is the last two-value non-tied bar's, and a bar whose own value
+    // is na never crosses (lab tv vwap-cross-pair-vs-series 8c674996 t5,
+    // vwap-cross-na-current 7423ad14, vwap-cross-either-na-edge 4efe7839).
+    ta::Cross cross_gap;
+    CHECK(!cross_gap.compute(1.0, 2.0));               // below
+    CHECK(!cross_gap.compute(na<double>(), 2.0));
+    CHECK(!cross_gap.compute(5.0, na<double>()));      // own na: no cross
+    CHECK(cross_gap.compute(5.0, 2.0));                // above vs remembered below
+    CHECK(!cross_gap.compute(na<double>(), na<double>()));
+    CHECK(!cross_gap.compute(6.0, 2.0));               // still above
+    ta::Cross cross_pair;
+    CHECK(!cross_pair.compute(10.0, 2.0));             // above
+    CHECK(!cross_pair.compute(0.0, na<double>()));     // not a remembered below
+    CHECK(!cross_pair.compute(5.0, 2.0));
 }
 
 static void test_cci() {

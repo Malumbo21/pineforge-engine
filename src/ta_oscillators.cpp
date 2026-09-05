@@ -69,9 +69,10 @@ double RSI::compute(double src) {
 }
 
 // --- Crossover ---
-// Pine parity (TradingView): prev1 <= prev2 && current1 > current2, and only
-// when prev1 / prev2 are values -- the first valid bar after na is NOT an
-// edge (lab tv cross-na-edge-btc1d, 2026-09-05; see compute()).
+// Pine parity (TradingView): prev1 <= prev2 && current1 > current2, where
+// (prev1, prev2) is the pair from the LAST BAR ON WHICH BOTH INPUTS WERE
+// VALUES. A bar whose own a or b is na never crosses and is transparent: it
+// leaves the remembered pair alone (see compute()).
 
 Crossover::Crossover()
     : prev_a(na<double>()), prev_b(na<double>()),
@@ -82,19 +83,26 @@ Crossover::Crossover()
 bool Crossover::compute(double a, double b) {
     saved_prev_a_ = prev_a;
     saved_prev_b_ = prev_b;
+    // A na input is transparent: no cross on this bar, and the remembered
+    // pair is NOT overwritten, so the next bar with two values compares
+    // against the last bar that had two values. TradingView bridges a na
+    // gap of any length, on either or both sides, var or plain series, with
+    // that pair (lab tv vwap-cross-gap-shapes 4b4fba1f, BINANCE:ETHUSDT.P
+    // 15m 2025-04-08..11, 2026-09-05: seven gap shapes, each crossing on the
+    // first two-value bar iff the pre-gap pair was <=), and it is the PAIR,
+    // not each side's own last value (vwap-cross-pair-vs-series 8c674996:
+    // t4/t5/t6 fire, t1/t2/t3 never). A series that never had a value
+    // before is no edge (cross-na-edge-btc1d f54e24aa, 2026-09-05: neither
+    // crossover(v, 0) nor crossunder(v, 100) on na -> 53.24 at the range
+    // start), nor is a bar whose own value is na (vwap-cross-na-current
+    // 7423ad14). Storing the na here (bcf4436) made every na -> value edge
+    // dead: van007trader-vwap-deviation-score-dyna resets its z-score to na
+    // at each session start and crosses +/-2 on the first valid bar of the
+    // session on 58 of its 148 ETH trades (vwap-cross-var-na-edge fa60d948).
     if (is_na(a) || is_na(b)) {
-        prev_a = a;
-        prev_b = b;
         return false;
     }
 
-    // A na previous value is no edge: TradingView fires neither
-    // ta.crossover nor ta.crossunder on the first valid bar after na, on a
-    // request.security series (na on the range's first bar, 53.24 next) or
-    // a chart series alike (lab tv cross-na-edge-btc1d, BINANCE:BTCUSDT 1D
-    // 2025-04-01..20, 2026-09-05: the only cross the tape carries is the
-    // real 27.53 -> 67.52 one). Pine's ``a[1] <= b[1]`` is simply false on
-    // na, and so is this.
     bool result = false;
     if (!is_na(prev_a) && !is_na(prev_b)) {
         result = (a > b) && (prev_a <= prev_b);
@@ -117,13 +125,11 @@ Crossunder::Crossunder()
 bool Crossunder::compute(double a, double b) {
     saved_prev_a_ = prev_a;
     saved_prev_b_ = prev_b;
+    // A na input is transparent -- see Crossover::compute.
     if (is_na(a) || is_na(b)) {
-        prev_a = a;
-        prev_b = b;
         return false;
     }
 
-    // No first-valid edge either -- see Crossover::compute.
     bool result = false;
     if (!is_na(prev_a) && !is_na(prev_b)) {
         result = (a < b) && (prev_a >= prev_b);
@@ -200,9 +206,11 @@ bool Cross::compute(double a, double b) {
     saved_prev_a_ = prev_a;
     saved_prev_b_ = prev_b;
     saved_last_nonzero_sign_ = last_nonzero_sign_;
+    // A na input is transparent, exactly like a tied bar: no cross, and the
+    // remembered sign is the last two-value non-tied bar's (lab tv
+    // vwap-cross-pair-vs-series 8c674996 t5 / vwap-cross-na-current
+    // 7423ad14 cX, cY, 2026-09-05; see Crossover::compute).
     if (is_na(a) || is_na(b)) {
-        prev_a = a;
-        prev_b = b;
         return false;
     }
 
