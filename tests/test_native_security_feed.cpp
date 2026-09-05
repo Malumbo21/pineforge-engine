@@ -304,12 +304,16 @@ void test_overnight_cme_session_labels_by_session_day() {
     assert((probe.daily_closes == std::vector<double>{5077.25, 5177.25}));
     assert(probe.native_security_substitutions() == 2);
     assert(probe.native_security_misses() == 0);
-    // Completion timing stays the aggregator's: the first session's value is
-    // exposed no earlier than its last chart bar (15:45 CT, index 91) and no
-    // later than the next session's first bar (index 92).
+    // Completion timing stays the aggregator's: the session-day completes on
+    // its last chart bar (15:45 CT, index 91 -- the bar closing at the 16:00
+    // session close, which the run knows because the next input bar opens the
+    // next session; TimeframeAggregator::feed(bar, next_input_ms)), and the
+    // value is held on the next session's first bar (index 92).
     assert(probe.daily_at_chart_close.size() == 185);
     assert(std::isnan(probe.daily_at_chart_close[90]));
+    assert(near(probe.daily_at_chart_close[91], 5077.25));
     assert(near(probe.daily_at_chart_close[92], 5077.25));
+    assert(near(probe.daily_at_chart_close[183], 5177.25));
     assert(near(probe.daily_at_chart_close[184], 5177.25));
 }
 

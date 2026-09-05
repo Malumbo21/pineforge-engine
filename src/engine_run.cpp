@@ -827,6 +827,9 @@ void BacktestEngine::run_magnified_bar(
 
     int total_sub = (int)sub_bars.size();
     diag_magnifier_sub_bars_processed_ += total_sub;
+    // The input bar after this group, set by the caller; each sub-bar's
+    // successor inside the group is known here.
+    const int64_t after_group_ms = security_next_input_ms_;
 
     // Real-bar magnifier mode: when we have multiple input sub-bars per script
     // bar (i.e. input_tf < script_tf and the validator/caller fed real lower-TF
@@ -866,6 +869,9 @@ void BacktestEngine::run_magnified_bar(
         cumulative_vol += sb.volume;
         timestamp = sb.timestamp;
 
+        security_next_input_ms_ = (si + 1 < total_sub)
+            ? sub_bars[static_cast<std::size_t>(si + 1)].timestamp
+            : after_group_ms;
         // Feed security evaluators with each sub-bar
         for (auto& state : security_eval_states_) {
             if (caller_completed_on_boundary
@@ -1001,8 +1007,12 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
 
     std::vector<BrokerTick> ticks;
     std::vector<double> samples;
+    const int64_t after_group_ms = security_next_input_ms_;
     for (int si = 0; si < total_sub; ++si) {
         const Bar& sb = sub_bars[static_cast<std::size_t>(si)];
+        security_next_input_ms_ = (si + 1 < total_sub)
+            ? sub_bars[static_cast<std::size_t>(si + 1)].timestamp
+            : after_group_ms;
         // Historical script executions see the completed security state for
         // the script bar. Feeding all committed lower-TF bars before taking
         // the script-state checkpoint mirrors the standard path, where
@@ -1376,6 +1386,7 @@ int BacktestEngine::count_expected_script_bars(const Bar* input_bars, int n_inpu
 // aggregator since their per-sub-bar synthesis is driven elsewhere.
 void BacktestEngine::init_security_eval_states_for_run(
     const std::string& effective_input_tf) {
+    security_next_input_ms_ = 0;
     for (auto& state : security_eval_states_) {
         state.feed_count = 0;
         state.eval_complete_count = 0;
@@ -1437,13 +1448,22 @@ void BacktestEngine::prepare_historical_security_lookahead_projections(
 
     for (auto& state : security_eval_states_) {
         const int requested_seconds = tf_to_seconds(state.tf);
+        // A calendar month has no fixed second count (tf_to_seconds -1) but
+        // is always coarser than an intraday / daily script and buckets
+        // through the calendar-aware tf_change below exactly as "W" and "D"
+        // do. Without it a "M" lookahead_on site fell through to the
+        // progressive partial peeks, whereas TradingView leaks the month's
+        // FINAL values from its first chart bar (lab tv wm-m-f15-jul,
+        // 2026-09-05: August's o/h/l/c from 08-01 09:30).
+        const bool calendar_month = requested_seconds == -1
+            && calendar_period_for(state.tf) == CalendarPeriod::MONTH;
         const bool eligible = !state.lower_tf_requested
             && !state.lower_tf_emulation
             && !state.lower_tf_use_input
             && state.lookahead_on
             && !state.gaps_on
             && !state.heikinashi
-            && requested_seconds > script_seconds;
+            && (calendar_month || requested_seconds > script_seconds);
         if (!eligible) {
             continue;
         }
@@ -1474,7 +1494,7 @@ void BacktestEngine::prepare_historical_security_lookahead_projections(
         const int projection_count = n_input - projection_begin;
 
         const int expected_children = std::max(
-            1, requested_seconds / input_seconds);
+            1, (calendar_month ? 31 * 86400 : requested_seconds) / input_seconds);
         state.historical_projections.reserve(static_cast<std::size_t>(
             projection_count / expected_children + 1));
         state.historical_projection_cursor = 0;
@@ -1591,7 +1611,11 @@ void BacktestEngine::run_simple_bar_loop(const Bar* input_bars, int n_input) {
 
         // Feed security evaluators. On the split-feed path only the finer
         // auxiliary slice advances request.security; the native chart bar is
-        // never passed to a security evaluator.
+        // never passed to a security evaluator. The next input bar's
+        // timestamp lets a calendar bucket complete on the period's actual
+        // last chart bar (security_next_input_ms_).
+        security_next_input_ms_ =
+            (i + 1 < n_input) ? input_bars[i + 1].timestamp : 0;
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
         if (aux_security_feed_enabled()) {
             feed_aux_security_for_chart_bar(i);
@@ -1648,6 +1672,12 @@ void BacktestEngine::run_aggregation_bar_loop(const Bar* input_bars, int n_input
     int emitted_script_bars = 0;
 
     for (int i = 0; i < n_input; ++i) {
+        // The next input bar's timestamp for the security evaluators fed
+        // below (directly, by run_magnified_bar's sub-bar walk, or by the
+        // boundary re-feed): a calendar bucket completes on the period's
+        // actual last chart bar (security_next_input_ms_).
+        security_next_input_ms_ =
+            (i + 1 < n_input) ? input_bars[i + 1].timestamp : 0;
         // Finer lookahead_on publication needs the chart aggregator's real
         // completion event. Eager completion feeds the current child normally;
         // boundary fallback replays the completed caller before the retained

@@ -544,11 +544,17 @@ void BacktestEngine::feed_security_eval_state(
         }
 
         Bar projected_bar = projection.bar;
-        // A projected bucket that reached its boundary is the exchange's
-        // bar wherever a native feed serves this timeframe.
-        if (projection.is_complete) {
-            substitute_native_security_bar(state, projected_bar);
-        }
+        // A projected bucket is the exchange's bar wherever a native feed
+        // serves this timeframe -- complete or not. TradingView's
+        // lookahead_on leaks the period's FINAL values from its first chart
+        // bar, so the trailing period still in progress at the range end
+        // carries the whole native period whenever the feed holds it (lab tv
+        // wm-m-f15-jul, 2026-09-05: August's final o/h/l/c 10.92/11.99/
+        // 10.68/11.77 from 08-01 09:30 on a chart ending 08-08). A partial
+        // with no native bar keeps the available aggregate, uncounted as a
+        // miss.
+        substitute_native_security_bar(state, projected_bar,
+                                       /*count_miss=*/projection.is_complete);
         if (state.heikinashi) {
             apply_ha(projected_bar, projection.is_complete);
         }
@@ -569,7 +575,10 @@ void BacktestEngine::feed_security_eval_state(
         return;
     }
 
-    AggregatedBar ab = state.aggregator.feed(input_bar);
+    // The next input bar's timestamp (0 when unknown) lets a calendar
+    // bucket complete on the period's actual last chart bar -- see
+    // security_next_input_ms_.
+    AggregatedBar ab = state.aggregator.feed(input_bar, security_next_input_ms_);
     state.feed_count++;
     state.current_sub_bar_count = ab.sub_bar_count;
     if (ab.is_complete) {

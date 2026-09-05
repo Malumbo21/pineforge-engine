@@ -901,7 +901,8 @@ AggregatedBar feed_ratio_mode(const Bar& input_bar, FeedState s,
 
 AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
                                   CalendarPeriod cal_period,
-                                  int64_t input_seconds) {
+                                  int64_t input_seconds,
+                                  int64_t next_input_ms) {
     AggregatedBar result;
     const bool pf_tr = getenv("PF_SEC_TRACE") != nullptr;
     if (pf_tr) {
@@ -1019,6 +1020,25 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
                 input_bar.timestamp, atz, asess, cal_period);
         }
     }
+    if (!complete && next_input_ms > input_bar.timestamp
+        && has_trading_session(asess)) {
+        // The nominal rules above end a period at its scheduled close and
+        // model neither early closes nor exchange holidays: on NYSE:F the
+        // 13:00 ET half-day of Fri 2025-11-28 left the week (and the day)
+        // open after the 12:45 bar and a holiday Friday leaves the week open
+        // after Thursday 15:45, so both completed lazily on Monday 09:30 --
+        // one chart bar after TradingView, which finalizes a D/W/M bar on
+        // the period's LAST chart bar (lab tv wm-w-f15-nov, 2026-09-05: W
+        // close 13.28 on the 12:45 bar). A historical run holds its whole
+        // feed, so the caller tells us where the next input bar lies: when
+        // it opens a new period, this bar was the period's last. Declared
+        // sessions only -- a data hole before a 24x7 midnight is a hole,
+        // not a close, and 24x7 / UTC feeds stay bit-identical -- and the
+        // full-session case is unchanged: the nominal rules already fire on
+        // that same bar.
+        complete = crosses_boundary(input_bar.timestamp, next_input_ms,
+                                    cal_period, atz, asess);
+    }
     if (complete) {
         s.last_completed_bar = s.current_bar;
         s.has_completed = true;
@@ -1044,6 +1064,11 @@ AggregatedBar feed_calendar_mode(const Bar& input_bar, FeedState s,
 }  // namespace
 
 AggregatedBar TimeframeAggregator::feed(const Bar& input_bar) {
+    return feed(input_bar, 0);
+}
+
+AggregatedBar TimeframeAggregator::feed(const Bar& input_bar,
+                                        int64_t next_input_ms) {
     FeedState s{current_bar_, sub_bar_count_, current_emitted_complete_,
                 last_completed_bar_, has_completed_,
                 &anchor_tz_, &anchor_session_, this};
@@ -1054,7 +1079,8 @@ AggregatedBar TimeframeAggregator::feed(const Bar& input_bar) {
             return feed_ratio_mode(input_bar, s, ratio_, target_seconds_,
                                    input_seconds_);
         case Mode::CALENDAR:
-            return feed_calendar_mode(input_bar, s, cal_period_, input_seconds_);
+            return feed_calendar_mode(input_bar, s, cal_period_, input_seconds_,
+                                      next_input_ms);
     }
 
     // Unreachable
@@ -1075,6 +1101,10 @@ Bar TimeframeAggregator::last_completed() const {
 
 bool TimeframeAggregator::is_active() const {
     return mode_ != Mode::PASSTHROUGH;
+}
+
+CalendarPeriod TimeframeAggregator::calendar_period() const {
+    return mode_ == Mode::CALENDAR ? cal_period_ : CalendarPeriod::NONE;
 }
 
 int64_t TimeframeAggregator::bucket_open_ms(int64_t ms) const {

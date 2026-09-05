@@ -205,6 +205,11 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
     for (std::size_t i = begin; i < end; ++i) {
         const Bar& aux_bar = aux_security_bars_[i];
         const bool calling_bar_complete = (i + 1 == end);
+        // The auxiliary bar after this one, across chart bars (0 at the
+        // feed's end): a calendar bucket completes on the period's actual
+        // last bar (security_next_input_ms_).
+        security_next_input_ms_ = (i + 1 < aux_security_bars_.size())
+            ? aux_security_bars_[i + 1].timestamp : 0;
         for (auto& state : security_eval_states_) {
             if (!state.lower_tf_array_requested) {
                 feed_security_at_calling_bar_boundary(
@@ -300,6 +305,18 @@ void BacktestEngine::feed_aux_security_for_chart_bar(int chart_index) {
 // feed's close and none the last 15m close). The campaign holds those daily
 // bars; this path lets a completed daily bucket carry them while the
 // aggregator keeps deciding WHEN the bucket completes.
+//
+// Its "W" and "M" requests read TradingView's weekly / monthly bars, which
+// are BUILT FROM THOSE SAME NATIVE DAILY BARS -- o = the first session's
+// daily open, h / l = the daily extremes, c = the last session's daily close,
+// v = the sum -- never from the chart's intraday prints (pinned 2026-09-05 by
+// lab tv, wm-security-buckets: 1473/1473 qty-encoded reads on NYSE:F 15m and
+// CME_MINI:ES1! 15m equal the native-1D-built period, 0 the 15m-built one;
+// NYSE:F week 2025-07-28 c 10.82 vs 10.81, week 2025-11-17 o = h = 13.1751
+// vs 13.14 / 13.155, ES1! week 2025-08-11 c 6471.5 = Friday's settlement vs
+// the 15m print 6467.25). So a "W" / "M" evaluator with no feed of its own
+// derives its buckets from the installed daily feed, keyed exactly as its
+// aggregator labels the same period.
 
 bool BacktestEngine::set_native_security_feed(const std::string& timeframe,
                                               const Bar* bars, int n) {
@@ -373,24 +390,73 @@ void BacktestEngine::prepare_native_security_feeds() {
             requested_seconds = 0;
         }
         if (requested_seconds == 0) continue;
+        // Key by the label the aggregate carries: the covered session instant
+        // (OANDA's 17:00 stamp covers the 18:00 session, see
+        // session_covered_instant_ms) labelled exactly as this state's
+        // aggregator labels its own buckets.
+        auto label_of = [&](int64_t covered_ms) {
+            return state.aggregator.bar_label_ms(covered_ms);
+        };
+        // (a) A feed of the requested timeframe itself: one native bar per
+        // bucket. A later native bar under one label (a session the run's
+        // calendar coalesces) is the period's final print: keep it.
         for (std::size_t i = 0; i < native_security_feeds_.size(); ++i) {
             if (native_security_feeds_[i].seconds != requested_seconds) continue;
             state.native_feed_index = static_cast<int>(i);
             const auto& bars = native_security_feeds_[i].bars;
             state.native_bars_by_label.reserve(bars.size());
             for (const Bar& bar : bars) {
-                // Key by the label the aggregate carries: the covered session
-                // instant (OANDA's 17:00 stamp covers the 18:00 session, see
-                // session_covered_instant_ms) labelled exactly as this
-                // state's aggregator labels its own buckets.
-                const int64_t label = state.aggregator.bar_label_ms(
-                    session_covered_instant_ms(bar.timestamp,
-                                               syminfo_.timezone,
-                                               syminfo_.session));
-                // A later native bar under one label (a session the run's
-                // calendar coalesces) is the period's final print: keep it.
-                state.native_bars_by_label[label] = bar;
+                state.native_bars_by_label[label_of(session_covered_instant_ms(
+                    bar.timestamp, syminfo_.timezone, syminfo_.session))] = bar;
             }
+            break;
+        }
+        if (state.native_feed_index >= 0) continue;
+        // (b) A calendar week / month with no feed of its own: TradingView's
+        // W/M bar is the native daily bars of the period aggregated (see the
+        // header above), so build it from the installed daily feed. A daily
+        // bar belongs to the W/M period of the session it covers -- the
+        // session_period_key attribution the calendar aggregator itself
+        // splits on (a 13:30Z-stamped NYSE:F bar is its session date's week;
+        // a 22:00Z-stamped ES1! bar opens the 17:00 CT session of the NEXT
+        // trading date, so Sunday's bar is Monday's and starts the week) --
+        // and the bucket is labelled by its first daily bar's session-day
+        // stamp, which is where the aggregator labels the bucket the chart's
+        // first bar of that period opens (a holiday Monday leaves both on
+        // Tuesday). Periods the daily feed only partly covers yield partial
+        // buckets, exactly as a partly covered chart would.
+        const CalendarPeriod period = state.aggregator.calendar_period();
+        if (period != CalendarPeriod::WEEK && period != CalendarPeriod::MONTH) {
+            continue;
+        }
+        for (std::size_t i = 0; i < native_security_feeds_.size(); ++i) {
+            if (native_security_feeds_[i].seconds != kSecPerDay) continue;
+            const auto& days = native_security_feeds_[i].bars;
+            bool open = false;
+            int64_t period_open = 0;
+            int64_t label = 0;
+            Bar bucket{};
+            for (const Bar& day : days) {
+                const int64_t covered = session_covered_instant_ms(
+                    day.timestamp, syminfo_.timezone, syminfo_.session);
+                const int64_t key = session_period_open_ms(
+                    covered, syminfo_.timezone, syminfo_.session, period);
+                if (!open || key != period_open) {
+                    if (open) state.native_bars_by_label[label] = bucket;
+                    open = true;
+                    period_open = key;
+                    label = label_of(covered);
+                    bucket = day;
+                    bucket.timestamp = label;
+                    continue;
+                }
+                bucket.high = std::max(bucket.high, day.high);
+                bucket.low = std::min(bucket.low, day.low);
+                bucket.close = day.close;
+                bucket.volume += day.volume;
+            }
+            if (open) state.native_bars_by_label[label] = bucket;
+            state.native_feed_index = static_cast<int>(i);
             break;
         }
     }
@@ -398,11 +464,17 @@ void BacktestEngine::prepare_native_security_feeds() {
 
 
 bool BacktestEngine::substitute_native_security_bar(SecurityEvalState& state,
-                                                    Bar& bar) {
+                                                    Bar& bar,
+                                                    bool count_miss) {
     if (state.native_feed_index < 0) return false;
-    const auto found = state.native_bars_by_label.find(bar.timestamp);
+    // The completion path hands a bucket already stamped with its label; the
+    // historical lookahead projection hands the raw first-child timestamp
+    // (prepare_historical_security_lookahead_projections), the label only
+    // when that child traded at the period's day stamp. Both read one key.
+    const int64_t label = state.aggregator.bar_label_ms(bar.timestamp);
+    const auto found = state.native_bars_by_label.find(label);
     if (found == state.native_bars_by_label.end()) {
-        ++diag_native_security_misses_;
+        if (count_miss) ++diag_native_security_misses_;
         return false;
     }
     const Bar& native = found->second;

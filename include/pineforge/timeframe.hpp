@@ -217,6 +217,20 @@ public:
     /// Feed one input bar. Returns aggregation state.
     AggregatedBar feed(const Bar& input_bar);
 
+    /// feed() with the NEXT input bar's timestamp known (0 = unknown, the
+    /// form above). A historical run holds its whole feed, and on a declared
+    /// exchange session TradingView finalizes a D/W/M bar on the period's
+    /// actual last chart bar whatever the nominal calendar says that bar is:
+    /// the 12:45 ET bar of a 13:00 half-day (NYSE:F Fri 2025-11-28), the
+    /// Thursday 15:45 bar before a holiday Friday, the 15:45 CT bar closing
+    /// an overnight CME session-day (lab tv wm-security-buckets tapes,
+    /// 2026-09-05). CALENDAR mode therefore also completes the running
+    /// bucket when the next input bar opens a new period. RATIO and
+    /// PASSTHROUGH ignore the hint, and so do ""/"24x7" sessions (a data
+    /// hole before a 24x7 midnight is not an early close), so every caller
+    /// passing 0 and every session-less feed stay bit-identical.
+    AggregatedBar feed(const Bar& input_bar, int64_t next_input_ms);
+
     /// Current in-progress bar.
     Bar current() const;
 
@@ -225,6 +239,10 @@ public:
 
     /// Whether aggregation is active (non-passthrough).
     bool is_active() const;
+
+    /// The D/W/M period a CALENDAR aggregator buckets on; NONE for RATIO
+    /// and PASSTHROUGH.
+    CalendarPeriod calendar_period() const;
 
     /// Open (Unix ms) of the target-TF bucket an input bar stamped `ms`
     /// belongs to, on the aggregator's anchor clock (syminfo tz + session):

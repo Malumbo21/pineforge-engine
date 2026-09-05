@@ -732,10 +732,14 @@ PF_API int strategy_set_aux_security_feed(pf_strategy_t s,
  *  stamp for D/W/M, the grid open for intraday) instead of the aggregate;
  *  bucket TIMING -- when the bar completes relative to the chart -- and every
  *  other timeframe's request are unchanged, and so are chart OHLCV, broker
- *  fills and bar_index. A completed bucket with no native bar keeps its
- *  aggregate (counted, not fatal). Bars must be strictly increasing; arrays
- *  are copied; pass @p n == 0 to clear the feed for @p timeframe. Historical
- *  runs only: stream_begin() fails closed while a native feed is installed.
+ *  fills and bar_index. A "W" / "M" request with no feed of its own reads
+ *  the daily feed's bars aggregated per week / month (TradingView builds its
+ *  W/M bars from the native daily bars, never from intraday prints), keyed by
+ *  the period's first session-day. A completed bucket with no native bar
+ *  keeps its aggregate (counted, not fatal). Bars must be strictly
+ *  increasing; arrays are copied; pass @p n == 0 to clear the feed for
+ *  @p timeframe. Historical runs only: stream_begin() fails closed while a
+ *  native feed is installed.
  *
  *  @return 0 on success, -1 for a null strategy or invalid input. */
 PF_API int strategy_set_native_security_feed(pf_strategy_t s,

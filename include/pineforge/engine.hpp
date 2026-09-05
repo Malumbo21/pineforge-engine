@@ -1179,6 +1179,15 @@ protected:
     // lookahead projection builder.
     bool security_range_start_na_warmup_ = false;
     int64_t security_range_start_ms_ = 0;
+    // Timestamp of the input bar that FOLLOWS the one being fed to the
+    // request.security evaluators; 0 = unknown (streams, the feed's last
+    // bar). A historical run holds its whole feed, and the calendar
+    // aggregator uses the hint to finalize a D/W/M bucket on the period's
+    // actual last chart bar -- early closes and exchange holidays included
+    // (TimeframeAggregator::feed(bar, next_input_ms)). Set by the run loops
+    // per input bar, per auxiliary bar on the split-feed path, per sub-bar
+    // under the magnifier; never by the stream path.
+    int64_t security_next_input_ms_ = 0;
     // Opt-in historical-only request.security lookahead projection. TradingView
     // can merge a completed higher-timeframe bar onto the first chart child
     // when a finite historical batch is already known. The normal engine path
@@ -3175,7 +3184,8 @@ private:
     // substitution a completed bucket applies. Returns whether `bar` was
     // replaced by its native sibling.
     void prepare_native_security_feeds();
-    bool substitute_native_security_bar(SecurityEvalState& state, Bar& bar);
+    bool substitute_native_security_bar(SecurityEvalState& state, Bar& bar,
+                                        bool count_miss = true);
     void prepare_historical_security_lookahead_projections(
         const Bar* input_bars, int n_input,
         const std::string& effective_input_tf);
