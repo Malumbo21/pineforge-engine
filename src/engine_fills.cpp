@@ -5289,13 +5289,20 @@ void BacktestEngine::apply_filled_order_to_state(
         }
     }
 
-    // This fill just opened a position from FLAT via an entry order. Freeze
-    // any LAYERED strategy.exit legs bound to that entry that were armed while
-    // flat (qty=NaN, reservation deferred): bind each to a fixed slice of the
-    // opened lot so a percent partial + its sibling 100% leg no longer
-    // over-close the whole position depending on which leg fills first.
+    // This fill just opened a position from FLAT via an entry order — or
+    // FLIPPED the position (round 7 family N mechanism 3: a reversal bar's
+    // legs are deferred against the pending entry exactly like flat-armed
+    // ones, see strategy_exit). Freeze any LAYERED strategy.exit legs bound
+    // to that entry that were armed with the reservation deferred (qty=NaN):
+    // bind each to a fixed slice of the opened lot so a percent partial +
+    // its sibling 100% leg no longer over-close the whole position depending
+    // on which leg fills first.
+    const bool flipped_position =
+        std::abs(signed_pos_before) >= kQtyEpsilon
+        && std::abs(signed_pos_after) >= kQtyEpsilon
+        && ((signed_pos_before > 0.0) != (signed_pos_after > 0.0));
     if (!paired_flat_market_fill
-        && std::abs(signed_pos_before) < kQtyEpsilon
+        && (std::abs(signed_pos_before) < kQtyEpsilon || flipped_position)
         && position_side_ != PositionSide::FLAT
         && (order.type == OrderType::MARKET
             || order.type == OrderType::ENTRY
