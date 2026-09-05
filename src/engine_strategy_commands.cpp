@@ -781,8 +781,8 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         }
     } else {
         order.type = OrderType::ENTRY;
-        order.limit_price = limit_price;
-        order.stop_price = stop_price;
+        order.limit_price = level_on_price_grid(limit_price);
+        order.stop_price = level_on_price_grid(stop_price);
         // round 7: a pure STOP reversal whose entry leg was rejected at
         // placement rests as the reversal's closing leg only (consumed by
         // apply_entry_order_fill; its fill-time admission is skipped since
@@ -1834,6 +1834,9 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
         double discarded_reserved_qty = std::numeric_limits<double>::quiet_NaN();
         int discarded_leg_count = 0;
         clear_existing_exit_order(id, from_entry, /*has_trail_request=*/false,
+                                  std::numeric_limits<double>::quiet_NaN(),
+                                  std::numeric_limits<double>::quiet_NaN(),
+                                  std::numeric_limits<double>::quiet_NaN(),
                                   discarded_seq, discarded_incarnation,
                                   discarded_reserved_qty, discarded_leg_count);
         return;
@@ -1878,6 +1881,7 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     bool replaced_dormant = false;
     double replaced_dormant_stop = std::numeric_limits<double>::quiet_NaN();
     clear_existing_exit_order(id, from_entry, has_trail_request,
+                              trail_points, trail_offset, trail_price,
                               preserved_seq, replaced_incarnation,
                               preserved_reserved_qty, cleared_leg_count,
                               &replaced_dormant, &replaced_dormant_stop);
@@ -2036,9 +2040,25 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
         // Mirrors the explicit-qty path's pending-entry capacity rule above
         // (thulashimohanr fix); entries with an explicit qty keep the
         // legacy reservation math.
+        //
+        // Round 7 family N mechanism 3 (note log-20260905t112315z-a234f071;
+        // therealbouga apex-mtf-index-model, census 51/51 AAPL@15 + 56/56
+        // F@15 entries, 0 exceptions): the PARTIAL legs of the same reversal
+        // bar defer exactly like the default leg. 'S TP1' qty_percent=50 +
+        // 'S TP2' (default) issued together with the Short reversal while the
+        // old long is live split the NEW lot 50/50 on TradingView — fixed at
+        // the fill, unchanged by the per-bar re-issues and by which leg fires
+        // first. Sizing the partial against the OLD position froze it at 50%
+        // of the wrong lot (AAPL 06-24: 125 of 490, TV 245; F 08-08: 2293 of
+        // 8890, TV 4445) and, with the default sibling still deferred as a
+        // 100% leg, the fill-bar re-issue then dropped it behind that
+        // sibling (AAPL 05-07: 'S TP2' closed 502, TV 251 + 251 held). Both
+        // legs now bind once, at the fill, through
+        // reconcile_deferred_layered_exits (partial = floor(lot x pct), the
+        // default leg = the remainder); same-id re-issues carry the frozen
+        // share and only modify prices.
         bool bind_to_pending_reversal_entry = false;
-        if (!from_entry.empty() && !effectively_flat
-            && qp >= 100.0 - kFullPercentEps) {
+        if (!from_entry.empty() && !effectively_flat) {
             for (const auto& o : pending_orders_) {
                 if (o.id != from_entry) continue;
                 if (o.type != OrderType::MARKET && o.type != OrderType::ENTRY
@@ -2126,8 +2146,8 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     order.from_entry = from_entry;
     order.type = OrderType::EXIT;
     order.is_long = false;
-    order.limit_price = limit_price;
-    order.stop_price = stop_price;
+    order.limit_price = level_on_price_grid(limit_price);
+    order.stop_price = level_on_price_grid(stop_price);
     order.trail_points = trail_points;
     order.trail_price = trail_price;
     order.trail_offset = trail_offset;
@@ -2493,8 +2513,8 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
         }
     } else {
         order.type = OrderType::RAW_ORDER;
-        order.limit_price = limit_price;
-        order.stop_price = stop_price;
+        order.limit_price = level_on_price_grid(limit_price);
+        order.stop_price = level_on_price_grid(stop_price);
     }
 
     pending_orders_.push_back(std::move(order));
@@ -2885,9 +2905,24 @@ uint64_t BacktestEngine::queue_deferred_close_order(
 // a fresh trail (no prior order, in-position), and erase the matching
 // pending EXIT order so the caller can push a freshly built
 // replacement.
+// True when ``from_entry`` names a lot of the live position (or is empty:
+// "every entry"). A strategy.exit bound to an id with no open lot is inert
+// for the current position (round 9 family Z, see clear_existing_exit_order).
+bool BacktestEngine::from_entry_holds_live_lot(const std::string& from_entry) const {
+    if (position_side_ == PositionSide::FLAT) return false;
+    if (from_entry.empty()) return true;
+    for (const auto& lot : pyramid_entries_) {
+        if (lot.entry_id == from_entry && lot.qty > kQtyEpsilon) return true;
+    }
+    return false;
+}
+
 void BacktestEngine::clear_existing_exit_order(const std::string& id,
                                                const std::string& from_entry,
                                                bool has_trail_request,
+                                               double trail_points,
+                                               double trail_offset,
+                                               double trail_price,
                                                int64_t& preserved_seq_out,
                                                uint64_t& replaced_incarnation_out,
                                                double& preserved_reserved_qty_out,
@@ -2895,6 +2930,8 @@ void BacktestEngine::clear_existing_exit_order(const std::string& id,
                                                bool* replaced_dormant_out,
                                                double* replaced_dormant_stop_out) {
     bool had_existing_order = false;
+    double resting_trail_points = std::numeric_limits<double>::quiet_NaN();
+    double resting_trail_price = std::numeric_limits<double>::quiet_NaN();
     preserved_seq_out = 0;
     replaced_incarnation_out = 0;
     preserved_reserved_qty_out = std::numeric_limits<double>::quiet_NaN();
@@ -2929,10 +2966,53 @@ void BacktestEngine::clear_existing_exit_order(const std::string& id,
             if (!std::isnan(o.qty)) {
                 preserved_reserved_qty_out = o.qty;
             }
+            resting_trail_points = o.trail_points;
+            resting_trail_price = o.trail_price;
         }
     }
 
-    if (has_trail_request && !had_existing_order && position_side_ != PositionSide::FLAT) {
+    // A trail started fresh on a live position (no resting exit under this
+    // (id, from_entry)) restarts the running extreme from the issuing bar's
+    // close — but only when the request is FOR the live position. round 9
+    // family Z (shurben5-tradingview-bot-goat, BINANCE:ETHUSDT.P 15m): a
+    // script that re-issues both sides' layered exits on every bar calls
+    // strategy.exit("Exit Long", from_entry="Long", trail_points=...) while
+    // SHORT; no "Long" lot is open, TradingView places nothing for it, and
+    // the SHORT's trailing extreme must keep the entry bar's low (2025-12-25
+    // 07:15Z: low 2938.71, close 2938.84 -> TV "Trail Short" 2939.21 =
+    // low + 50t on the next bar; the close-restart printed 2939.34.
+    // 2026-04-24 22:15Z: low 2311.53, close 2311.85 -> TV 2312.03 on the
+    // 22:30Z opening rise; the restarted 2312.35 was never touched and the
+    // engine rode down to TP2 2310.82). The extreme is the position's,
+    // measured from its entry fill along every bar's path; an exit for an id
+    // that holds none of it does not touch it.
+    //
+    // A re-issue that MOVES the resting trail's ACTIVATION (trail_points /
+    // trail_price) is a replaced order: TradingView measures the new trail
+    // from the re-issue, and the extreme restarts from that bar's close
+    // (`lab tv` famz-trail-S-20251225-D: trail_points alternating 100/101t
+    // per bar, entry bar L 2938.71 C 2938.84 -> "Trail Short" 2939.34 =
+    // close + 50t; famz-trail-L-20260425-D: entry bar H 2314.94 C 2314.86,
+    // next open 2314.87 -> 2314.37 = that open - 50t). winthetrade
+    // ema-9-vwap on CME_MINI:NQ1! 15m re-issues strategy.exit(trail_points=
+    // atr*2, trail_offset=atr*2) every bar (process_orders_on_close): the
+    // pre-fix engine matched all 55 such exits by restarting through the
+    // opposite side's call; without any restart 21 of them trail out early.
+    // A re-issue that changes ONLY trail_offset keeps the running extreme
+    // and applies the new distance (famz-trail-S-20251225-E: offset
+    // alternating 50/51t -> 2939.22 = the entry bar's low + 51t;
+    // famz-trail-L-20260425-E -> 2314.43 = high - 51t), and a re-issue with
+    // the same request modifies nothing (shurben5: identical every-bar
+    // re-issues keep the entry bar's extreme, famz-trail-*-{A,B,C}).
+    auto same_request = [](double a, double b) {
+        return (std::isnan(a) && std::isnan(b)) || a == b;
+    };
+    const bool trail_request_changed = had_existing_order
+        && !(same_request(resting_trail_points, trail_points)
+             && same_request(resting_trail_price, trail_price));
+    if (has_trail_request && position_side_ != PositionSide::FLAT
+        && from_entry_holds_live_lot(from_entry)
+        && (!had_existing_order || trail_request_changed)) {
         trail_best_price_ = current_bar_.close;
     }
 

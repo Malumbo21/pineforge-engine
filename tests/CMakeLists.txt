@@ -113,6 +113,7 @@ set(TEST_SOURCES
     test_market_entry_affordability
     test_percent_equity_affordability
     test_stop_tick_rounding
+    test_level_grid_snap
     test_zero_lot_entry_decline
     test_pooc_coof_reversal_gross_admission
     test_limit_fill_slippage
@@ -171,6 +172,7 @@ set(TEST_SOURCES
     test_close_id_retires_ledger
     test_trail_open_arm_subtick_offset
     test_trail_fill_snap
+    test_trail_ref_entry_bar_extreme
     test_trail_activation_tick_bar
     test_session_predicates_daily_chart
 )

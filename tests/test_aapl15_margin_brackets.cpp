@@ -225,6 +225,116 @@ static const BarRow kAaplScalper[] = {
     {1753106400000LL, 214.05, 214.76, 214.01, 214.73},   // [31] 14:00
 };
 
+// NASDAQ:AAPL 15, 2025-05-06 19:00Z .. 2025-05-08 13:45Z.
+static const BarRow kAaplBouga0507[] = {
+    {1746558000000LL, 199.83, 199.84, 199.23, 199.56},  // [0] 05-06 19:00
+    {1746558900000LL, 199.56, 199.805, 199.335, 199.71}, // [1] 19:15
+    {1746559800000LL, 199.75, 200.01, 199.58, 199.88},  // [2] 19:30 long signal
+    {1746560700000LL, 199.88, 200.16, 198.37, 198.445}, // [3] 19:45 long fill
+    {1746624600000LL, 199.17, 199.43, 197.35, 198.33},  // [4] 05-07 13:30 short signal
+    {1746625500000LL, 198.33, 198.69, 197.69, 197.8},   // [5] 13:45 flip bar
+    {1746626400000LL, 197.81, 199.15, 197.77, 199.05},  // [6] 14:00
+    {1746627300000LL, 199.07, 199.44, 198.81, 199.22},  // [7] 14:15
+    {1746628200000LL, 199.23, 199.4, 198.85, 199.01},   // [8] 14:30
+    {1746629100000LL, 199, 199.05, 197.44, 197.47},     // [9] 14:45
+    {1746630000000LL, 197.45, 197.5, 194.25, 194.4},    // [10] 15:00
+    {1746630900000LL, 194.41, 194.96, 193.81, 194.32},  // [11] 15:15
+    {1746631800000LL, 194.35, 194.66, 193.25, 194.41},  // [12] 15:30
+    {1746632700000LL, 194.41, 195.12, 193.9, 195.1},    // [13] 15:45
+    {1746633600000LL, 195.1, 195.27, 194.56, 195.1},    // [14] 16:00
+    {1746634500000LL, 195.1, 195.37, 194.52, 194.86},   // [15] 16:15
+    {1746635400000LL, 194.87, 195.55, 194.56, 195.53},  // [16] 16:30
+    {1746636300000LL, 195.51, 195.71, 195.28, 195.61},  // [17] 16:45
+    {1746637200000LL, 195.6, 195.76, 195.22, 195.58},   // [18] 17:00
+    {1746638100000LL, 195.59, 195.64, 195.05, 195.32},  // [19] 17:15
+    {1746639000000LL, 195.31, 195.35, 194.5, 194.64},   // [20] 17:30
+    {1746639900000LL, 194.64, 195.11, 194.23, 194.6},   // [21] 17:45
+    {1746640800000LL, 194.6, 195.13, 193.3, 193.73},    // [22] 18:00
+    {1746641700000LL, 193.69, 194.31, 193.46, 194.03},  // [23] 18:15
+    {1746642600000LL, 194, 195.22, 193.85, 194.86},     // [24] 18:30
+    {1746643500000LL, 194.89, 195.71, 194.03, 195.44},  // [25] 18:45
+    {1746644400000LL, 195.41, 195.47, 194.75, 195.1},   // [26] 19:00
+    {1746645300000LL, 195.09, 195.22, 194.13, 194.32},  // [27] 19:15 last re-issue
+    {1746646200000LL, 194.32, 197.47, 194.29, 196.23},  // [28] 19:30 S TP2 stop
+    {1746647100000LL, 196.2, 196.75, 195.06, 196.23},   // [29] 19:45
+    {1746711000000LL, 197.73, 198.13, 196.25, 196.64},  // [30] 05-08 13:30 close_all
+    {1746711900000LL, 196.63, 196.85, 196.08, 196.13},  // [31] 13:45 fill
+};
+
+// NASDAQ:AAPL 15, 2025-06-24 13:45Z .. 2025-06-25 15:00Z.
+static const BarRow kAaplBouga0624[] = {
+    {1750772700000LL, 201.87, 201.89, 200.22, 200.36},   // [0] 06-24 13:45
+    {1750773600000LL, 200.38, 201.19, 200.21, 200.74},   // [1] 14:00 short signal
+    {1750774500000LL, 200.76, 201.31, 200.655, 200.98},  // [2] 14:15 short fill
+    {1750775400000LL, 201, 201.4, 200.9, 201.38},        // [3] 14:30 long signal
+    {1750776300000LL, 201.38, 201.58, 200.75, 200.99},   // [4] 14:45 flip bar
+    {1750777200000LL, 200.98, 201.36, 200.73, 201.2},    // [5] 15:00
+    {1750778100000LL, 201.19, 201.45, 201, 201.44},      // [6] 15:15
+    {1750779000000LL, 201.45, 202.03, 201.21, 201.99},   // [7] 15:30
+    {1750779900000LL, 201.99, 202.09, 201.69, 201.9},    // [8] 15:45
+    {1750780800000LL, 201.91, 202.48, 201.81, 202.2},    // [9] 16:00
+    {1750781700000LL, 202.2, 202.565, 202.08, 202.45},   // [10] 16:15
+    {1750782600000LL, 202.46, 203.43, 202.43, 203.35},   // [11] 16:30 L TP1
+    {1750783500000LL, 203.35, 203.39, 202.29, 202.41},   // [12] 16:45
+    {1750784400000LL, 202.44, 202.53, 201.99, 202.17},   // [13] 17:00
+    {1750785300000LL, 202.17, 202.52, 201.94, 201.96},   // [14] 17:15
+    {1750786200000LL, 201.97, 202.28, 201.86, 202.22},   // [15] 17:30
+    {1750787100000LL, 202.21, 202.33, 202.04, 202.19},   // [16] 17:45
+    {1750788000000LL, 202.21, 202.26, 201.44, 201.49},   // [17] 18:00
+    {1750788900000LL, 201.5, 201.69, 201.31, 201.57},    // [18] 18:15
+    {1750789800000LL, 201.57, 201.83, 201.47, 201.58},   // [19] 18:30
+    {1750790700000LL, 201.58, 201.62, 201.31, 201.45},   // [20] 18:45
+    {1750791600000LL, 201.46, 202.015, 201.43, 201.75},  // [21] 19:00
+    {1750792500000LL, 201.755, 201.9, 201.525, 201.53},  // [22] 19:15
+    {1750793400000LL, 201.53, 201.595, 200.82, 200.84},  // [23] 19:30
+    {1750794300000LL, 200.85, 200.94, 200.27, 200.3},    // [24] 19:45
+    {1750858200000LL, 201.44, 203.65, 201.2, 202.24},    // [25] 06-25 13:30
+    {1750859100000LL, 202.27, 202.78, 201.68, 201.77},   // [26] 13:45
+    {1750860000000LL, 201.77, 201.8, 201.35, 201.4},     // [27] 14:00 short signal
+    {1750860900000LL, 201.41, 202.45, 201.24, 202.43},   // [28] 14:15 flip bar
+    {1750861800000LL, 202.425, 203.17, 202.26, 203.07},  // [29] 14:30 S TP2 stop
+    {1750862700000LL, 203.07, 203.1, 202.28, 202.46},    // [30] 14:45 close_all
+    {1750863600000LL, 202.45, 202.56, 202.15, 202.23},   // [31] 15:00 fill
+};
+
+// NYSE:F 15 (feed 80f404ae85ef), 2025-08-07 19:45Z .. 2025-08-11 15:00Z.
+static const BarRow kFordBouga0808[] = {
+    {1754595900000LL, 11.25, 11.29, 11.25, 11.29},      // [0] 08-07 19:45 short signal
+    {1754659800000LL, 11.305, 11.33, 11.22, 11.22},     // [1] 08-08 13:30 short fill
+    {1754660700000LL, 11.225, 11.27, 11.21, 11.27},     // [2] 13:45 long signal
+    {1754661600000LL, 11.27, 11.34, 11.265, 11.33},     // [3] 14:00 flip bar
+    {1754662500000LL, 11.33, 11.34, 11.305, 11.315},    // [4] 14:15
+    {1754663400000LL, 11.315, 11.35, 11.3, 11.325},     // [5] 14:30
+    {1754664300000LL, 11.325, 11.33, 11.305, 11.32},    // [6] 14:45
+    {1754665200000LL, 11.32, 11.365, 11.3, 11.305},     // [7] 15:00
+    {1754666100000LL, 11.305, 11.325, 11.28, 11.325},   // [8] 15:15
+    {1754667000000LL, 11.325, 11.325, 11.28, 11.28},    // [9] 15:30
+    {1754667900000LL, 11.28, 11.305, 11.275, 11.305},   // [10] 15:45
+    {1754668800000LL, 11.305, 11.33, 11.305, 11.315},   // [11] 16:00
+    {1754669700000LL, 11.32, 11.325, 11.28, 11.285},    // [12] 16:15
+    {1754670600000LL, 11.285, 11.29, 11.27, 11.285},    // [13] 16:30
+    {1754671500000LL, 11.285, 11.295, 11.28, 11.295},   // [14] 16:45
+    {1754672400000LL, 11.295, 11.3, 11.285, 11.295},    // [15] 17:00
+    {1754673300000LL, 11.295, 11.33, 11.295, 11.325},   // [16] 17:15
+    {1754674200000LL, 11.325, 11.33, 11.315, 11.33},    // [17] 17:30
+    {1754675100000LL, 11.325, 11.335, 11.325, 11.33},   // [18] 17:45
+    {1754676000000LL, 11.335, 11.34, 11.33, 11.335},    // [19] 18:00
+    {1754676900000LL, 11.335, 11.335, 11.325, 11.325},  // [20] 18:15
+    {1754677800000LL, 11.325, 11.33, 11.32, 11.325},    // [21] 18:30
+    {1754678700000LL, 11.325, 11.33, 11.31, 11.315},    // [22] 18:45
+    {1754679600000LL, 11.315, 11.33, 11.31, 11.325},    // [23] 19:00
+    {1754680500000LL, 11.33, 11.34, 11.325, 11.335},    // [24] 19:15
+    {1754681400000LL, 11.335, 11.34, 11.32, 11.325},    // [25] 19:30
+    {1754682300000LL, 11.325, 11.34, 11.32, 11.335},    // [26] 19:45
+    {1754919000000LL, 11.32, 11.57, 11.31, 11.535},     // [27] 08-11 13:30 TP1+TP2, long signal
+    {1754919900000LL, 11.535, 11.54, 11.35, 11.4},      // [28] 13:45 long fill
+    {1754920800000LL, 11.4, 11.405, 11.29, 11.295},     // [29] 14:00
+    {1754921700000LL, 11.3, 11.315, 11.275, 11.295},    // [30] 14:15
+    {1754922600000LL, 11.295, 11.38, 11.06, 11.16},     // [31] 14:30 L TP2 stop
+    {1754923500000LL, 11.15, 11.18, 11.14, 11.165},     // [32] 14:45 close_all
+    {1754924400000LL, 11.16, 11.21, 11.12, 11.13},      // [33] 15:00 fill
+};
+
 // The tapes' broker: 1x margin both sides, margin calls on, market fills at
 // the next open, integer lots, mintick 0.01, no commission. FIXED default
 // sizing by default (the tapes' fixed lots); PERCENT_OF_EQUITY 100 for the
@@ -488,6 +598,137 @@ void test_scalper_b_control_stop_at_level_no_slice() {
     CHECK(p.flat());
 }
 
+// therealbouga's layered legs: TP1 = close - 1.5 R (qty_percent 50), TP2 =
+// close - 2.5 R with the stop at high + atr (R = stop - close), the default
+// leg. atr is the probe's ta.atr(14); 0.88 reproduces the pinned 19:15Z stop
+// 196.10 and keeps every earlier level clear of the bars it rests on.
+void bouga_short_legs(Probe& e, double close, double high) {
+    const double sl = high + 0.88;
+    const double r = sl - close;
+    e.exit_limit_pct("S TP1", "Short", close - 1.5 * r, 50.0);
+    e.exit_limit_stop("S TP2", "Short", close - 2.5 * r, sl);
+}
+
+// ---------------------------------------------------------------------------
+// F. M3 — therealbouga AAPL 05-07 (TV#4-6): long 236 carried; the 13:30Z
+// signal issues the 502-share Short reversal with 'S TP1' (50%) and 'S TP2'
+// (default), all three re-issued on every bar the condition holds (the entry
+// refused by pyramiding=0). The 13:45Z open flips (236 closed @198.33, 502
+// opened). The 19:15Z re-issue sets the stop at 196.10; the 19:30Z bar fires
+// it: TV closes 251 ('S TP2') and holds 251 (to the 05-14 reversal; here to
+// the 05-08 13:45Z close_all fill). The engine printed 502 'S TP2' — TP1
+// froze 118 against the OLD long and the 13:45Z re-issue dropped it behind
+// the still-deferred 100% sibling.
+// ---------------------------------------------------------------------------
+void test_bouga_0507_reversal_layered_split_survives_reissue() {
+    std::printf("-- F. therealbouga AAPL 05-07: flip 236L -> 502S, re-issued legs, 'S TP2' stop closes 251 --\n");
+    Probe p(1000000.0, 236.0);
+    p.script = [](Probe& e, int bar) {
+        if (bar == 2) e.entry_default("Long", true);
+        if (bar == 4) e.set_default_qty(502.0);
+        const bool signal = (bar >= 4 && bar <= 21) || bar == 27;
+        if (signal) {
+            const BarRow& b = kAaplBouga0507[bar];
+            e.entry_default("Short", false);
+            bouga_short_legs(e, b.close, b.high);
+        }
+        if (bar == 30) e.close_all();
+    };
+    std::vector<Bar> bars = to_bars(kAaplBouga0507);
+    p.run(bars.data(), (int)bars.size());
+    print_trades(p);
+    CHECK(p.trade_count() == 3);
+    CHECK(p.margin_call_rows() == 0);
+    check_trade(p, 0, true, 3, 199.88, 236.0, 5, 198.33, "", -365.80);
+    check_trade(p, 1, false, 5, 198.33, 251.0, 28, 196.10, "S TP2", 559.73);
+    check_trade(p, 2, false, 5, 198.33, 251.0, 31, 196.63, "", 426.70);
+    CHECK(p.flat());
+}
+
+// ---------------------------------------------------------------------------
+// G. M3 — therealbouga AAPL 06-24 (TV#20-24): short 250 carried; the 14:30Z
+// signal issues the 490-share Long reversal with 'L TP1' (limit 203.26, 50%)
+// and 'L TP2' (limit 204.60, stop 199.90), NOT re-issued. The 14:45Z open
+// flips (250 closed @201.38). 16:30Z: 'L TP1' closes 245 @203.26 (the engine
+// printed 125 — 50% of the OLD 250 — and 364 by the sibling). The 06-25
+// 14:00Z signal reverses again (490 short, 'S TP1' 199.50 / 'S TP2' 198.00 +
+// stop 202.61): the remaining 245 close @201.41 at the 14:15Z open, and the
+// 14:30Z bar fires the new stop for exactly 245 @202.61; close_all takes the
+// last 245 @202.45.
+// ---------------------------------------------------------------------------
+void test_bouga_0624_reversal_layered_split_without_reissue() {
+    std::printf("-- G. therealbouga AAPL 06-24: flip 250S -> 490L, 'L TP1' 245 @203.26; 06-25 flip, 'S TP2' 245 @202.61 --\n");
+    Probe p(1000000.0, 250.0);
+    p.script = [](Probe& e, int bar) {
+        if (bar == 1) e.entry_default("Short", false);
+        if (bar == 3) {
+            e.set_default_qty(490.0);
+            e.entry_default("Long", true);
+            e.exit_limit_pct("L TP1", "Long", 203.26, 50.0);
+            e.exit_limit_stop("L TP2", "Long", 204.60, 199.90);
+        }
+        if (bar == 27) {
+            e.entry_default("Short", false);
+            e.exit_limit_pct("S TP1", "Short", 199.50, 50.0);
+            e.exit_limit_stop("S TP2", "Short", 198.00, 202.61);
+        }
+        if (bar == 30) e.close_all();
+    };
+    std::vector<Bar> bars = to_bars(kAaplBouga0624);
+    p.run(bars.data(), (int)bars.size());
+    print_trades(p);
+    CHECK(p.trade_count() == 5);
+    CHECK(p.margin_call_rows() == 0);
+    check_trade(p, 0, false, 2, 200.76, 250.0, 4, 201.38, "", -155.00);
+    check_trade(p, 1, true, 4, 201.38, 245.0, 11, 203.26, "L TP1", 460.60);
+    check_trade(p, 2, true, 4, 201.38, 245.0, 28, 201.41, "", 7.35);
+    check_trade(p, 3, false, 28, 201.41, 245.0, 29, 202.61, "S TP2", -294.00);
+    check_trade(p, 4, false, 28, 201.41, 245.0, 31, 202.45, "", -254.80);
+    CHECK(p.flat());
+}
+
+// ---------------------------------------------------------------------------
+// H. M3 — therealbouga F 08-08 (TV#38-42): short 4591 carried; the 08-08
+// 13:45Z signal issues the 8890-share Long reversal with 'L TP1' (11.43, 50%)
+// and 'L TP2' (limit 11.53, stop 10.90). The 14:00Z open flips (4591 closed
+// @11.27). 08-11 13:30Z gaps through both limits: 4445 @11.43 + 4445 @11.53
+// (the engine printed 2293 / 6588). The 13:30Z signal re-enters from FLAT
+// (8698, 'L TP1' 12.00 / 'L TP2' 12.40 + stop 11.26): filled 13:45Z @11.54,
+// the 14:30Z bar fires the stop for exactly 4349 @11.26 (the flat-armed
+// split, unchanged); close_all takes the last 4349 @11.16.
+// ---------------------------------------------------------------------------
+void test_bouga_f_0808_reversal_layered_split_and_flat_reentry() {
+    std::printf("-- H. therealbouga F 08-08: flip 4591S -> 8890L, 4445 @11.43 + 4445 @11.53; flat re-entry 4349/4349 --\n");
+    Probe p(1000000.0, 4591.0);
+    p.script = [](Probe& e, int bar) {
+        if (bar == 0) e.entry_default("Short", false);
+        if (bar == 2) {
+            e.set_default_qty(8890.0);
+            e.entry_default("Long", true);
+            e.exit_limit_pct("L TP1", "Long", 11.43, 50.0);
+            e.exit_limit_stop("L TP2", "Long", 11.53, 10.90);
+        }
+        if (bar == 27) {
+            e.set_default_qty(8698.0);
+            e.entry_default("Long", true);
+            e.exit_limit_pct("L TP1", "Long", 12.00, 50.0);
+            e.exit_limit_stop("L TP2", "Long", 12.40, 11.26);
+        }
+        if (bar == 32) e.close_all();
+    };
+    std::vector<Bar> bars = to_bars(kFordBouga0808);
+    p.run(bars.data(), (int)bars.size());
+    print_trades(p);
+    CHECK(p.trade_count() == 5);
+    CHECK(p.margin_call_rows() == 0);
+    check_trade(p, 0, false, 1, 11.31, 4591.0, 3, 11.27, "", 183.64);
+    check_trade(p, 1, true, 3, 11.27, 4445.0, 27, 11.43, "L TP1", 711.20);
+    check_trade(p, 2, true, 3, 11.27, 4445.0, 27, 11.53, "L TP2", 1155.70);
+    check_trade(p, 3, true, 28, 11.54, 4349.0, 31, 11.26, "L TP2", -1217.72);
+    check_trade(p, 4, true, 28, 11.54, 4349.0, 33, 11.16, "", -1652.62);
+    CHECK(p.flat());
+}
+
 }  // namespace
 
 int main() {
@@ -497,6 +738,9 @@ int main() {
     test_algoai_1030_declined_reversal_open_slice_revives_stop();
     test_scalper_0721_declined_reversal_cascade_revives_stop_same_bar();
     test_scalper_b_control_stop_at_level_no_slice();
+    test_bouga_0507_reversal_layered_split_survives_reissue();
+    test_bouga_0624_reversal_layered_split_without_reissue();
+    test_bouga_f_0808_reversal_layered_split_and_flat_reentry();
     std::printf("\n=== Results: %d passed, %d failed ===\n",
                 tests_passed, tests_failed);
     return tests_failed == 0 ? 0 : 1;
