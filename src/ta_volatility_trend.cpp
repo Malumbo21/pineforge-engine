@@ -8,6 +8,7 @@
  */
 
 #include <pineforge/ta.hpp>
+#include <pineforge/pine_float_compare.hpp>
 #include <pineforge/na.hpp>
 
 #include <algorithm>
@@ -282,8 +283,20 @@ DMIResult DMI::compute(double high, double low, double close) {
     double up_move = high - prev_high_;
     double down_move = prev_low_ - low;
 
-    double plus_dm = (up_move > down_move && up_move > 0.0) ? up_move : 0.0;
-    double minus_dm = (down_move > up_move && down_move > 0.0) ? down_move : 0.0;
+    // Pine's `up > down and up > 0` — the TOLERANT relational (|a - b| <=
+    // 1e-10 is equal, pine_float_compare.hpp), not IEEE strict: on the
+    // NYSE:F 15m 2025-07-15 19:30Z bar up = 11.58 - 11.565 and down = 11.54
+    // - 11.525 are both 0.015 in decimal, 1.78e-15 apart in doubles, and
+    // TradingView's ta.dmi books plusDM = minusDM = 0 (`lab tv`
+    // f15-plusdm-perbar-0714 / f15-dmi-internals-0718: TV rma(plusDM)
+    // 0.006907 vs the strict model's 0.006939, +DI 16.92562 vs 17.00417,
+    // ADX 24.22 vs 23.57 at the 07-18 14:15Z signal — round 7 family K,
+    // boztilkiserhan wma-adx-trailing). One bar's plusDM moves +DI for
+    // weeks, so the strict compare fired a whole ADX > 24 short late.
+    double plus_dm = (pine_float_gt(up_move, down_move)
+                      && pine_float_gt(up_move, 0.0)) ? up_move : 0.0;
+    double minus_dm = (pine_float_gt(down_move, up_move)
+                       && pine_float_gt(down_move, 0.0)) ? down_move : 0.0;
 
     // True range (Pine / ta.tr: max(high-low, |high-prev_close|, |low-prev_close|))
     double tr = std::max({high - low,

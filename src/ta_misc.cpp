@@ -9,6 +9,7 @@
 
 #include <pineforge/ta.hpp>
 #include <pineforge/na.hpp>
+#include <pineforge/pine_float_compare.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -21,15 +22,10 @@ namespace ta {
 
 namespace {
 
-constexpr double kPineFloatEqualityBand = 1e-10;
-
+// Pine's tolerant `<=` (pine_float_compare.hpp): the band that used to live
+// here is the engine-wide constant now that ta.dmi decides on it too.
 bool percentrank_less_equal(double lhs, double rhs) {
-    if (is_na(lhs) || is_na(rhs)) return false;
-    const bool equal =
-        lhs == rhs ||
-        (std::isfinite(lhs) && std::isfinite(rhs) &&
-         std::fabs(lhs - rhs) <= kPineFloatEqualityBand);
-    return lhs < rhs || equal;
+    return pine_float_le(lhs, rhs);
 }
 
 }  // namespace
