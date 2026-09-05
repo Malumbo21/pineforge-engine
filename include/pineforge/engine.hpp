@@ -29,6 +29,27 @@ namespace pineforge {
 
 enum class PositionSide { FLAT, LONG, SHORT };
 
+// TradingView's broker carries MONEY at TEN SIGNIFICANT DIGITS, half-up —
+// 3 decimals at >= 1e6, 4 decimals below (round 8 family R, OANDA:EURUSD@15,
+// campaign notes log-20260905t164404z-85800609 and log-20260905t180249z-
+// 10358e84). Round 10 family AB (BINANCE:ETHUSDT.P@15 hard lane, the corpus
+// probe anomaly-equity-mirror-strategy-equity-01, campaign note
+// log-20260905t213120z-d5f9e282) lands the one consequence that probe needs:
+// the margin-100 LONG margin call on rounded money
+// (tv_money_long_margin_call, engine_fills.cpp). Family R's sizing /
+// admission consequences (rules 1, 2, 5 on round8/famR-eurusd) are NOT
+// here; they share this helper and tv_money_scope by name so the branches
+// merge onto one definition.
+// tv_money_round is the NEAREST DOUBLE of the decimal rounding (the
+// division by an exact power of ten is correctly rounded).
+inline double tv_money_round(double value) {
+    if (!std::isfinite(value) || value == 0.0) return value;
+    const double magnitude = std::floor(std::log10(std::abs(value)));
+    const double scale = std::pow(10.0, 9.0 - magnitude);
+    const double rounded = std::floor(std::abs(value) * scale + 0.5) / scale;
+    return value < 0.0 ? -rounded : rounded;
+}
+
 // Forward declaration of an internal enum used by some BacktestEngine
 // method signatures. The full definition lives in src/engine_internal.hpp
 // (private to libruntime); only the underlying-type pin is needed here.
@@ -1768,6 +1789,21 @@ protected:
         return std::floor(price / syminfo_mintick_ + 0.5) * syminfo_mintick_;
     }
 
+    // round 8 family R scope: the 10-significant-digit money arithmetic
+    // (tv_money_round) is applied where it was pinned and where it can move a
+    // lot — a lot-stepped instrument whose lot is worth less than one unit of
+    // account currency at the sizing price (OANDA:EURUSD 0.01 x 1.1 = 0.011;
+    // BINANCE:BTCUSDT 1e-5 x 85,000 = 0.85; ETHUSDT.P 1e-4 x 2,500 = 0.25).
+    // On integer-lot instruments (F, AAPL, ES, NQ, NIFTY: a lot is 10..250k)
+    // and on the corpus' continuous qty_step 0 the exact arithmetic stays:
+    // there the rounding could only ever bite on a synthetic exact tie.
+    bool tv_money_scope(double price) const {
+        if (!(qty_step_ > 0.0) || !std::isfinite(price) || price <= 0.0) return false;
+        const double lot_value = qty_step_ * price * syminfo_.pointvalue
+                                 * active_account_currency_fx();
+        return std::isfinite(lot_value) && lot_value < 1.0;
+    }
+
     // A fill taken AT A RAW BAR PRICE — a market order at the bar close
     // (process_orders_on_close) or at the next open, a resting stop/limit
     // the open gapped through, a stop-limit whose limit is already
@@ -3456,6 +3492,10 @@ private:
     // side (see PendingOrder::suppress_as_declined_reversal_close), re-crediting
     // each flagged close's consumed id-ledger exactly once.
     void suppress_declined_reversal_close_legs(const PendingOrder& declined_entry);
+    // round 8 family R / round 10 family AB: the 10-significant-digit
+    // margin-call trigger on a margin-100 LONG (process_margin_call; rule
+    // and pins on tv_money_long_margin_call in engine_fills.cpp).
+    bool tv_money_long_margin_call(const Bar& bar);
     // finding-311: mark the live position's standing strategy.exit brackets
     // dormant when an in-position reversal entry is declined at fill.
     void mark_position_brackets_dormant_on_declined_reversal();
