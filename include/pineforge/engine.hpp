@@ -1551,9 +1551,14 @@ protected:
     // evaluation — TradingView closes 1025 @9.84 through the pending close
     // where the engine sliced 48 @9.84 first. True when such an order rests
     // in the book (created on a prior bar, no priced leg, covers the whole
-    // position); margin_call_slice_at_bar_open then stands down. A partial
-    // close or a priced exit the open gapped through keeps the open slice
-    // (unpinned).
+    // position) AND no opposite-side entry order rests for the same open:
+    // a close paired with a reversal entry is voided when TradingView
+    // declines that reversal by admission (pin log-20260905t111645z-
+    // e1783b94), so the open slice must stand (round-8 regression on the
+    // all-in reversal scripts: amandaborgeson06 F@15 2025-05-01 13:30Z,
+    // hexatrades AAPL@15 2025-07-29 13:30Z). margin_call_slice_at_bar_open
+    // then stands down only for the unconditional close. A partial close or
+    // a priced exit the open gapped through keeps the open slice (unpinned).
     bool whole_position_market_close_rests_for_open() const;
     // Round 7 family L (campaign pin log-20260905t093952z-0c4938cb; lab tv
     // tapes scratchpad/r7/pins/xau15-mcpath-{a,b}, fresh-touch-once): on the

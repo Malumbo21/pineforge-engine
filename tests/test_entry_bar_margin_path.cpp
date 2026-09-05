@@ -52,6 +52,16 @@
  *      a whole-position strategy.close resting for a gap-open fills BEFORE
  *      the open's margin evaluation — no open slice; a partial close keeps
  *      the finding-430 open slice ahead of it (unpinned, unchanged).
+ *   H. Round-8 regression (cand-round8-engine-a-20260905, 19 all-in reversal
+ *      scripts down): the close of a `strategy.entry(long) + strategy.close
+ *      (short)` reversal pair is NOT that unconditional close. TradingView
+ *      decides the reversal's admission at the open first and a declined
+ *      reversal voids its close (pin log-20260905t111645z-e1783b94), so the
+ *      open slice stands: amandaborgeson06 bias-status NYSE:F@15 2025-05-01
+ *      13:30Z (40 @10.15, TV #34) and hexatrades technical-strength-gauge
+ *      NASDAQ:AAPL@15 2025-07-29 13:30Z (24 @214.16 THEN 72 @214.81, TV
+ *      #253/#254), both on the registry bars with TV's own equity. The
+ *      over-general guard stood down and sliced 96 @10.23 / 168 @214.81.
  */
 
 #include <cmath>
@@ -277,6 +287,11 @@ public:
         strategy_entry(id, is_long, kNaN, kNaN, qty, "");
     }
     void close_all() { strategy_close_all(); }
+    // default_qty_type = percent_of_equity, 100 (the all-in reversal scripts).
+    void all_in() {
+        default_qty_type_ = QtyType::PERCENT_OF_EQUITY;
+        default_qty_value_ = 100.0;
+    }
     using BacktestEngine::strategy_close;
     bool flat() const { return position_side_ == PositionSide::FLAT; }
     int margin_call_rows() const {
@@ -573,6 +588,128 @@ void test_pending_partial_close_keeps_open_slice() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// H. The reversal pair's close is not an unconditional close (round 8).
+//
+// H1. amandaborgeson06 bias-status NYSE:F@15 (feed 80f404ae85ef), TV's own
+// equity 10,000 - 900.69 = 9,099.31 before TV #33: the all-in short placed at
+// the 2025-04-30 13:45Z close fills 920 @9.89 at the 14:00Z open (TV #33-35),
+// 36 sliced at the entry bar's high 9.94 (TV #33). The buy signal at the
+// 19:45Z close issues `strategy.entry(long)` + `strategy.close(short)`; the
+// 05-01 13:30Z open gaps to 10.15: the all-in reversal (901 x 10.15 > E_s
+// 9,009.11) is declined and its close voided, the open slice 40 @10.15 stands
+// (TV #34, restore 10.34 -> 4 x 10), the 844 remainder carries (TV #35 closes
+// it at 19:30Z). The over-general guard printed 96 @10.23 (the high) instead.
+// ---------------------------------------------------------------------------
+static const BarRow kFordAmanda[] = {
+    {1746020700000LL, 9.93, 9.965, 9.88, 9.89},     // [0] 04-30 13:45 signal
+    {1746021600000LL, 9.89, 9.94, 9.89, 9.94},      // [1] 14:00 entry bar
+    {1746022500000LL, 9.935, 9.995, 9.925, 9.985},  // [2] 14:15
+    {1746023400000LL, 9.985, 10.01, 9.97, 9.985},   // [3] 14:30
+    {1746024300000LL, 9.985, 9.985, 9.915, 9.935},  // [4] 14:45
+    {1746025200000LL, 9.935, 9.97, 9.935, 9.955},   // [5] 15:00
+    {1746026100000LL, 9.95, 9.96, 9.92, 9.94},      // [6] 15:15
+    {1746027000000LL, 9.935, 9.955, 9.92, 9.945},   // [7] 15:30
+    {1746027900000LL, 9.945, 9.955, 9.915, 9.93},   // [8] 15:45
+    {1746028800000LL, 9.94, 9.95, 9.925, 9.925},    // [9] 16:00
+    {1746029700000LL, 9.93, 9.94, 9.9, 9.905},      // [10] 16:15
+    {1746030600000LL, 9.9, 9.92, 9.89, 9.905},      // [11] 16:30
+    {1746031500000LL, 9.91, 9.93, 9.9, 9.92},       // [12] 16:45
+    {1746032400000LL, 9.915, 9.93, 9.865, 9.89},    // [13] 17:00
+    {1746033300000LL, 9.885, 9.93, 9.885, 9.93},    // [14] 17:15
+    {1746034200000LL, 9.925, 9.95, 9.925, 9.945},   // [15] 17:30
+    {1746035100000LL, 9.94, 9.95, 9.92, 9.935},     // [16] 17:45
+    {1746036000000LL, 9.935, 9.955, 9.9, 9.935},    // [17] 18:00
+    {1746036900000LL, 9.93, 9.95, 9.92, 9.93},      // [18] 18:15
+    {1746037800000LL, 9.93, 9.945, 9.905, 9.915},   // [19] 18:30
+    {1746038700000LL, 9.915, 9.94, 9.91, 9.915},    // [20] 18:45
+    {1746039600000LL, 9.92, 9.93, 9.91, 9.93},      // [21] 19:00
+    {1746040500000LL, 9.93, 9.94, 9.91, 9.91},      // [22] 19:15
+    {1746041400000LL, 9.915, 9.945, 9.91, 9.945},   // [23] 19:30
+    {1746042300000LL, 9.945, 10.04, 9.945, 9.99},   // [24] 19:45 buy signal
+    {1746106200000LL, 10.15, 10.23, 10.025, 10.07}, // [25] 05-01 13:30 gap open
+    {1746107100000LL, 10.07, 10.12, 10.05, 10.1},   // [26] 13:45
+    {1746108000000LL, 10.095, 10.245, 10.095, 10.225}, // [27] 14:00
+};
+
+void test_declined_reversal_close_keeps_open_slice_ford() {
+    std::printf("-- H1. amandaborgeson06 F@15 2025-05-01 13:30Z: declined reversal, open slice 40 @10.15 stands --\n");
+    Probe p(9099.31, 0.01, 1.0, 0.0);
+    p.all_in();
+    p.script = [](Probe& e, int bar) {
+        if (bar == 0) e.entry_market("S", false, kNaN);
+        if (bar == 24) {
+            e.entry_market("L", true, kNaN);
+            e.strategy_close("S", "", kNaN, kNaN, false);
+        }
+    };
+    std::vector<Bar> bars = to_bars(kFordAmanda);
+    p.run(bars.data(), (int)bars.size());
+    print_trades(p);
+    CHECK(p.trade_count() == 2);
+    CHECK(p.margin_call_rows() == 2);
+    check_trade(p, 0, false, 1, 9.89, 36.0, 1, 9.94, "Margin call", -1.8);
+    check_trade(p, 1, false, 1, 9.89, 40.0, 25, 10.15, "Margin call", -10.4);
+    CHECK(p.position_side_ == PositionSide::SHORT);
+    CHECK_NEAR(p.position_qty_, 844.0, 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// H2. hexatrades technical-strength-gauge NASDAQ:AAPL@15 (feed ae2b03d3736f).
+// TV's short 6008 @214.03 (TV #252-255) was a long->short reversal sized on
+// E_s = realized 1,289,453.22 + the open long marked at tick(close); replayed
+// here from flat with an explicit 6008 and the capital 6008 x 214.04 =
+// 1,285,952.32 that the placement check (qty x max(tick(close), fill) <=
+// equity) admits — every slice below reproduces TV's quantity from it. The
+// short fills at the 2025-07-28 17:15Z open; 1 share at the entry bar's high
+// 214.04 (TV #252, restore 0.28 -> one contract). The buy signal at the
+// 19:45Z close issues the reversal pair; the 07-29 13:30Z open gaps to
+// 214.16: the all-in reversal (6009 x 214.16 > E_s 1,286,072.45) is declined,
+// its close voided, and the open slice 24 @214.16 (TV #253, restore 6.01 ->
+// 4 x 6) is followed by the extreme slice 72 @214.81 (TV #254, restore 18.28
+// -> 4 x 18) on the same bar; 5911 carry (TV #255). The over-general guard
+// printed 168 @214.81 alone.
+// ---------------------------------------------------------------------------
+static const BarRow kAaplHexa[] = {
+    {1753722000000LL, 214.335, 214.44, 213.98, 214.04},  // [0] 07-28 17:00 signal
+    {1753722900000LL, 214.03, 214.04, 213.42, 213.645},  // [1] 17:15 entry bar
+    {1753723800000LL, 213.64, 213.95, 213.63, 213.84},   // [2] 17:30
+    {1753724700000LL, 213.83, 214.02, 213.73, 213.74},   // [3] 17:45
+    {1753725600000LL, 213.74, 213.93, 213.68, 213.9},    // [4] 18:00
+    {1753726500000LL, 213.91, 213.98, 213.7, 213.81},    // [5] 18:15
+    {1753727400000LL, 213.825, 213.83, 213.45, 213.46},  // [6] 18:30
+    {1753728300000LL, 213.47, 213.6, 213.06, 213.15},    // [7] 18:45
+    {1753729200000LL, 213.14, 213.32, 213.06, 213.32},   // [8] 19:00
+    {1753730100000LL, 213.32, 213.43, 213.085, 213.43},  // [9] 19:15
+    {1753731000000LL, 213.42, 213.86, 213.325, 213.85},  // [10] 19:30
+    {1753731900000LL, 213.84, 214.04, 213.66, 214.01},   // [11] 19:45 buy signal
+    {1753795800000LL, 214.16, 214.81, 213.76, 213.89},   // [12] 07-29 13:30 gap open
+    {1753796700000LL, 213.89, 213.89, 211.51, 212.57},   // [13] 13:45
+};
+
+void test_declined_reversal_close_keeps_open_and_extreme_slices_aapl() {
+    std::printf("-- H2. hexatrades AAPL@15 2025-07-29 13:30Z: declined reversal, 24 @214.16 then 72 @214.81 --\n");
+    Probe p(1285952.32, 0.01, 1.0, 0.0);
+    p.all_in();
+    p.script = [](Probe& e, int bar) {
+        if (bar == 0) e.entry_market("S", false, 6008.0);
+        if (bar == 11) {
+            e.entry_market("L", true, kNaN);
+            e.strategy_close("S", "", kNaN, kNaN, false);
+        }
+    };
+    std::vector<Bar> bars = to_bars(kAaplHexa);
+    p.run(bars.data(), (int)bars.size());
+    print_trades(p);
+    CHECK(p.trade_count() == 3);
+    CHECK(p.margin_call_rows() == 3);
+    check_trade(p, 0, false, 1, 214.03, 1.0, 1, 214.04, "Margin call", -0.01);
+    check_trade(p, 1, false, 1, 214.03, 24.0, 12, 214.16, "Margin call", -3.12);
+    check_trade(p, 2, false, 1, 214.03, 72.0, 12, 214.81, "Margin call", -56.16);
+    CHECK(p.position_side_ == PositionSide::SHORT);
+    CHECK_NEAR(p.position_qty_, 5911.0, 1e-9);
+}
+
 }  // namespace
 
 int main() {
@@ -586,6 +723,8 @@ int main() {
     test_leveraged_long_market_open_fill_sees_the_low();
     test_pending_whole_close_preempts_open_slice();
     test_pending_partial_close_keeps_open_slice();
+    test_declined_reversal_close_keeps_open_slice_ford();
+    test_declined_reversal_close_keeps_open_and_extreme_slices_aapl();
     std::printf("\n=== Results: %d passed, %d failed ===\n",
                 tests_passed, tests_failed);
     return tests_failed == 0 ? 0 : 1;

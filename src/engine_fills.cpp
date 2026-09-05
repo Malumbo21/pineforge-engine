@@ -1700,6 +1700,34 @@ bool BacktestEngine::margin_call_1x_long_opening_slice_before_priced_exit(
 // the established once-per-script-bar placement (no exemplar).
 bool BacktestEngine::whole_position_market_close_rests_for_open() const {
     if (position_side_ == PositionSide::FLAT) return false;
+    // Round 8 regression (cand-round8-engine-a-20260905: 19 all-in reversal
+    // scripts on AAPL / NYSE:F / XAUUSD / NIFTY 15 fell from excellent, e.g.
+    // amandaborgeson06 bias-status F@15 2025-05-01 13:30Z, hexatrades
+    // technical-strength-gauge AAPL@15 2025-07-29 13:30Z, willowsportz
+    // willow-pulse AAPL@15 2025-04-08 13:30Z, algoai ema-rsi XAUUSD@15
+    // 2025-06-17 22:00Z): the close of an `if buy: strategy.entry(long);
+    // strategy.close(short)` pair is NOT a certain fill at the open. TV decides
+    // the reversal's admission at the open first, and a declined reversal
+    // voids its same-bar strategy.close of the old side (campaign pin
+    // log-20260905t111645z-e1783b94, the engine's
+    // suppress_as_declined_reversal_close) — the position then stays and the
+    // open slice stands (TV: 40 @10.15, 24 @214.16 then 72 @214.81, 408
+    // @186.65, 3.2 @3395.865; the engine had stood down and sliced at the
+    // high instead). Only an UNCONDITIONAL whole close — the F short tape's
+    // shape, no opposite-side entry resting for the same open — pre-empts
+    // the open's margin evaluation. The decline is decided inside the fill
+    // loop, after this open-boundary check, so the guard must not trust a
+    // close whose fate hangs on that decision.
+    for (const PendingOrder& o : pending_orders_) {
+        const bool entry_like = o.type == OrderType::MARKET
+            || o.type == OrderType::ENTRY
+            || o.type == OrderType::RAW_ORDER;
+        if (!entry_like) continue;
+        if (o.created_bar >= bar_index_) continue;
+        const PositionSide requested =
+            o.is_long ? PositionSide::LONG : PositionSide::SHORT;
+        if (requested != position_side_) return false;
+    }
     for (const PendingOrder& o : pending_orders_) {
         if (o.type != OrderType::EXIT) continue;
         if (o.id.size() < kClosePrefix.size()
