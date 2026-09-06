@@ -648,6 +648,10 @@ struct ExitTrailState {
     bool has_trail = false;
     bool trail_active = false;
     bool exits_at_activation = false;
+    // An EXPLICIT zero-tick trail_offset (0, or a sub-tick value that
+    // truncates to 0): once armed it is a zero-distance trailing stop on the
+    // raw running best (round 10 family AC), see compute_exit_trail_state.
+    bool zero_offset_rides = false;
 };
 
 // Initialize per-bar trail state from the strategy.exit parameters.
@@ -699,26 +703,47 @@ ExitTrailState compute_exit_trail_state(bool is_long, double trail_points,
     //
     // The truncation comes FIRST, and an offset that truncates to ZERO ticks
     // -- an explicit 0 or any sub-tick value in (0, 1) -- is TV's
-    // exit-at-activation trail (the one-shot rule below), NOT a zero-distance
-    // trail riding on the running extreme. Keep it represented as NaN so it
-    // follows the activation-only path; positive whole-tick offsets retain
-    // the ordinary best-price-minus/plus-offset trailing behaviour. Pinned
-    // with `lab tv` on OANDA:EURUSD 15m (2025-04-01 -> 05-01): the tapes for
+    // explicit-zero trail (the zero_offset_rides rule below): an activation
+    // first reached intrabar is the one-shot fill AT the activation; once
+    // armed it is a zero-distance trailing stop on the raw running best. Its
+    // offset price stays NaN so the activation-only route serves the
+    // dormant state; positive whole-tick offsets retain the ordinary
+    // best-price-minus/plus-offset trailing behaviour. Pinned with `lab tv`
+    // on OANDA:EURUSD 15m (2025-04-01 -> 05-01): the tapes for
     // strategy.exit("x", "L", trail_points=3, trail_offset=0),
     // trail_offset=0.5 and trail_offset=0.9 are byte-identical (190 rows,
     // sha256 36aa80ac...). The engine used to keep floor(0.6) = 0 as a
-    // FINITE zero distance, so the stop sat on the running extreme and
-    // filled at the bar's best price: winthetrade ema-9-vwap ATR trail
-    // (trail_offset = atr*2 passed as ticks) on OANDA:EURUSD 15m, short
-    // 2025-03-31 03:45Z @1.08330, atr*2 ~ 0.0006 "ticks" -> activation
-    // ceil -> 1 tick = 1.08329, offset floor -> 0; exit bar O 1.08330
-    // L 1.08314: TV 1.08329 (the activation), engine 1.08314 (the low).
+    // FINITE zero distance that armed at the bar's extreme and filled there
+    // even when the activation was first reached intrabar: winthetrade
+    // ema-9-vwap ATR trail (trail_offset = atr*2 passed as ticks) on
+    // OANDA:EURUSD 15m, short 2025-03-31 03:45Z @1.08330, atr*2 ~ 0.0006
+    // "ticks" -> activation ceil -> 1 tick = 1.08329, offset floor -> 0;
+    // exit bar O 1.08330 L 1.08314: TV 1.08329 (the activation), engine
+    // 1.08314 (the low).
     const double trail_offset_ticks = trail_offset_to_ticks(trail_offset);  // NaN stays NaN
     const bool zero_tick_offset = (trail_offset_ticks == 0.0);   // explicit [0, 1)
     if (!std::isnan(trail_offset_ticks) && !zero_tick_offset) {
         s.trail_offset_price = trail_offset_ticks * syminfo_mintick;
     }
     s.exits_at_activation = std::isnan(s.trail_offset_price);
+    s.zero_offset_rides = zero_tick_offset;
+    // A trail whose activation the position's running extreme has ALREADY
+    // reached starts the bar armed. The carried best is the raw running
+    // extreme; the activation test reads it tick-quantized
+    // (design-trail-activation-tick-bar), as the broker read the bars that
+    // produced it.
+    //
+    // An OMITTED trail_offset arms this way and keeps the exit-at-activation
+    // FILL rule: TV treats its activation as durable order state measured
+    // against the position's running extreme. Discriminator (corpus
+    // bracket-exit-stop-limit-trail-same-bar-01, 2025-08-30 08:45): entry
+    // 4392.08, activation 4392.26 from trail_points=atr with NO offset
+    // argument, entry-bar high 4396.01 crossed the level before the order's
+    // first live bar, whose open 4392.25 sits one tick BELOW the level — TV
+    // fills at that open, which only a carried armed state can produce.
+    // Offset>0 trails likewise keep the reconstruction: activation is
+    // durable for every trail that keeps running after it activates.
+    //
     // An EXPLICIT trail_offset=0 (or a sub-tick offset that truncates to 0
     // ticks, see above) arms from the carried best too, and once armed it
     // RIDES: the level is the raw running best itself (zero distance), an
@@ -785,7 +810,9 @@ double active_exit_trail_level(const ExitTrailState& s, bool is_long) {
         return std::numeric_limits<double>::quiet_NaN();
     }
     if (std::isnan(s.trail_offset_price)) {
-        return s.activation_level;
+        // An armed explicit-zero trail rides the raw running best (round 10
+        // family AC); the omitted-offset shape keeps its activation level.
+        return s.zero_offset_rides ? s.best_price : s.activation_level;
     }
     // best -/+ K ticks is a tick count too: 9.89 + 1 tick must equal the
     // 9.90 high that touches it (NYSE:F 15m 2025-04-03 14:00Z, `lab tv`
