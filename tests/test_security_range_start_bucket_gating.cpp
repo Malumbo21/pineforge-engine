@@ -170,10 +170,11 @@ public:
     std::vector<double> completed_close[3];
 
     explicit BucketGateHarness(const char* input_tf,
-                               const char* tf0, const char* tf1, const char* tf2) {
-        register_security_eval(0, tf0, input_tf, false, false);
-        register_security_eval(1, tf1, input_tf, false, false);
-        register_security_eval(2, tf2, input_tf, false, false);
+                               const char* tf0, const char* tf1, const char* tf2,
+                               bool lookahead = false) {
+        register_security_eval(0, tf0, input_tf, lookahead, false);
+        register_security_eval(1, tf1, input_tf, lookahead, false);
+        register_security_eval(2, tf2, input_tf, lookahead, false);
     }
     void evaluate_security(int sec_id, const Bar& bar, bool is_complete) override {
         if (!is_complete || sec_id < 0 || sec_id > 2) return;
@@ -613,6 +614,67 @@ static void test_flag_epoch_1d_chart_weekly_from_chart_dailies() {
 }
 #endif
 
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+// R19 covered TV pins on XAUUSD: starting at Apr1 00:00 UTC omits the
+// in-progress daily bar. time/close are na on Apr1 and ATR14[1] first reads
+// Apr23. This holds without an auxiliary feed and for both lookahead modes.
+// Keep W/M's existing no-history-evidence behavior outside the daily repair.
+static void test_single_feed_otc_daily_partial_bucket() {
+    int before = failures;
+    const auto full = make_forex_15m_feed();
+    const int64_t start = utc_ms(2025, 4, 1);
+    std::vector<Bar> bars;
+    for (const Bar& bar : full) if (bar.timestamp >= start) bars.push_back(bar);
+    for (const std::string& kind : {std::string("forex"), std::string("cfd")}) {
+        for (bool lookahead : {false, true}) {
+            BucketGateHarness h("15", "D", "W", "M", lookahead);
+            h.set_syminfo_timezone(NY);
+            h.set_syminfo_session(FX);
+            h.set_syminfo_type(kind);
+            h.run(bars.data(), static_cast<int>(bars.size()), "15", "15");
+            CHECK(h.last_error().empty(), "single-feed OTC partial-day run succeeds");
+            CHECK(!h.completed[0].empty(), "single-feed daily series completes");
+            if (!h.completed[0].empty()) {
+                CHECK_EQ_MS(h.completed[0].front(), utc_ms(2025, 4, 1, 21),
+                            "single-feed D starts at the first whole session");
+            }
+            for (int i=1; i<3; ++i) {
+                CHECK(!h.completed[i].empty(), "single-feed W/M completes");
+                if (!h.completed[i].empty()) CHECK_EQ_MS(h.completed[i].front(),
+                    utc_ms(2025,3,31,21),
+                    "single-feed W/M retains its existing feed-start series");
+            }
+        }
+    }
+    std::printf("test_single_feed_otc_daily_partial_bucket: %s\n",
+                failures > before ? "FAIL" : "ok");
+}
+
+// OANDA's daily label is 17:00 ET but trading starts at 18:00. A feed
+// beginning at that actual open contains the whole bar and must keep it.
+static void test_single_feed_cfd_actual_open_is_not_partial() {
+    int before = failures;
+    const int64_t begin=utc_ms(2025,4,1,22), end=utc_ms(2025,4,4,21);
+    std::vector<Bar> bars;
+    for (int64_t t=begin;t<end;t+=900000) {
+        const int64_t hour=(t/3600000)%24;
+        if (hour==21) continue;  // the 17:00..18:00 EDT daily break
+        bars.push_back({100,101,99,100,1,t});
+    }
+    BucketGateHarness h("15", "D", "W", "M");
+    h.set_syminfo_timezone(NY);
+    h.set_syminfo_session("1800-1700");
+    h.set_syminfo_type("cfd");
+    h.run(bars.data(),static_cast<int>(bars.size()),"15","15");
+    CHECK(h.last_error().empty(), "single-feed cfd aligned run succeeds");
+    CHECK(!h.completed[0].empty(), "single-feed cfd aligned D completes");
+    if (!h.completed[0].empty()) CHECK_EQ_MS(h.completed[0].front(),
+        utc_ms(2025,4,1,21), "keep whole cfd day whose stamp precedes trading");
+    std::printf("test_single_feed_cfd_actual_open_is_not_partial: %s\n",
+                failures > before ? "FAIL" : "ok");
+}
+#endif
+
 int main() {
     test_bucket_open_utc_grid();
     test_bucket_open_forex_session();
@@ -626,6 +688,8 @@ int main() {
     test_default_cut_nse_holiday_monday_keeps_the_week();
     test_default_cut_oanda_1d_weekly();
     test_flag_epoch_1d_chart_weekly_from_chart_dailies();
+    test_single_feed_otc_daily_partial_bucket();
+    test_single_feed_cfd_actual_open_is_not_partial();
 #endif
     if (failures) {
         std::printf("%d check(s) FAILED\n", failures);

@@ -418,6 +418,28 @@ bool BacktestEngine::security_input_precedes_range_start(
         return state.aggregator.bucket_open_ms(input_ts) < security_range_start_ms_;
     }
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+    // R19 OTC daily pins: a historical intraday chart beginning mid-session
+    // has no partial first D bar in request.security, even when this run has
+    // only the chart feed. XAUUSD from Apr1 00:00Z reads D time/close as na
+    // that day and ATR14[1] first becomes numeric Apr23; counting the partial
+    // Mar31 session seeds ATR a day early. Restrict the no-aux inference to
+    // the pinned daily OTC clock. W/M need trading-history evidence to retain
+    // a holiday-open period, and native/aux feeds keep their existing rules.
+    if (!aux_security_feed_enabled() && native_security_feeds_.empty()
+        && security_first_chart_bar_ms_ > 0
+        && script_tf_seconds_ > 0 && script_tf_seconds_ < 86400
+        && (state.tf == "D" || state.tf == "1D")
+        && !state.lower_tf_requested && !state.lower_tf_array_requested
+        && (syminfo_.type == "forex" || syminfo_.type == "cfd")
+        && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE) {
+        const int64_t stamp = session_period_open_ms(
+            input_ts, syminfo_.timezone, syminfo_.session, CalendarPeriod::DAY);
+        // Metals stamp the D bar at 17:00 ET but first trade at 18:00.
+        // Starting at that actual open keeps the complete first session.
+        const int64_t trading_open = session_covered_instant_ms(
+            stamp, syminfo_.timezone, syminfo_.session);
+        return trading_open < security_first_chart_bar_ms_;
+    }
     // Default cut (round 8, family P), split-feed runs only: a coarser-than-
     // chart or chart-timeframe series starts at the first bucket that OPENS at
     // or after the run's first chart bar -- the deep-backtest range start --
