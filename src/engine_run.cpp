@@ -428,13 +428,14 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
                             bool cursor_is_close,
                             bool filled_at_bar_open_point) {
         const uint64_t before = fill_events;
-        cursor = fill.fill_price;
-        cursor_is_bar_point = false;
+        const bool chart_tick_touch = std::isfinite(fill.chart_waypoint_price);
+        cursor = chart_tick_touch ? fill.chart_waypoint_price : fill.fill_price;
+        cursor_is_bar_point = chart_tick_touch;
         // The recalc chain receives O-point provenance, but only its first fill
         // event is classified as bar-open. A later fill at the same O is a
         // leg-0 cascade (PendingOrder::coof_born_mid_bar).
         fill_events += run_coof_recalc_chain(
-            script_bar, cursor, cursor_is_bar_point, cursor_is_close,
+            script_bar, fill.fill_price, /*cursor_is_bar_point=*/false, cursor_is_close,
             filled_at_bar_open_point,
             fill.fill_events, kNoFillEventBudget, fill_events);
         // The carried order's open fill triggers one execution at O, and the
@@ -463,7 +464,7 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
             CoofFillResult fill = process_next_pending_order(
                 point, /*allow_market_orders=*/true,
                 exit_closed_from_bar, exit_closed_from_incarnation,
-                exit_closed_was_long);
+                exit_closed_was_long, &script_bar);
             if (fill.filled) {
                 // A fill at this POINT (cursor == path[next_waypoint-1]) puts the
                 // in-flight leg at path[next_waypoint-1] -> path[next_waypoint],

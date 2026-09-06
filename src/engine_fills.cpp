@@ -333,7 +333,8 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
         bool allow_market_orders,
         int& exit_closed_from_bar,
         uint64_t& exit_closed_from_incarnation,
-        bool& exit_closed_was_long) {
+        bool& exit_closed_was_long,
+        const Bar* chart_bar) {
     CoofFillResult result;
 
     update_risk_state();
@@ -396,6 +397,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             double path_position;
             bool was_trail;
             int64_t created_seq;
+            double chart_waypoint_price;
         };
         std::vector<FillCandidate> candidates;
         candidates.reserve(pending_orders_.size());
@@ -476,6 +478,59 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 order, i, bar, opposing_pass, trail_best_path_state,
                 pass0_opposing_skip_ids);
             coof_cascade_force_wp_gap_ = false;
+            double chart_waypoint_price = std::numeric_limits<double>::quiet_NaN();
+            // Round 14 JOAT (log-20260906t110510z-84b72250): a carried
+            // plain exit can touch the chart's outward-rounded H/L even
+            // when the raw segment never reached its level. F15 May29:
+            // H10.255 -> tick10.26 reaches SL10.257194001727152; F1D Jan26:
+            // L13.3448 -> tick13.34 reaches SL/LIMIT13.342. The synthetic
+            // segment stays raw. Only its completed REAL chart extreme gets
+            // this extra trigger point, after all ordinary eligibility gates.
+            // Entry/cascade, multiple-order ranking, partials, trails, POOC,
+            // magnifier and realtime keep their established behavior.
+            if (fill.kind == FillEvaluation::Kind::NoFill && chart_bar
+                && calc_on_order_fills_ && coof_scheduler_active_
+                && !coof_hist_is_segment_ && coof_at_extreme_waypoint_
+                && !bar_magnifier_enabled_ && !process_orders_on_close_
+                && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
+                && slippage_ == 0 && pending_orders_.size() == 1
+                && position_open_bar_ >= 0 && position_open_bar_ < bar_index_
+                && position_entry_count_ == 1 && pyramid_entries_.size() == 1
+                && pyramiding_ == 0 && order.type == OrderType::EXIT
+                && order.created_bar < bar_index_ && !order.requested_partial
+                && order.created_while_in_position && !order.dormant_bracket
+                && !order.from_entry.empty()
+                && order.from_entry == pyramid_entries_.front().entry_id
+                && std::isnan(order.trail_points) && std::isnan(order.trail_price)
+                && std::isnan(order.trail_offset)
+                && std::isfinite(bar.open) && bar.open == bar.high
+                && bar.open == bar.low && bar.open == bar.close) {
+                double chart_path[4];
+                internal::fill_bar_path_points(*chart_bar, chart_path);
+                const int point = coof_hist_path_index_;
+                if ((point == 1 || point == 2) && bar.open == chart_path[point]) {
+                    const double raw = bar.open;
+                    const double tick = tick_grid_price(raw);
+                    const bool upper = raw == chart_bar->high && tick > raw;
+                    const bool lower = raw == chart_bar->low && tick < raw;
+                    const bool long_position = position_side_ == PositionSide::LONG;
+                    const bool stop_touch = std::isfinite(order.stop_price)
+                        && ((!long_position && upper && raw < order.stop_price
+                             && order.stop_price <= tick)
+                            || (long_position && lower && tick <= order.stop_price
+                                && order.stop_price < raw));
+                    const bool limit_touch = std::isfinite(order.limit_price)
+                        && ((long_position && upper && raw < order.limit_price
+                             && order.limit_price <= tick)
+                            || (!long_position && lower && tick <= order.limit_price
+                                && order.limit_price < raw));
+                    if (stop_touch || limit_touch) {
+                        fill = {FillEvaluation::Kind::Fill,
+                                bar_fill_price(raw), limit_touch};
+                        chart_waypoint_price = raw;
+                    }
+                }
+            }
             if (fill.kind != FillEvaluation::Kind::Fill) continue;
 
             double path_position = 0.0;
@@ -487,7 +542,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             internal::first_touch_position(bar, fill.fill_price, &path_position);
             candidates.push_back({
                 i, fill, path_position, last_exit_fill_was_trail_,
-                order.created_seq});
+                order.created_seq, chart_waypoint_price});
         }
 
         std::stable_sort(
@@ -556,6 +611,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             result.filled = true;
             result.fill_price = candidate.fill.fill_price;
             result.fill_events = produced;
+            result.chart_waypoint_price = candidate.chart_waypoint_price;
             return result;
         }
 

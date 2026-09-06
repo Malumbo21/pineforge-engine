@@ -115,6 +115,7 @@ set(TEST_SOURCES
     test_market_entry_affordability
     test_percent_equity_affordability
     test_stop_tick_rounding
+    test_coof_chart_tick_touch
     test_level_grid_snap
     test_zero_lot_entry_decline
     test_pooc_coof_reversal_gross_admission

@@ -1835,12 +1835,17 @@ protected:
         bool filled = false;
         double fill_price = std::numeric_limits<double>::quiet_NaN();
         uint64_t fill_events = 0;
+        // A chart-extreme tick touch books at the tick print, but the path
+        // advances from the raw H/L it actually reached. Never walk back from
+        // an outward-rounded fill price into an already-consumed segment.
+        double chart_waypoint_price = std::numeric_limits<double>::quiet_NaN();
     };
     CoofFillResult process_next_pending_order(const Bar& bar,
                                               bool allow_market_orders,
                                               int& exit_closed_from_bar,
                                               uint64_t& exit_closed_from_incarnation,
-                                              bool& exit_closed_was_long);
+                                              bool& exit_closed_was_long,
+                                              const Bar* chart_bar = nullptr);
 
     // TradingView forced-liquidation (margin call). Finite-price liquidation
     // paths use the bar's adverse extreme. A 100%-margin long has no later
