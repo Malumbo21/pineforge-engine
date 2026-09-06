@@ -7213,7 +7213,7 @@ double BacktestEngine::pooc_short_exit_trigger_close(
         && position_side_ == PositionSide::SHORT
         && position_open_bar_ >= 0 && position_open_bar_ < bar_index_
         && position_entry_count_ == 1 && pyramiding_ == 0
-        && pyramid_entries_.size() == 1 && pending_orders_.size() == 1
+        && pyramid_entries_.size() == 1
         && order.type == OrderType::EXIT && !order.is_long
         && order.created_bar == bar_index_ && !order.created_during_coof_recalc
         && order.created_by_same_id_replacement
@@ -7234,7 +7234,19 @@ double BacktestEngine::pooc_short_exit_trigger_close(
         && max_intraday_filled_orders_ == 0
         && risk_max_intraday_loss_ == 0 && risk_max_drawdown_ == 0
         && risk_max_cons_loss_days_ == 0;
-    return pinned_reissue ? tick_grid_price(bar.close) : bar.close;
+    if (!pinned_reissue) return bar.close;
+    for (const PendingOrder& other : pending_orders_) {
+        if (&other == &order) continue;
+        // Hariss emits both directional EXITs at every close. An unbound
+        // sibling is removed by the existing position-cycle liveness gate;
+        // it cannot compete with this live exit. Entries, RAW orders, global
+        // exits and any sibling whose parent filled this cycle still exclude.
+        const bool unbound_exit = other.type == OrderType::EXIT
+            && !other.from_entry.empty()
+            && cycle_filled_entry_ids_.count(other.from_entry) == 0;
+        if (!unbound_exit) return bar.close;
+    }
+    return tick_grid_price(bar.close);
 }
 
 BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(

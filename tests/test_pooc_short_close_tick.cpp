@@ -54,8 +54,8 @@ Panel panel(int n) {
 
 class CloseTickProbe : public BacktestEngine {
 public:
-    CloseTickProbe(Panel data, Guard guard = Guard::None)
-        : p_(std::move(data)), guard_(guard) {
+    CloseTickProbe(Panel data, Guard guard = Guard::None, bool unbound = false)
+        : p_(std::move(data)), guard_(guard), unbound_(unbound) {
         initial_capital_ = 100000;
         margin_long_ = margin_short_ = 100;
         pyramiding_ = 0;
@@ -83,6 +83,10 @@ public:
                 : (bar_index_ == 2 ? p_.new_stop : p_.next_stop);
             const double limit = bar_index_ == 1 ? p_.old_limit
                 : (bar_index_ == 2 ? p_.new_limit : p_.next_limit);
+            // The real source issues both directional brackets each close.
+            // This other parent never opened in this position cycle.
+            if (unbound_)
+                strategy_exit("Opposite", "Other", limit, stop);
             strategy_exit("X", "E", limit, stop, N, N, N,
                 guard_ == Guard::Partial ? 50 : 100, "X");
         }
@@ -94,11 +98,12 @@ public:
 private:
     Panel p_;
     Guard guard_;
+    bool unbound_;
 };
 
-void positive(int n) {
+void positive(int n, bool unbound) {
     const auto d = panel(n);
-    CloseTickProbe p(d);
+    CloseTickProbe p(d, Guard::None, unbound);
     for (int repeat = 0; repeat < 2; ++repeat) {
         p.run(d.bars.data(), d.bars.size());
         CHECK(p.last_error().empty());
@@ -145,7 +150,10 @@ void guards() {
 } // namespace
 
 int main(int argc, char**) {
-    if (argc == 1) for (int i = 0; i < 3; ++i) positive(i);
+    if (argc == 1) for (int i = 0; i < 3; ++i) {
+        positive(i, false);
+        positive(i, true);
+    }
     guards();
     std::printf("%d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;
