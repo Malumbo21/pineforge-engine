@@ -43,6 +43,7 @@
 
 #include <pineforge/engine.hpp>
 #include <pineforge/na.hpp>
+#include <pineforge/ta.hpp>
 #include <pineforge/timeframe.hpp>
 
 #include <cstdint>
@@ -673,6 +674,87 @@ static void test_single_feed_cfd_actual_open_is_not_partial() {
     std::printf("test_single_feed_cfd_actual_open_is_not_partial: %s\n",
                 failures > before ? "FAIL" : "ok");
 }
+
+// Equivalent to request.security("D", ta.atr(14)[1]) plus D close. The
+// synthetic bars have true range 8; a deliberately extreme initial partial
+// day must never enter either the ATR seed or the projected daily roster.
+class OtcDailyAtrHarness : public BacktestEngine {
+public:
+    ta::ATR atr{14};
+    std::vector<double> atr_history;
+    struct Read { int64_t time; double close; double previous_atr; };
+    std::vector<Read> reads;
+    double visible_close=na<double>(), previous_atr=na<double>();
+    int64_t first_projected_child=0;
+    explicit OtcDailyAtrHarness(bool lookahead) {
+        register_security_eval(0,"D","15",lookahead,false);
+        set_syminfo_metadata("historical_security_lookahead_projection",1);
+    }
+    void evaluate_security(int,const Bar& bar,bool) override {
+        if (security_series_slot_is_new(0)) {
+            atr_history.push_back(atr.compute(bar.high,bar.low,bar.close));
+        } else if (!atr_history.empty()) {
+            atr_history.back()=atr.recompute(bar.high,bar.low,bar.close);
+        }
+        previous_atr=atr_history.size()>1
+            ? atr_history[atr_history.size()-2] : na<double>();
+        visible_close=bar.close;
+    }
+    void on_bar(const Bar& bar) override {
+        if (first_projected_child==0
+            && !security_eval_states_[0].historical_projections.empty()) {
+            first_projected_child=
+                security_eval_states_[0].historical_projections.front().first_child_ms;
+        }
+        reads.push_back({bar.timestamp,visible_close,previous_atr});
+    }
+};
+
+static void test_single_feed_projection_and_previous_atr() {
+    int before=failures;
+    for (bool cfd : {false,true}) {
+        const char* session=cfd ? "1800-1700" : "1700-1700";
+        std::vector<Bar> bars={
+            {999,1999,0,999,1,utc_ms(2025,4,1)},
+            {999,1999,0,999,1,utc_ms(2025,4,1,6)},
+            {999,1999,0,999,1,utc_ms(2025,4,1,20,45)}};
+        const int trading_days[]={2,3,4,7,8,9,10,11,14,15,16,17,18,21,22,23,24,25,28,29,30};
+        int index=0;
+        for (int day : trading_days) {
+            if (cfd && day==18) continue; // XAU Good Friday; EUR trades
+            double base=100+index++;
+            bars.push_back({base,base+4,base-4,base,1,
+                            utc_ms(2025,4,day-1,cfd?22:21)});
+            bars.push_back({base,base+4,base-4,base+1,1,utc_ms(2025,4,day,6)});
+            bars.push_back({base,base+4,base-4,base+2,1,utc_ms(2025,4,day,20,45)});
+        }
+        for (bool lookahead : {false,true}) {
+            OtcDailyAtrHarness h(lookahead);
+            h.set_syminfo_timezone(NY);h.set_syminfo_session(session);
+            h.set_syminfo_type(cfd?"cfd":"forex");
+            h.run(bars.data(),static_cast<int>(bars.size()),"15","15");
+            CHECK(h.last_error().empty(),"OTC previous ATR run succeeds");
+            if (lookahead) CHECK_EQ_MS(h.first_projected_child,
+                utc_ms(2025,4,1,cfd?22:21),"projection roster starts at first whole day");
+            const int numeric_day=cfd ? (lookahead?23:24) : (lookahead?22:23);
+            for (const auto& read : h.reads) {
+                if (read.time==utc_ms(2025,4,1,6))
+                    CHECK(is_na(read.close),"partial first daily close is absent");
+                if (read.time==utc_ms(2025,4,2,6))
+                    CHECK(lookahead ? read.close==102 : is_na(read.close),
+                          "first daily close leaks on first child only with lookahead");
+                if (read.time==utc_ms(2025,4,3,6) && !lookahead)
+                    CHECK(read.close==102,"lookahead-off exposes first completed daily close");
+                if (read.time==utc_ms(2025,4,numeric_day-1,6))
+                    CHECK(is_na(read.previous_atr),"ATR14[1] remains absent one day before seed");
+                if (read.time==utc_ms(2025,4,numeric_day,6))
+                    CHECK(read.previous_atr==8,"ATR14[1] reads 8 after fourteen whole daily bars");
+            }
+        }
+    }
+    std::printf("test_single_feed_projection_and_previous_atr: %s\n",
+                failures>before?"FAIL":"ok");
+}
 #endif
 
 int main() {
@@ -690,6 +772,7 @@ int main() {
     test_flag_epoch_1d_chart_weekly_from_chart_dailies();
     test_single_feed_otc_daily_partial_bucket();
     test_single_feed_cfd_actual_open_is_not_partial();
+    test_single_feed_projection_and_previous_atr();
 #endif
     if (failures) {
         std::printf("%d check(s) FAILED\n", failures);

@@ -1604,16 +1604,16 @@ void BacktestEngine::prepare_historical_security_lookahead_projections(
             return input_bars[child].timestamp;
         };
         int projection_begin = 0;
-        if (security_range_start_na_warmup_
-            || (security_first_chart_bar_ms_ > 0 && aux_security_feed_enabled())) {
-            while (projection_begin < n_input
-                    && security_input_precedes_range_start(
-                           state, child_instant_ms(projection_begin))) {
-                ++projection_begin;
-            }
-            if (projection_begin >= n_input) {
-                continue;
-            }
+        // The shared predicate also covers the single-feed OTC daily cut.
+        // It is false for excluded evaluators, so no separate mode guard may
+        // let the producer retain children the consumer will discard.
+        while (projection_begin < n_input
+                && security_input_precedes_range_start(
+                       state, child_instant_ms(projection_begin))) {
+            ++projection_begin;
+        }
+        if (projection_begin >= n_input) {
+            continue;
         }
         const int projection_count = n_input - projection_begin;
 

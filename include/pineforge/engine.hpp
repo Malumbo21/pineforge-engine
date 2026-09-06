@@ -1520,8 +1520,10 @@ protected:
     // their first bucket). Whether the bucket was in progress is read from
     // the auxiliary 1m feed (did it trade between the bucket's nominal open
     // and the first chart bar? the NSE week whose Monday was a holiday opens
-    // on Tuesday and is kept), so only split-feed runs apply the cut; a
-    // single-feed run keeps its feed-start series. Lower-TF evaluators are
+    // on Tuesday and is kept). Historical intraday single-feed forex/cfd D
+    // requests also omit their partial first session, using its actual trading
+    // open rather than its label. Other single-feed series keep their feed-start
+    // behavior; native feeds retain their own rules. Lower-TF evaluators are
     // untouched (their slices begin at the first chart bar anyway), and the
     // flag above keeps its explicit epoch plus the EMA na-warmup semantics.
     int64_t security_first_chart_bar_ms_ = 0;
@@ -3380,8 +3382,9 @@ protected:
     // `input_ts` belongs to an HTF bucket that opened before the cut --
     // security_range_start_ms_ under the flag, else the run's first chart
     // bar for a coarser-than-chart / chart-timeframe evaluator
-    // (security_first_chart_bar_ms_, split-feed runs, the auxiliary feed
-    // proving the bucket traded before it; false for lower-TF evaluators). The
+    // (security_first_chart_bar_ms_, split-feed runs with the auxiliary feed
+    // proving prior trading, or single-feed historical intraday forex/cfd D
+    // requests keyed to their session's actual open; false for lower TFs). The
     // progressive feed and the historical lookahead projection builder must
     // agree on this predicate so projected child indexes line up with the
     // per-state feed cursor.
