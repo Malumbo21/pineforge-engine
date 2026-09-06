@@ -4364,6 +4364,9 @@ void BacktestEngine::apply_filled_order_to_state(
     // reversals are admitted on their actual fill, and paired reentries may
     // fill from flat despite having been placed from a live position.
     bool admitted_flat_on_frozen_sizing_price = false;
+    // This call only: a true-flat positive gap admitted on rounded price
+    // still needs its existing opening-margin checkpoint after the fill.
+    bool admitted_flat_on_price_gap_band = false;
 
     if (order.type == OrderType::MARKET || order.type == OrderType::ENTRY) {
         PositionSide requested = order.is_long ? PositionSide::LONG : PositionSide::SHORT;
@@ -4824,6 +4827,45 @@ void BacktestEngine::apply_filled_order_to_state(
             std::isfinite(order.sizing_fx) && order.sizing_fx > 0.0
                 ? order.sizing_fx
                 : active_account_currency_fx();
+        // Round 13 taro BTC, also pinned on ETH: for ordinary zero-fee
+        // default 100% market orders, a positive close-to-open gap compares
+        // the fill price with sig10(sig10(E_s) / Q), not exact Q*fill with E_s.
+        // BTC offsets -.00030 admit / -.00032 drop distinguish BOTH rounds.
+        // Keep the existing cost decision outside this directly pinned scope;
+        // in particular this does not widen tv_money_scope for other rules.
+        const bool price_gap_scope =
+            order.type == OrderType::MARKET
+            && std::isnan(order.qty)
+            && std::abs(default_qty_value_ - 100.0) < 1e-12
+            && std::isfinite(margin_pct)
+            && std::abs(margin_pct - 100.0) < 1e-12
+            && qty_step_ > 0.0 && qty_step_ < 1.0
+            && syminfo_.pointvalue == 1.0 && sizing_fx == 1.0
+            && account_currency_fx_timestamps_.empty()
+            && commission_type_ == CommissionType::PERCENT
+            && commission_value_ == 0.0 && slippage_ == 0
+            && !process_orders_on_close_ && !calc_on_order_fills_
+            && !bar_magnifier_enabled_ && !coof_scheduler_active_
+            && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
+            && !order.created_during_coof_recalc
+            && !order.created_after_position_close_in_bar
+            && std::isfinite(order.sizing_equity)
+            && std::isfinite(order.frozen_default_qty)
+            && std::isfinite(order.sizing_price)
+            && std::isfinite(order.sizing_mark)
+            && std::isfinite(fill_price) && fill_price > order.sizing_price
+            && ((position_side_ == PositionSide::FLAT
+                 && order.created_position_side == PositionSide::FLAT
+                 && !pending_flat_market_pair_is_live(order))
+                || (reversal && order.created_position_side == position_side_
+                    && order.created_position_cycle_seq == position_cycle_seq_
+                    && pyramid_entries_.size() == 1));
+        const auto price_gap_affordable = [&]() {
+            const double affordable_price = tv_money_round(
+                tv_money_round(order.sizing_equity) / order.frozen_default_qty);
+            return std::isfinite(affordable_price)
+                && affordable_price >= apply_fill_slippage(fill_price, order.is_long);
+        };
         // Gap-reject (design-cntvxiao-gap-reject, PANEL-CLEARED; widened to
         // commissioned entries by the round-7 family-H market-entry-admission
         // pin, below): a high-level strategy.entry with omitted qty, sized
@@ -4930,8 +4972,12 @@ void BacktestEngine::apply_filled_order_to_state(
             const double float_guard =
                 std::max(1e-9, std::abs(order.sizing_equity) * 1e-12);
             if (gap_notional > order.sizing_equity + float_guard) {
-                decline_and_cancel();
-                return;
+                if (price_gap_scope && price_gap_affordable()) {
+                    admitted_flat_on_price_gap_band = true;
+                } else {
+                    decline_and_cancel();
+                    return;
+                }
             }
         }
         // A same-direction add (fractional OR all-in) IS gated, against
@@ -5049,7 +5095,10 @@ void BacktestEngine::apply_filled_order_to_state(
                                                 * sizing_fx
                                                 * (margin_pct / 100.0));
             }
-            if (required_margin > free_funds + epsilon) {
+            const bool price_band_admitted_reversal =
+                reversal && price_gap_scope && price_gap_affordable();
+            if (required_margin > free_funds + epsilon
+                && !price_band_admitted_reversal) {
                 // design-declined-reversal-close-leg: ONLY the reversal decline
                 // triggers close-leg suppression (admit_price == slipped fill,
                 // MARKET). The same_dir add decline (probe65 shape) and the
@@ -5727,6 +5776,11 @@ void BacktestEngine::apply_filled_order_to_state(
                 && !order.created_after_position_close_in_bar
                 && position_side_before_fill == PositionSide::FLAT
                 && admitted_flat_on_frozen_sizing_price
+                // Newly price-band-admitted positive gaps can have a real
+                // fill deficit on either side (BTC/ETH flat MC1 tapes).
+                // Use the existing event/quantizer; exact-affordable fills
+                // keep the historical exemption and no persistent flag.
+                && !admitted_flat_on_price_gap_band
                 && std::isfinite(new_opening_commission)
                 && new_opening_commission == 0.0;
 
