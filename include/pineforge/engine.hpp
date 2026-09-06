@@ -110,8 +110,10 @@ enum class PositionSide { FLAT, LONG, SHORT };
 //      + every-bar sensors 3086/3086 admits, 1631/1631 whole drops, 64/64
 //      close-only, and every one of the 52 famr-adm band tapes (revb b06..
 //      b28, revd00..03, revL L24..L33, S100..S103, S307..S317). NOT
-//      implemented: TV's 1-unit entry fill when the entry leg fails with
-//      Q == |position| + 1.00 exactly (revL L23, taro 2025-09-15 16:15Z).
+//      generalized: closing-transaction surplus outside the narrow round14
+//      default100 rule-2 close-only shape. Its revL L23 / taro Sep15 residue
+//      now requires a same-signal close-point MC receipt on the same lot;
+//      Q-new minus live-position alone is explicitly refuted by TV controls.
 // Round 10 family AB (BINANCE:ETHUSDT.P@15 hard lane, the corpus probe
 // anomaly-equity-mirror-strategy-equity-01, campaign note
 // log-20260905t213120z-d5f9e282) met rule 3 on an EXPLICIT-qty 1x long on a
@@ -764,6 +766,15 @@ struct PendingOrder {
     // (consumed, no broker effect) when the account is flat or same-side at
     // the fill.
     bool affordability_close_only = false;
+    // Round14: only rule-2's rounded signal-cost decline can consume the
+    // pending reversal's closing carry after a same-signal close-point MC.
+    // These are order-owned receipts, not a last-margin-call heuristic.
+    bool rounded_signal_cost_close_only = false;
+    int signal_close_mc_bar = -1;
+    uint64_t signal_close_mc_entry_incarnation = 0;
+    uint64_t signal_close_mc_fill_seq = 0;
+    double signal_close_mc_remaining_qty =
+        std::numeric_limits<double>::quiet_NaN();
     std::string comment;       // order comment for trade reporting
     bool requested_partial = false;         // true iff caller passed qty_percent < 100
     // Narrow POOC global-full-exit candidate. ``qty`` deliberately keeps the

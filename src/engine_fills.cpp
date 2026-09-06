@@ -1494,6 +1494,25 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
     if (!std::isfinite(qty_liq) || qty_liq <= kQtyEpsilon) return false;
 
     const double raw_exit_fill_base = bar_fill_price(fire_price);
+    const int64_t close_mc_cycle = position_cycle_seq_;
+    const uint64_t close_mc_incarnation = pyramid_entries_.size() == 1
+        ? pyramid_entries_.front().entry_incarnation : 0;
+    // The inherited L23 and taro Sep15 pins fire at the signal CLOSE.
+    // A pre-existing pending reversal still owns its pre-MC closing carry.
+    // Limit this receipt to the selected ordinary default100 single-lot
+    // shape; other reductions, accepted new legs and POOC are separate.
+    const bool close_mc_receipt_scope =
+        !process_orders_on_close_ && fire_path_point == 3
+        && qty_liq == 1.0 && qty > 1.0
+        && close_mc_incarnation != 0 && pending_orders_.size() == 1
+        && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
+        && std::abs(default_qty_value_ - 100.0) < 1e-12
+        && commission_type_ == CommissionType::PERCENT
+        && commission_value_ == 0.0 && slippage_ == 0
+        && pv == 1.0 && fx == 1.0
+        && max_intraday_filled_orders_ == 0
+        && risk_max_intraday_loss_ == 0.0 && risk_max_drawdown_ == 0.0
+        && risk_max_cons_loss_days_ == 0;
     const size_t trades_before = trades_.size();
     if (process_orders_on_close_) {
         // The pre-script pass precedes the ordinary full-bar excursion
@@ -1520,6 +1539,27 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
     if (trades_.size() == trades_before) return false;
     ++broker_fill_event_seq_;
     last_margin_call_event_bar_ = bar_index_;
+    if (close_mc_receipt_scope && position_side_ == PositionSide::LONG
+        && position_cycle_seq_ == close_mc_cycle
+        && pyramid_entries_.size() == 1
+        && pyramid_entries_.front().entry_incarnation == close_mc_incarnation
+        && std::abs(qty - position_qty_ - 1.0) < 1e-6) {
+        auto& pending = pending_orders_.front();
+        if (pending.type == OrderType::MARKET && !pending.is_long
+            && std::isnan(pending.qty) && !pending.affordability_close_only
+            && pending.created_bar == bar_index_
+            && pending.created_position_side == PositionSide::LONG
+            && pending.created_position_cycle_seq == close_mc_cycle
+            && !pending.created_after_position_close_in_bar
+            && !pending.created_during_coof_recalc
+            && pending.tv_carry_qty == qty
+            && std::isfinite(pending.frozen_default_qty)) {
+            pending.signal_close_mc_bar = bar_index_;
+            pending.signal_close_mc_entry_incarnation = close_mc_incarnation;
+            pending.signal_close_mc_fill_seq = broker_fill_event_seq_;
+            pending.signal_close_mc_remaining_qty = position_qty_;
+        }
+    }
     for (size_t ti = trades_before; ti < trades_.size(); ++ti) {
         trades_[ti].exit_comment = "Margin call";
         trades_[ti].exit_id = "__margin_call__";
@@ -4698,8 +4738,9 @@ void BacktestEngine::apply_filled_order_to_state(
     // 0.000462 -> P rounds up to close + 1e-9 -> F7-311130 filled). 507/507
     // famr3 sweep decisions, 3086/3086 taro + every-bar admissions,
     // 1631/1631 whole drops, 64/64 close-only, 52/52 famr-adm band tapes.
-    // NOT implemented: TV's 1-unit entry fill when the entry leg fails with
-    // Q == |position| + 1.00 exactly (revL L23, taro 2025-09-15 16:15Z).
+    // Round14's narrow closing-carry residue is consumed only after rule 2
+    // fails, with an actual same-signal close-point MC receipt. A difference
+    // between the requested quantity and live position is not sufficient.
     if (order.type == OrderType::MARKET
         && !order.affordability_close_only
         && !std::isnan(order.sizing_equity) && !std::isnan(order.sizing_mark)
@@ -4758,6 +4799,7 @@ void BacktestEngine::apply_filled_order_to_state(
                     return;
                 }
                 order.affordability_close_only = true;
+                order.rounded_signal_cost_close_only = true;
             } else if (!close_first_flat_open) {
                 // Rule 5: the price-scale margin check (comment above).
                 const double notional_per_price =
@@ -6044,15 +6086,43 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
     if (order.affordability_close_only) {
         const PositionSide requested =
             order.is_long ? PositionSide::LONG : PositionSide::SHORT;
+        // Rule 2 removed the new entry leg, not the old closing transaction.
+        // A proven signal-close MC reduced that same lot AFTER placement;
+        // close the live remainder and retain only the frozen close surplus.
+        // Never infer this from frozen_default_qty minus the live position.
+        const double close_surplus = order.tv_carry_qty - position_qty_;
+        const bool keep_mc_close_surplus =
+            order.rounded_signal_cost_close_only
+            && order.signal_close_mc_bar == order.created_bar
+            && order.created_bar == bar_index_ - 1
+            && order.signal_close_mc_entry_incarnation != 0
+            && order.signal_close_mc_fill_seq == broker_fill_event_seq_
+            && !process_orders_on_close_ && !calc_on_order_fills_
+            && !bar_magnifier_enabled_ && !coof_scheduler_active_
+            && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
+            && order.type == OrderType::MARKET && !order.is_long
+            && std::isnan(order.qty) && !order.created_after_position_close_in_bar
+            && position_side_ == PositionSide::LONG
+            && order.created_position_side == PositionSide::LONG
+            && order.created_position_cycle_seq == position_cycle_seq_
+            && pyramid_entries_.size() == 1
+            && pyramid_entries_.front().entry_incarnation
+                == order.signal_close_mc_entry_incarnation
+            && position_qty_ == order.signal_close_mc_remaining_qty
+            && std::isfinite(close_surplus)
+            && std::abs(close_surplus - 1.0) < 1e-6;
         if (position_side_ != PositionSide::FLAT
             && position_side_ != requested
             && std::isfinite(fill_price)) {
             flip_market_position_to(
                 order.id, order.is_long,
                 apply_fill_slippage(fill_price, order.is_long),
-                order.qty, order.qty_type,
-                /*explicit_qty_prequantized=*/false,
-                /*close_only=*/true, order.incarnation);
+                keep_mc_close_surplus ? 1.0 : order.qty,
+                keep_mc_close_surplus ? -1 : order.qty_type,
+                /*explicit_qty_prequantized=*/keep_mc_close_surplus,
+                /*close_only=*/!keep_mc_close_surplus, order.incarnation);
+            if (keep_mc_close_surplus && !pyramid_entries_.empty())
+                pyramid_entries_.back().entry_comment = order.comment;
         }
         trail_best_path_state = trail_best_price_;
         return;
