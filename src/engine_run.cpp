@@ -177,8 +177,20 @@ void BacktestEngine::dispatch_bar() {
     // inlines its own on_bar call and pushes there instead.
     _push_source_series();
     if (process_orders_on_close_) {
+        const bool no_pending_broker_orders = pending_orders_.empty();
+        const uint64_t fills_before_pending = broker_fill_event_seq_;
         process_pending_orders(current_bar_);   // step 1: old stop/limit
         evaluate_max_intraday_loss_over_path(current_bar_);
+        // Round 13 D: the carried 1x-long rounded-money event belongs before
+        // the close-time script. TV's full/30% close pins read the already
+        // reduced position here; an end-of-bar check would see the script's
+        // flattened/reduced state instead. The helper refuses pending-order
+        // interactions and every fresh entry, so it cannot replay a close
+        // fill's past path or move an existing broker fill across the event.
+        if (no_pending_broker_orders
+            && broker_fill_event_seq_ == fills_before_pending) {
+            tv_money_long_margin_call(current_bar_, /*carried_pooc_pre_close=*/true);
+        }
         update_per_trade_extremes();             // step 2: update before strategy reads
         invoke_chart_on_bar(current_bar_);       // step 3: strategy logic
         flush_same_bar_close();                  // step 3b: surviving strategy.close fill

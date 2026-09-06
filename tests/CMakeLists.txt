@@ -158,6 +158,7 @@ set(TEST_SOURCES
     test_margin_call_trail_exit_chronology
     test_margin_call_1x_long_entry_fill
     test_tv_money_long_margin_call_eth
+    test_tv_money_carried_pooc
     test_margin_call_gap_open
     test_entry_bar_margin_path
     test_m_admission_36

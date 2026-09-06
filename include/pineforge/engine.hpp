@@ -3696,7 +3696,11 @@ private:
     // round 8 family R / round 10 family AB: the 10-significant-digit
     // margin-call trigger on a margin-100 LONG (process_margin_call; rule
     // and pins on tv_money_long_margin_call in engine_fills.cpp).
-    bool tv_money_long_margin_call(const Bar& bar);
+    // The POOC extension is called only before the close-time script, with
+    // no pending broker orders. End-of-bar callers keep it disabled so a
+    // close/add cannot make earlier prices act on the post-close position.
+    bool tv_money_long_margin_call(const Bar& bar,
+                                  bool carried_pooc_pre_close = false);
     // finding-311: mark the live position's standing strategy.exit brackets
     // dormant when an in-position reversal entry is declined at fill.
     void mark_position_brackets_dormant_on_declined_reversal(const Bar& bar);

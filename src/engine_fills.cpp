@@ -1381,14 +1381,40 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
 // pins in the workflow repo): cash 0.0001 / 0.0002 fire at 1606.17, 0.0003+
 // never (the residual there is 0.00029); 07-21 Q 270.621 cash <= 0.0003 fires
 // at the fill bar's high 3734.89 (residual 0.00031), 0.0004+ never.
-bool BacktestEngine::tv_money_long_margin_call(const Bar& bar) {
+// Round 13 D: r12-d-residual exact/default+explicit and +/-0.0001 capital
+// controls pin this same rule on a CARRIED POOC long. Q 878945.99 at 1.17987,
+// C 1037042.0056329: next bar low 1.17905 produces a 0.0000789 deficit
+// and TV closes 1. The Q 878945.98 matched close/stop pair proves a POOC close
+// fill must not revisit the entry bar's earlier high. Fresh full/30% closes
+// on the trigger bar read PS 878944.99 before sizing their close orders
+// (log-20260906t091207z-83d4bea0), so dispatch_bar calls this BEFORE on_bar.
+bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
+                                              bool carried_pooc_pre_close) {
     if (!margin_call_enabled_) return false;
     if (position_side_ != PositionSide::LONG) return false;
     if (!std::isfinite(margin_long_)
         || std::abs(margin_long_ / 100.0 - 1.0) >= 1e-12) return false;
     if (last_margin_call_event_bar_ == bar_index_) return false;
     if (intrabar_exit_margin_call_bar_ == bar_index_) return false;
-    if (process_orders_on_close_ || calc_on_order_fills_
+    if (process_orders_on_close_) {
+        // This extension has no oracle for a pending order racing the money
+        // trigger, adds, fees/slippage, currency conversion or risk-forced
+        // exits. Keep their prior POOC behavior. End-of-bar calls stay out
+        // even when the script merely reduced an older position: its current
+        // quantity did not exist over this bar's already-traversed path.
+        if (!carried_pooc_pre_close || position_open_bar_ < 0
+            || position_open_bar_ >= bar_index_ || !pending_orders_.empty()
+            || opening_affordability_pending_ || pyramiding_ != 0
+            || position_entry_count_ != 1 || pyramid_entries_.size() != 1
+            || pyramid_entries_.front().entry_bar_index >= bar_index_
+            || commission_value_ != 0.0 || slippage_ != 0
+            || account_currency_fx_ != 1.0 || max_intraday_filled_orders_ > 0
+            || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
+            || risk_max_cons_loss_days_ > 0) {
+            return false;
+        }
+    }
+    if (calc_on_order_fills_
         || bar_magnifier_enabled_ || coof_scheduler_active_
         || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE) {
         return false;
@@ -1425,6 +1451,7 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar) {
     }
     double fire_price = std::numeric_limits<double>::quiet_NaN();
     double deficit = 0.0;
+    int fire_path_point = -1;
     for (int i = start; i < 4; ++i) {
         const double p = path[i];
         if (!std::isfinite(p) || !(p > 0.0)) continue;
@@ -1442,6 +1469,7 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar) {
         if (equity + 1e-7 >= value && equity + 1e-7 < rounded_value) {
             fire_price = p;
             deficit = rounded_value - equity;
+            fire_path_point = i;
             break;
         }
     }
@@ -1467,6 +1495,22 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar) {
 
     const double raw_exit_fill_base = bar_fill_price(fire_price);
     const size_t trades_before = trades_.size();
+    if (process_orders_on_close_) {
+        // The pre-script pass precedes the ordinary full-bar excursion
+        // sample. Sample only the traversed waypoint prefix for this slice:
+        // the low-trigger pin includes the preceding high (MFE 0.00015),
+        // while the open-trigger control must not inherit that future high.
+        // update_per_trade_extremes is an arithmetic-only, non-throwing walk.
+        const Bar script_bar = current_bar_;
+        current_bar_.high = current_bar_.low = path[0];
+        for (int i = 1; i <= fire_path_point; ++i) {
+            current_bar_.high = std::max(current_bar_.high, path[i]);
+            current_bar_.low = std::min(current_bar_.low, path[i]);
+        }
+        current_bar_.close = fire_price;
+        update_per_trade_extremes();
+        current_bar_ = script_bar;
+    }
     if (qty_liq >= qty - kQtyEpsilon) {
         execute_market_exit(raw_exit_fill_base);
     } else {
