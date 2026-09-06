@@ -93,12 +93,14 @@ enum class PositionSide { FLAT, LONG, SHORT };
 //      the fl(1e-5) product carries). Rules 2 and 5 judge a TRUE-FLAT
 //      placement and a bare strategy.entry REVERSAL, both on the frozen
 //      signal-close equity E_s (4782/4782 taro + every-bar decisions; the
-//      fill-marked equity fails 813). An entry placed while a position was
-//      open that fills flat behind a same-bar strategy.close is NOT judged:
-//      TradingView fills it and margin-calls the deficit (demete1226
-//      2025-04-04 02:30Z, 9.14 USD short after a one-pip gap down: 6008.48
-//      'Margin call'; 2025-04-07 08:00Z, E_s in the tie band, a six-pip gap
-//      up: 1 unit + 13681.2 'Margin call'). Pinned on 507 famr3 sweep
+//      fill-marked equity fails 813). An opposite entry placed AFTER a
+//      same-bar strategy.close and filling from flat takes rule 2 only
+//      (round 12 AG-C1, six famag-C-cf-d tapes: four rounded-cost drops,
+//      two admits). Rule 5 is excluded for that ordering; a deficit that
+//      appears only at the fill is margin-called (demete1226 2025-04-04
+//      02:30Z, 9.14 USD short after a one-pip gap down: 6008.48 'Margin call';
+//      2025-04-07 08:00Z, E_s in rule 5's tie band, a six-pip gap up:
+//      1 unit + 13681.2 'Margin call'). Pinned on 507 famr3 sweep
 //      decisions
 //      (famr3-F6: 153 bare-capital longs at C = sig10(cost) + 0.0002, 83
 //      filled / 70 dropped, a pure function of the close; F7 7-digit ties

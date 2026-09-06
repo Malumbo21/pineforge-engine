@@ -4649,26 +4649,26 @@ void BacktestEngine::apply_filled_order_to_state(
         const bool reversal_entry =
             position_side_ != PositionSide::FLAT
             && position_side_ != requested_side;
-        // The broker judges a TRUE-FLAT placement (nothing held when the
-        // order was placed) and a bare REVERSAL (one strategy.entry against
-        // the held side; the position is still open at this fill). An entry
-        // placed while a position was open and filling FLAT because a
-        // separate close order of the same bar took the position first (the
-        // strategy.close + strategy.entry pair, created_after_position_
-        // close_in_bar) is NOT judged: TradingView fills it and lets the
-        // margin-call machinery absorb the deficit — demete1226 2025-04-04
-        // 02:30Z (long 913809.48 closed one pip below the signal close, the
-        // short 913809.48 costs 9.14 USD more than the cash left: filled,
-        // 6008.48 'Margin call' at 1.10718) and 2025-04-07 08:00Z (E_s in
-        // the rule-5 tie band, the open six pips up: filled, 1 unit + 13681.2
-        // 'Margin call'). Judging that shape on E_s dropped the 08:00Z short
-        // (8a4b831), judging it on the post-close cash dropped every gap-down
-        // pair (ae1d99a, demete 99.2 -> 69.6 %); the bare-entry scripts and
-        // every from-flat pin are untouched either way.
+        // Both rules judge a TRUE-FLAT placement and a bare REVERSAL.
+        // Round 12 AG-C1 (log-20260906t001223z-0fda20b7): an opposite entry
+        // placed AFTER a same-bar strategy.close, filling from flat, takes
+        // rule 2 only. Six famag-C-cf-d tapes isolate the rounded SIGNAL
+        // cost: deltas +0..+0.0003 below its next money unit drop the new
+        // entry, while -0.0003 (one lot less) and +0.0005 admit. The separate
+        // close still fills. Rule 5 must remain excluded (B-z-tie-cf).
+        // Do not judge the post-close cash: demete1226 2025-04-04 02:30Z
+        // passes at the signal then has a 9.14 USD fill-gap deficit, which
+        // TV trims (6008.48 'Margin call'); 04-07 08:00Z passes rule 2 but
+        // sits in rule 5's band and also fills, with 1 + 13681.2 trimmed.
         const bool true_flat_placement =
             order.created_position_side == PositionSide::FLAT
             && !order.created_after_position_close_in_bar;
-        if (((flat_open && true_flat_placement) || reversal_entry)
+        const bool close_first_flat_open =
+            flat_open && order.created_after_position_close_in_bar
+            && order.created_position_side != PositionSide::FLAT
+            && order.created_position_side != requested_side;
+        if (((flat_open && true_flat_placement) || reversal_entry
+             || close_first_flat_open)
             && std::isfinite(margin_dir) && std::abs(margin_dir - 100.0) < 1e-12) {
             const double fx_s =
                 std::isfinite(order.sizing_fx) && order.sizing_fx > 0.0
@@ -4690,7 +4690,7 @@ void BacktestEngine::apply_filled_order_to_state(
                     return;
                 }
                 order.affordability_close_only = true;
-            } else {
+            } else if (!close_first_flat_open) {
                 // Rule 5: the price-scale margin check (comment above).
                 const double notional_per_price =
                     order.frozen_default_qty * syminfo_.pointvalue * fx_s;
