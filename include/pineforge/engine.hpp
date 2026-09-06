@@ -777,6 +777,9 @@ struct PendingOrder {
         std::numeric_limits<double>::quiet_NaN();
     std::string comment;       // order comment for trade reporting
     bool requested_partial = false;         // true iff caller passed qty_percent < 100
+    // Preserve the original default/full-percent EXIT call before reservation
+    // normalization can turn a sub-lot partial request into a full-size order.
+    bool full_percent_exit_request = false;
     // Narrow POOC global-full-exit candidate. ``qty`` deliberately keeps the
     // normal finite reservation so sibling exits see and respect its capacity.
     // At fill time this bit upgrades that one reservation to the full live
@@ -3795,6 +3798,8 @@ private:
     // apply (mutate engine state with the fill — see apply_*_order_fill
     // declarations above).
     enum class OrderEligibility { Proceed, Skip, Remove };
+    double pooc_short_exit_trigger_close(const PendingOrder& order,
+                                         const Bar& bar) const;
     OrderEligibility classify_order_eligibility(
         PendingOrder& order, int opposing_pass,
         internal::DualEntryStopPathWinner dual_entry_path,

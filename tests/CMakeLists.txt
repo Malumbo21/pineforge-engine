@@ -177,6 +177,7 @@ set(TEST_SOURCES
     test_cascade_exit_gapjump
     test_coof_market_limit_recross
     test_pooc_position_visibility
+    test_pooc_short_close_tick
     test_prearmed_exit_path_cursor
     test_prearmed_market_parent_gap_exit
     test_prearmed_bracket_fill_bar

@@ -7199,6 +7199,44 @@ void BacktestEngine::mark_position_brackets_dormant_on_declined_reversal(const B
 // Returns whether the given pending order should be processed this
 // iteration. Walks the chain of TV-empirical "skip" / "cancel" rules
 // in source order; the first rule to fire dictates the verdict.
+double BacktestEngine::pooc_short_exit_trigger_close(
+        const PendingOrder& order, const Bar& bar) const {
+    // Hariss F POOC pins: newly reissued short exits test the broker's tick
+    // close, while Pine still sees raw OHLC and the order levels stay raw.
+    // C11.575 ->11.58 skips limit11.576782; C11.695 ->11.70 reaches
+    // stop11.698693; C12.495 ->12.50 reaches stop12.496973. Both admission
+    // and fill evaluation must use the same close and never an elapsed wick.
+    const bool pinned_reissue = process_orders_on_close_
+        && !calc_on_order_fills_ && !coof_scheduler_active_
+        && !bar_magnifier_enabled_ && !stream_warmup_mode_
+        && stream_phase_ == StreamPhase::IDLE
+        && position_side_ == PositionSide::SHORT
+        && position_open_bar_ >= 0 && position_open_bar_ < bar_index_
+        && position_entry_count_ == 1 && pyramiding_ == 0
+        && pyramid_entries_.size() == 1 && pending_orders_.size() == 1
+        && order.type == OrderType::EXIT && !order.is_long
+        && order.created_bar == bar_index_ && !order.created_during_coof_recalc
+        && order.created_by_same_id_replacement
+        && order.replaced_exit_order_incarnation != 0
+        && order.created_while_in_position && !order.dormant_bracket
+        && !order.from_entry.empty()
+        && order.from_entry == pyramid_entries_.front().entry_id
+        && order.full_percent_exit_request
+        && !order.requested_partial && order.qty_percent == 100.0
+        && std::isfinite(order.qty)
+        && std::abs(order.qty - position_qty_) <= kQtyEpsilon
+        && order.oca_name.empty()
+        && std::isnan(order.trail_points) && std::isnan(order.trail_price)
+        && std::isnan(order.trail_offset)
+        && slippage_ == 0 && commission_type_ == CommissionType::PERCENT
+        && syminfo_.pointvalue == 1 && account_currency_fx_ == 1
+        && account_currency_fx_timestamps_.empty()
+        && max_intraday_filled_orders_ == 0
+        && risk_max_intraday_loss_ == 0 && risk_max_drawdown_ == 0
+        && risk_max_cons_loss_days_ == 0;
+    return pinned_reissue ? tick_grid_price(bar.close) : bar.close;
+}
+
 BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         PendingOrder& order, int opposing_pass,
         internal::DualEntryStopPathWinner dual_entry_path,
@@ -7464,16 +7502,17 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
                                 && !has_stop_or_trail
                                 && !std::isnan(order.limit_price);
         bool exit_marketable_at_close = false;
+        const double trigger_close = pooc_short_exit_trigger_close(order, bar);
         if (exit_style && std::isnan(order.trail_points) && std::isnan(order.trail_price)) {
             if (!std::isnan(order.stop_price)) {
                 exit_marketable_at_close = order.is_long
-                    ? (bar.close <= order.stop_price)
-                    : (bar.close >= order.stop_price);
+                    ? (trigger_close <= order.stop_price)
+                    : (trigger_close >= order.stop_price);
             }
             if (!exit_marketable_at_close && !std::isnan(order.limit_price)) {
                 exit_marketable_at_close = order.is_long
-                    ? (bar.close >= order.limit_price)
-                    : (bar.close <= order.limit_price);
+                    ? (trigger_close >= order.limit_price)
+                    : (trigger_close <= order.limit_price);
             }
         }
         if (!pure_limit_entry && !exit_marketable_at_close
@@ -7653,10 +7692,11 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
         // against it; the close is the earliest (and only) point in this
         // bar it could have interacted with the market.
         bool is_long = position_side_ == PositionSide::LONG;
+        const double trigger_close = pooc_short_exit_trigger_close(order, bar);
         bool stop_marketable = has_stop
-            && (is_long ? (bar.close <= stop_price) : (bar.close >= stop_price));
+            && (is_long ? (trigger_close <= stop_price) : (trigger_close >= stop_price));
         bool limit_marketable = has_limit
-            && (is_long ? (bar.close >= limit_price) : (bar.close <= limit_price));
+            && (is_long ? (trigger_close >= limit_price) : (trigger_close <= limit_price));
         if (stop_marketable) {
             // Exit stop for a LONG is a SELL (worse execution = lower
             // price); for a SHORT it's a BUY (worse = higher price) --

@@ -2164,6 +2164,8 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     order.qty_type = -1;
     order.qty_percent = qp;
     order.requested_partial = is_partial;
+    order.full_percent_exit_request = !has_explicit_qty
+        && (std::isnan(qty_percent) || qty_percent == 100.0);
     order.pooc_global_full_exit_dynamic_qty =
         bind_global_full_exit_dynamic_qty;
     order.pooc_global_full_exit_tracks_bound_adds =
