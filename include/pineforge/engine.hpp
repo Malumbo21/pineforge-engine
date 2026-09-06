@@ -1627,6 +1627,12 @@ protected:
     // PendingOrder::dormant_trail_best).
     double trail_best_before_bar_ = std::numeric_limits<double>::quiet_NaN();
     int trail_best_before_bar_index_ = -1;
+    // The ordinary POOC close scan may revisit a retained trail with that
+    // same pre-bar extreme only while the carried position is unchanged.
+    // A new cycle, add, reduction or close-time trail restart keeps its own
+    // established path state instead of inheriting an earlier position's.
+    int64_t trail_best_before_bar_position_cycle_ = 0;
+    uint64_t trail_best_before_bar_fill_seq_ = 0;
 
     // --- Intraday fill counter ---
     // Counts every fill processed by ``apply_filled_order_to_state`` on

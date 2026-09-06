@@ -2282,6 +2282,8 @@ void BacktestEngine::update_trail_best_for_bar_open(const Bar& bar) {
     if (first_fold_this_bar) {
         trail_best_before_bar_ = trail_best_price_;
         trail_best_before_bar_index_ = bar_index_;
+        trail_best_before_bar_position_cycle_ = position_cycle_seq_;
+        trail_best_before_bar_fill_seq_ = broker_fill_event_seq_;
     }
     if (position_side_ == PositionSide::LONG) {
         if (std::isnan(trail_best_price_) || bar.high > trail_best_price_)
@@ -7457,6 +7459,27 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
             if (found_parent && std::isfinite(earliest_parent)) {
                 path_start_position = earliest_parent;
             }
+        }
+        // Ordinary POOC scans retained orders before and after on_bar.
+        // The second call's trail_best_path_state already contains this
+        // bar's favorable extreme. Replaying O/H/L with that value can
+        // retroactively gap-fill a trail that only activated later on the
+        // path (Nils AAPL 2025-03-31: H 220.58 first arms the long, but
+        // the earlier O 219.56 was incorrectly reused as its exit).
+        // Rewalk a retained trail from the SAME pre-bar best on both scans.
+        // New/reissued orders, entry bars, changed position state, close
+        // restarts and the dedicated dormant/COOF/magnifier paths retain
+        // their existing state and chronology.
+        if (has_trail && order.type == OrderType::EXIT
+            && process_orders_on_close_ && !calc_on_order_fills_
+            && !bar_magnifier_enabled_ && !order.dormant_bracket
+            && !is_entry_bar && order.created_bar < bar_index_
+            && trail_close_restart_bar_ != bar_index_
+            && trail_best_before_bar_index_ == bar_index_
+            && position_cycle_seq_ != 0
+            && trail_best_before_bar_position_cycle_ == position_cycle_seq_
+            && trail_best_before_bar_fill_seq_ == broker_fill_event_seq_) {
+            trail_best_path_state = trail_best_before_bar_;
         }
         ExitPathFill exit_fill = resolve_exit_path_fill(
             bar,
