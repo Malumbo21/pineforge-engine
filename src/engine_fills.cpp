@@ -1031,7 +1031,15 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
             || !std::isfinite(opening_equity)) {
             return;
         }
-        const double required_margin = qty * margin_per_unit;
+        const double exact_required_margin = qty * margin_per_unit;
+        // Round 12 AG-C2: required money at the opening checkpoint uses the
+        // same ten-digit mark as the adverse checkpoint. May28 TV restores
+        // 62.32 instead of 62.28; June9's +0.000148 rounded deficit takes the
+        // existing one-contract fallback, then the ordinary adverse retry.
+        // The helper preserves exact required money outside its established
+        // same-currency / sub-account-unit lot scope.
+        const double required_margin =
+            tv_money_required_margin(exact_required_margin, opening_mark);
         // TV's converted account-currency broker ledger is cent-rounded, so a
         // post-fee deficit below half a cent is not a real deficit there: an
         // exported converted-USD tape does not act on a ~$0.0025 conversion
@@ -1056,7 +1064,12 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
             if (long_full_margin) tv_money_long_margin_call(bar);
             return;
         }
-        q_min = qty - opening_equity / margin_per_unit;
+        // Use the same required money to decide a trim and compute its
+        // restore amount. Keep the historical arithmetic byte-for-byte
+        // when rounding has no effect, including every out-of-scope ledger.
+        q_min = required_margin == exact_required_margin
+            ? qty - opening_equity / margin_per_unit
+            : (required_margin - opening_equity) / margin_per_unit;
         raw_exit_fill_base = opening_event_raw_fill_base;
     } else {
         // finding-308: a chronological pre-exit slice already consumed this
@@ -1847,7 +1860,11 @@ bool BacktestEngine::margin_call_1x_long_opening_slice_before_priced_exit(
         || !std::isfinite(opening_equity)) {
         return false;
     }
-    const double required_margin = qty * margin_per_unit;
+    const double exact_required_margin = qty * margin_per_unit;
+    // This is the same opening checkpoint before a priced exit: required
+    // money and restore arithmetic must match process_margin_call.
+    const double required_margin = tv_money_required_margin(
+        exact_required_margin, position_entry_price_);
     // Cent-rounded converted-ledger affordability tolerance — identical to
     // the end-of-bar opening branch (identically zero for same-currency
     // strategies).
@@ -1858,7 +1875,9 @@ bool BacktestEngine::margin_call_1x_long_opening_slice_before_priced_exit(
     if (opening_equity >= required_margin - converted_ledger_guard) {
         return false;
     }
-    double q_min = qty - opening_equity / margin_per_unit;
+    double q_min = required_margin == exact_required_margin
+        ? qty - opening_equity / margin_per_unit
+        : (required_margin - opening_equity) / margin_per_unit;
     if (!std::isfinite(q_min) || q_min <= kQtyEpsilon) return false;
 
     // Slice quantity: floor-before-4x plus the opening-event sub-lot
