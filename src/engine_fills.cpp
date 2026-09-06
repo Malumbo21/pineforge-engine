@@ -4995,7 +4995,10 @@ void BacktestEngine::apply_filled_order_to_state(
         && !order.created_by_same_id_replacement
         && order.created_bar == bar_index_ - 1 && pending_orders_.size() == 1
         && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-        && default_qty_value_ == 100 && margin_long_ == 100 && pyramiding_ == 0
+        && default_qty_value_ == 100 && margin_long_ == 100
+        // Omitted Pine pyramiding retains the engine's single-entry default1;
+        // explicit0 has the same first-opening shape. Adds remain out of scope.
+        && pyramiding_ >= 0 && pyramiding_ <= 1
         && qty_step_ == 1 && syminfo_.pointvalue == 1
         && account_currency_fx_ == 1 && account_currency_fx_timestamps_.empty()
         && order.sizing_fx == 1 && slippage_ == 0 && commission_value_ == 0

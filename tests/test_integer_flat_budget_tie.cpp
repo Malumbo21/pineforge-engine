@@ -20,14 +20,16 @@ enum class Mode { Default, Short, Explicit, Cash, Fixed, Half, Pooc, Coof,
                   Fee, Slip, Fx, Competing, Replacement, Fractional };
 class BudgetProbe : public BacktestEngine {
 public:
-    BudgetProbe(double equity,Mode mode=Mode::Default):mode_(mode) {
+    BudgetProbe(double equity,Mode mode=Mode::Default,int pyramiding=0):mode_(mode) {
         initial_capital_=equity;
         default_qty_type_=QtyType::PERCENT_OF_EQUITY;
         default_qty_value_=mode==Mode::Half?50:100;
         if(mode==Mode::Cash) {default_qty_type_=QtyType::CASH;default_qty_value_=9454.08;}
         if(mode==Mode::Fixed) {default_qty_type_=QtyType::FIXED;default_qty_value_=768;}
         margin_long_=margin_short_=100;
-        pyramiding_=0;
+        // -1 leaves the inherited default untouched, as the real Pine source
+        // and its generated constructor do when pyramiding is omitted.
+        if(pyramiding>=0) pyramiding_=pyramiding;
         qty_step_=mode==Mode::Fractional?.01:1;
         syminfo_.pointvalue=1;
         set_syminfo_mintick(.01);
@@ -57,8 +59,8 @@ const Bar bars[]={
     {12.31,12.32,12.31,12.315,1,2000},
     {12.4,12.4,12.4,12.4,1,3000},
 };
-void boundary(double equity,bool should_fill) {
-    BudgetProbe p(equity);
+void boundary(double equity,bool should_fill,int pyramiding) {
+    BudgetProbe p(equity,Mode::Default,pyramiding);
     for(int repeat=0;repeat<2;++repeat) {
         p.run(bars,3);
         CHECK(p.last_error().empty());
@@ -92,11 +94,11 @@ void guards() {
 }
 } // namespace
 int main(int argc,char**) {
-    if(argc==1) {
-        boundary(std::nextafter(9454.08,0.0),false);
-        boundary(9454.08,true);
-        boundary(std::nextafter(9454.08,std::numeric_limits<double>::infinity()),true);
-        boundary(9455.08,true);
+    if(argc==1) for(int pyramiding:{0,-1}) {
+        boundary(std::nextafter(9454.08,0.0),false,pyramiding);
+        boundary(9454.08,true,pyramiding);
+        boundary(std::nextafter(9454.08,std::numeric_limits<double>::infinity()),true,pyramiding);
+        boundary(9455.08,true,pyramiding);
     }
     guards();
     std::printf("%d passed, %d failed\n",passed,failed);
