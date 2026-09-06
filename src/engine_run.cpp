@@ -316,6 +316,8 @@ uint64_t BacktestEngine::execute_coof_script_body(
     coof_fill_recalc_active_ = false;
     coof_recalc_at_bar_open_ = false;
     coof_recalc_after_first_open_fill_ = false;
+    coof_market_entry_recalc_incarnation_ = 0;
+    coof_market_entry_recalc_fill_seq_ = 0;
     coof_direct_fill_events_remaining_ = 0;
     return broker_fill_event_seq_ - before;
 }
@@ -329,7 +331,8 @@ uint64_t BacktestEngine::run_coof_recalc_chain(
         uint64_t triggering_events,
         uint64_t max_events,
         uint64_t events_already,
-        bool grouped_stop_recalc) {
+        bool grouped_stop_recalc,
+        uint64_t market_entry_incarnation) {
     uint64_t total_events = triggering_events;
     uint64_t pending_recalcs = grouped_stop_recalc ? 1 : triggering_events;
     uint64_t handled = 0;
@@ -346,6 +349,9 @@ uint64_t BacktestEngine::run_coof_recalc_chain(
             recalc_at_bar_open && events_already == 0 && handled == 1;
         coof_recalc_after_first_open_fill_ =
             recalc_at_bar_open && !first_open_fill_recalc;
+        coof_market_entry_recalc_incarnation_ =
+            handled == 1 ? market_entry_incarnation : 0;
+        coof_market_entry_recalc_fill_seq_ = broker_fill_event_seq_;
         const uint64_t direct = execute_coof_script_body(
             script_bar, broker_cursor_price, cursor_is_bar_point,
             /*is_fill_recalc=*/true,
@@ -409,6 +415,8 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
     coof_cascade_recalc_leg_ = -1;
     coof_cascade_force_wp_gap_ = false;
     coof_recalc_after_first_open_fill_ = false;
+    coof_market_entry_recalc_incarnation_ = 0;
+    coof_market_entry_recalc_fill_seq_ = 0;
 
     double path[4];
     fill_bar_path_points(script_bar, path);
@@ -439,7 +447,7 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
             script_bar, fill.fill_price, /*cursor_is_bar_point=*/false, cursor_is_close,
             filled_at_bar_open_point,
             fill.fill_events, kNoFillEventBudget, fill_events,
-            fill.grouped_stop_recalc);
+            fill.grouped_stop_recalc, fill.market_entry_incarnation);
         // The carried order's open fill triggers one execution at O, and the
         // order born in that first execution may also fill at O. Every later
         // fill—including the first fill when it occurs inside a path segment—
@@ -608,6 +616,8 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
     coof_fill_recalc_active_ = false;
     coof_recalc_at_bar_open_ = false;
     coof_recalc_after_first_open_fill_ = false;
+    coof_market_entry_recalc_incarnation_ = 0;
+    coof_market_entry_recalc_fill_seq_ = 0;
     coof_cursor_is_bar_close_ = false;
     coof_evaluating_path_segment_ = false;
     coof_at_extreme_waypoint_ = false;
@@ -712,6 +722,8 @@ void BacktestEngine::reset_run_state() {
     coof_fill_recalc_active_ = false;
     coof_recalc_at_bar_open_ = false;
     coof_recalc_after_first_open_fill_ = false;
+    coof_market_entry_recalc_incarnation_ = 0;
+    coof_market_entry_recalc_fill_seq_ = 0;
     coof_cursor_is_bar_close_ = false;
     coof_evaluating_path_segment_ = false;
     coof_at_extreme_waypoint_ = false;
@@ -1120,6 +1132,8 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
     coof_cursor_is_bar_close_ = false;
     coof_evaluating_path_segment_ = false;
     coof_recalc_after_first_open_fill_ = false;
+    coof_market_entry_recalc_incarnation_ = 0;
+    coof_market_entry_recalc_fill_seq_ = 0;
 
     double cursor = ticks.front().price;
     bool cursor_is_bar_point = true;  // finding-446, see the simple loop
@@ -1257,6 +1271,8 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
     coof_fill_recalc_active_ = false;
     coof_recalc_at_bar_open_ = false;
     coof_recalc_after_first_open_fill_ = false;
+    coof_market_entry_recalc_incarnation_ = 0;
+    coof_market_entry_recalc_fill_seq_ = 0;
     coof_cursor_is_bar_close_ = false;
     coof_evaluating_path_segment_ = false;
     coof_at_extreme_waypoint_ = false;

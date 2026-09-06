@@ -622,6 +622,14 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             const PositionSide side_before_fill = position_side_;
             const uint64_t events_before = broker_fill_event_seq_;
             const double realized_before_fill = net_profit_sum_;
+            // Capture before the fill kernel: other order kinds may erase OCA
+            // siblings, invalidating references into the pending-order vector.
+            const bool fresh_coof_market_entry =
+                order.type == OrderType::MARKET
+                && order.created_during_coof_recalc
+                && order.created_bar == bar_index_
+                && side_before_fill == PositionSide::FLAT;
+            const uint64_t opening_incarnation = order.incarnation;
             apply_filled_order_to_state(
                 order, candidate.order_index, candidate.fill.fill_price,
                 candidate.fill.is_limit_fill, bar,
@@ -649,6 +657,11 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             result.fill_events = grouped_fill_events;
             result.chart_waypoint_price = candidate.chart_waypoint_price;
             result.grouped_stop_recalc = group_resting_stops && grouped_fills > 1;
+            if (fresh_coof_market_entry && produced == 1
+                && position_side_ == PositionSide::LONG
+                && pyramid_entries_.size() == 1
+                && pyramid_entries_.front().entry_incarnation == opening_incarnation)
+                result.market_entry_incarnation = opening_incarnation;
             // No callbacks, new orders or OCA erasures can occur in the
             // proven group. Keep indices stable until its last existing
             // candidate has passed through the ordinary fill kernel.

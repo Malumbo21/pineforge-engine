@@ -1843,6 +1843,9 @@ protected:
         // adverse leg before one script recalculation. Broker fills remain
         // individually counted by fill_events and broker_fill_event_seq_.
         bool grouped_stop_recalc = false;
+        // Physical lot opened by this actual fresh COOF MARKET fill. Only
+        // its first callback may use this provenance; direct later fills do not.
+        uint64_t market_entry_incarnation = 0;
     };
     CoofFillResult process_next_pending_order(const Bar& bar,
                                               bool allow_market_orders,
@@ -2893,6 +2896,11 @@ protected:
     // lets strategy.exit apply the one pinned exception: a marketable LIMIT may
     // resume at W1, while marketable STOP suppression remains whole-entry-bar.
     bool coof_recalc_after_first_open_fill_ = false;
+    // Round15: identify the MARKET opening whose first callback is active.
+    // A direct close/partial/reentry in that body changes the serial and must
+    // not inherit the original fill's permission to arm a recrossing limit.
+    uint64_t coof_market_entry_recalc_incarnation_ = 0;
+    uint64_t coof_market_entry_recalc_fill_seq_ = 0;
     // KI-67: true only during a point-bar evaluation that sits AT an extreme
     // waypoint (W1 or W2) of the historical 4-tick path. Cascade orders born
     // this bar may fill only while this holds; on segments, at O, at C, and on
@@ -4064,7 +4072,8 @@ private:
                                    uint64_t triggering_events,
                                    uint64_t max_events,
                                    uint64_t events_already,
-                                   bool grouped_stop_recalc = false);
+                                   bool grouped_stop_recalc = false,
+                                   uint64_t market_entry_incarnation = 0);
     void run_simple_bar_loop(const Bar* input_bars, int n_input);
     void run_aggregation_bar_loop(const Bar* input_bars, int n_input,
                                   bool bar_magnifier, int expected_script_bars);

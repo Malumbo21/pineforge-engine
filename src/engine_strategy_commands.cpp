@@ -2234,11 +2234,46 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
         later_same_open_marketable_limit =
             later_same_open_priced_exit_on_entry_bar
             && limit_marketable_at_coof_cursor;
+        // Round15 F/EUR JOAT pins: a fresh MARKET long at W1=H arms a
+        // marketable full limit, waits through H->L, and takes its later L->C
+        // recross at the exact level. It neither fills at placement nor gets
+        // a new waypoint-gap permission. Keep KI-67's existing leg gate.
+        // This first patch covers only a limit strictly inside H/L with no
+        // reachable stop competitor and the actual opening's first callback.
+        const bool first_high_market_limit_recross =
+            !bar_magnifier_enabled_ && !process_orders_on_close_
+            && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
+            && order.coof_born_mid_bar && !coof_hist_is_segment_
+            && coof_at_extreme_waypoint_ && coof_hist_path_index_ == 1
+            && coof_cascade_recalc_leg_ == 1
+            && coof_market_entry_recalc_incarnation_ != 0
+            && coof_market_entry_recalc_fill_seq_ == broker_fill_event_seq_
+            && position_side_ == PositionSide::LONG
+            && position_entry_count_ == 1 && pyramiding_ == 0
+            && pyramid_entries_.size() == 1
+            && pyramid_entries_.front().entry_incarnation
+                == coof_market_entry_recalc_incarnation_
+            && !from_entry.empty()
+            && from_entry == pyramid_entries_.front().entry_id
+            && !is_partial && std::isfinite(reserved_qty)
+            && std::abs(reserved_qty - position_qty_) <= kQtyEpsilon
+            && pending_orders_.empty() && oca_name.empty()
+            && !has_trail_request && slippage_ == 0
+            && syminfo_.pointvalue == 1 && account_currency_fx_ == 1
+            && account_currency_fx_timestamps_.empty()
+            && limit_marketable_at_coof_cursor
+            && internal::bar_path_uses_high_first(current_bar_)
+            && coof_cursor_price_ == bar_fill_price(current_bar_.high)
+            && current_bar_.low < order.limit_price
+            && order.limit_price < current_bar_.high
+            && (std::isnan(order.stop_price)
+                || order.stop_price < current_bar_.low);
         order.coof_suppress_stop_on_entry_bar =
             stop_marketable_at_coof_cursor;
         order.coof_suppress_limit_on_entry_bar =
             limit_marketable_at_coof_cursor
-            && !later_same_open_marketable_limit;
+            && !later_same_open_marketable_limit
+            && !first_high_market_limit_recross;
     }
     // KI-67 exit cascade (Model S). Record this mid-bar cascade exit's in-flight
     // leg so the historical dispatch gate can hold it on that leg's remainder,
