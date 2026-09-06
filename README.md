@@ -1,13 +1,13 @@
 <div align="center">
 
-<img src=".github/assets/pineforge-banner.jpg" alt="PineScript backtests, deterministic, on your data — v0.8.0 · 93.26% line coverage · 309/311 strict TV parity · 0 engine bugs" width="900">
+<img src=".github/assets/pineforge-banner.jpg" alt="PineScript backtests, deterministic, on your data — v0.13.0 · 4,189 of 4,190 closed-test probes at excellent-or-strong TradingView parity · 2.8M trades verified" width="900">
 
 # PineForge
 [![CI](https://img.shields.io/github/actions/workflow/status/pineforge-4pass/pineforge-engine/ci.yml?branch=main&label=ci&logo=github)](https://github.com/pineforge-4pass/pineforge-engine/actions)
 [![Docs](https://img.shields.io/badge/docs-cdocs.pineforge.dev-1565c0?logo=readthedocs&logoColor=white)](https://cdocs.pineforge.dev)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=cplusplus&logoColor=white)](#)<br>
-[![Parity](https://img.shields.io/badge/TV%20parity-309%2F311-brightgreen)](#cross-engine-comparison)
+[![Parity](https://img.shields.io/badge/TV%20parity-99.97%25%20closed%20test-brightgreen)](#validation-scoreboard)
 [![Speed](https://img.shields.io/badge/median%20162%C3%97%20vs%20PyneCore%20%2899%20strategies%29-success)](benchmarks/results/speed.md)<br>
 [![codegen on PyPI](https://img.shields.io/pypi/v/pineforge-codegen?label=codegen&logo=pypi&logoColor=white)](https://pypi.org/project/pineforge-codegen/)
 [![MCP server](https://img.shields.io/badge/MCP-server-1565c0?logo=docker&logoColor=white)](https://github.com/pineforge-4pass/pineforge-backtest-mcp)
@@ -42,20 +42,57 @@ A language model can't accurately backtest a PineScript v6 strategy by reasoning
 about it — Pine's series semantics, intrabar fills, look-ahead rules, and
 `strategy.*` order logic don't reproduce from approximation, so a hand-simulated
 trade list or P&L is unreliable and won't match TradingView. This engine runs the
-real deterministic computation instead: **309/311 reference strategies at strict
-TradingView parity, 0 engine bugs** ([methodology & validation](https://pineforge.dev/en/methodology/),
-as of 2026-08-13). That is why an agent asked to "backtest this Pine / check if
-it's profitable / reproduce my TradingView results" should call the MCP tools
-rather than approximate the run.
+real deterministic computation instead: **4,189 of 4,190 probes at excellent-or-strong
+TradingView parity** — 309 public corpus strategies plus 413 community scripts on 15
+markets and timeframes, 2.8 million trades matched trade-for-trade
+([methodology & validation](https://pineforge.dev/en/methodology/), as of 2026-09-06).
+That is why an agent asked to "backtest this Pine / check if it's profitable /
+reproduce my TradingView results" should call the MCP tools rather than
+approximate the run.
 
 ## Validation scoreboard
 
 | Board | Test set | Result | Trades verified |
 |---|---|---|---|
-| **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/311 strict** trade-for-trade (+4 strong at ≥99.9% count parity; 1 documented TV-side anomaly excluded) | ~431k |
-| **Closed test** | 415 community-shared TradingView scripts — kept private under TradingView's Terms of Service (not redistributable) | **396/396 excellent (100%)** | ~520k |
+| **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** trade-for-trade (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | ~430k |
+| **Closed test** — the parity campaign | 413 community-shared TradingView scripts × 15 market/timeframe lanes = **3,881 script-lane probes** — kept private under TradingView's Terms of Service (not redistributable) | **3,825 excellent + 55 strong + 1 moderate** = 3,880/3,881 (99.97%) excellent-or-strong; ETH/USDT-perp 15m hard lane 393 excellent + 2 strong of 395 | ~2.4M |
 
-**~950k trades** verified trade-for-trade against TradingView's "List of Trades" exports in total, as of 2026-08-13. During this research **20 TV-side anomalies** were discovered, deep-analyzed, and documented (19 on the closed set, 1 in the public corpus) — each excluded only with an adversarially-audited write-up. **0 engine bugs.**
+**2.82 million TradingView trades** in the measured windows, **2.815 million matched row-for-row** (99.8%) against TradingView's own "List of Trades" exports, as of **2026-09-06**. **18 TradingView-side anomalies** were found on the way (all on the ETH 15m lane), each confirmed with a purpose-built sensor script exported from TradingView and documented before it was excluded. The one probe below *strong* is a verifier-harness limitation on a range-start chart trim, not an engine divergence.
+
+### The closed test, lane by lane
+
+| Market · timeframe | Probes | Excellent | Strong | Moderate |
+|---|---:|---:|---:|---:|
+| BINANCE:ETHUSDT.P · 15m *(hard lane: zero regression allowed)* | 395 | 393 | 2 | — |
+| BINANCE:BTCUSDT · 15m | 354 | 341 | 13 | — |
+| BINANCE:BTCUSDT · 1D | 259 | 258 | 1 | — |
+| CME_MINI:ES1! · 15m | 174 | 173 | 1 | — |
+| CME_MINI:ES1! · 1D | 117 | 116 | 1 | — |
+| CME_MINI:NQ1! · 15m | 174 | 174 | — | — |
+| CME_MINI:NQ1! · 1D | 116 | 116 | — | — |
+| NASDAQ:AAPL · 15m | 356 | 352 | 4 | — |
+| NSE:NIFTY · 15m | 191 | 190 | 1 | — |
+| NSE:NIFTY · 1D | 145 | 145 | — | — |
+| NYSE:F · 15m | 340 | 331 | 9 | — |
+| NYSE:F · 1D | 263 | 262 | 1 | — |
+| OANDA:EURUSD · 15m | 373 | 356 | 17 | — |
+| OANDA:XAUUSD · 15m | 376 | 370 | 5 | 1 |
+| OANDA:XAUUSD · 1D | 248 | 248 | — | — |
+| **Total** | **3,881** | **3,825** | **55** | **1** |
+
+### How a probe is graded
+
+Every script is exported from TradingView as-is (its own inputs, its own defaults) with the chart's trade list at full precision, then transpiled with [`pineforge-codegen`](https://github.com/pineforge-4pass/pineforge-codegen-oss) and run by this engine on the same OHLCV bars. The two trade lists are aligned trade-for-trade and graded by the rubric in [`scripts/verify_corpus.py`](scripts/verify_corpus.py):
+
+- **excellent** — the same number of trades, at least 99% of TradingView's trades matched, entry and exit prices within 0.01% and PnL within 1% at the 90th percentile (scripts with trailing-stop exits are graded on the *production* profile: exits within 0.05%, since a trail fill depends on TradingView's sub-bar path);
+- **strong** — at least 95% matched, trade count within 6%, entries within 0.1% and exits within 0.5% at the 90th percentile;
+- **moderate / weak** — at least 75% coverage, or less.
+
+Grades are not a pass/fail on one run. The campaign measures every candidate build over the whole population on a reproducible cloud pipeline, publishes the graded snapshot by content hash, and ships only through a deterministic gate: **no regression on any metric of any ETH 15m probe**, and, pooled over the other lanes, strictly more probes entering the excellent and excellent+strong bands than leaving them. The active baseline is the last snapshot that passed; every merge is fast-forwarded so the gated commit is the commit on `main`.
+
+### What the closed test taught the engine
+
+Every gap was closed by pinning the rule TradingView actually follows — never by loosening the grader. Each rule was isolated with sensor strategies exported from TradingView (capital sweeps, literal replays, per-bar state encoded into order comments) and landed with a replay test on the recorded bars. Among the rules pinned this way: the broker carries money at **ten significant digits** (equity rounding, the whole-order drop band, the one-contract margin call, the raw lot floor on every lot-stepped symbol); trailing stops restart from the issuing bar's *close* when `trail_points` changes and never fold that bar's extreme; a zero-offset trail rides the raw running best and its arming open fills at the nearest-tick print; a declined all-in reversal kills a bracket's stop and limit legs but never its trail leg, and a `strategy.close` queued beside a dropped reversal still fills; sparse `ta.atr`/`ta.tr` read the chart's previous close on every execution; pivot levels snap to the tick grid; and account-currency conversion is left out of the comparison entirely, because TradingView's FX series is a moving target that no fixed table reproduces.
 
 **The workflow (fully local — source never leaves your machine):**
 1. Agent writes (or you paste) PineScript v6 source
@@ -127,9 +164,9 @@ for the full tool catalog, request schemas, and env vars (`PINEFORGE_ALLOW_ANYWH
 
 ## Why PineForge?
 
-- 🎯 **TradingView-exact.** 309 of 311 reference strategies match TV trade-for-trade on the public corpus (the other 2 are documented data-resolution / TV-tie residuals; 1 further probe is a documented TV-side anomaly at the 1× margin boundary where TV's broker emulator is non-deterministic — engine is correct, and it is excluded from the headline). On a **closed test set** of 415 community-shared TradingView scripts (kept private under TradingView’s Terms of Service — not redistributable), the engine validates **396/396 excellent (100%)** across **~520k trades** — with **19 TV-side anomalies discovered and documented** during that research. **100 of 100** PineForge excellent vs PyneCore + PineTS on the public three-way benchmark (~167,000 TV trades; PyneCore: 85 of 100; PineTS indicator-only).
+- 🎯 **TradingView-exact.** All 309 graded strategies of the public corpus match TV trade-for-trade. On the **closed test** — 413 community-shared TradingView scripts on 15 market/timeframe lanes, 3,881 probes, kept private under TradingView's Terms of Service — **3,880 of 3,881 grade excellent or strong** (3,825 excellent), 2.8 million trades matched, 18 TV-side anomalies discovered and documented along the way. **100 of 100** PineForge excellent vs PyneCore + PineTS on the public three-way benchmark (~167,000 TV trades; PyneCore: 85 of 100; PineTS indicator-only).
 - ⚡ **Microsecond-class.** Median **162× faster than PyneCore** across 99 commonly-timed strategies (full 41,307-bar OHLCV, magnifier-on hot loop; see [benchmarks/results/speed.md](benchmarks/results/speed.md)). Parameter sweeps load one `.so` and re-run with new inputs — no recompile, no fork, no IPC.
-- 🔒 **Stable C ABI.** 28 functions, one header (`<pineforge/pineforge.h>`). Append-only across minor versions, `static_assert`-pinned struct layouts, hidden-visibility hygiene. Drop a strategy `.so` in any harness; it just runs.
+- 🔒 **Stable C ABI.** 32 functions, one header (`<pineforge/pineforge.h>`). Append-only across minor versions, `static_assert`-pinned struct layouts, hidden-visibility hygiene. Drop a strategy `.so` in any harness; it just runs.
 - 🧪 **Reproducible to the bit.** Deterministic float ordering, deterministic bar magnifier, no internal RNG seeded from time. Two runs with the same inputs produce bit-identical trade lists.
 - 🧰 **FFI-friendly.** Call from Python (`ctypes`), Rust (`libloading`), Go (`cgo`), Node, Julia. Worked examples for [pure C](https://cdocs.pineforge.dev/examples_c.html), [Python sweep](https://cdocs.pineforge.dev/examples_python_sweep.html), [Rust](https://cdocs.pineforge.dev/examples_rust.html), [multi-strategy harness](https://cdocs.pineforge.dev/examples_multi.html), and [magnifier A/B](https://cdocs.pineforge.dev/examples_magnifier.html) ship in the docs.
 - 🌍 **Cross-platform CI.** Linux + macOS × Release + Debug. Universal mac binary. Static library, no runtime DSO surprises at deploy time.
@@ -138,7 +175,7 @@ for the full tool catalog, request schemas, and env vars (`PINEFORGE_ALLOW_ANYWH
 
 ## For developers: embed the runtime directly
 
-PineForge ships as a static C library (`libpineforge.a`) with a stable 28-symbol C ABI. Call from C, Python, Rust, Go, Node, Julia — one harness, swap strategies forever.
+PineForge ships as a static C library (`libpineforge.a`) with a stable 32-symbol C ABI. Call from C, Python, Rust, Go, Node, Julia — one harness, swap strategies forever.
 
 ### See it in 30 seconds
 
@@ -166,7 +203,7 @@ exports the same stable ABI — write your harness once, swap strategies forever
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build --output-on-failure   # 39 tests, ~1 s
+ctest --test-dir build --output-on-failure   # 198 tests
 bash tutorial/run.sh                          # MACD backtest end-to-end
 python3 tutorial/run_stream.py                # OHLCV warmup → realtime trades
 ```
@@ -194,16 +231,16 @@ The site auto-rebuilds on every push to `main` and every release tag.
 
 PineForge is the **C++ runtime** that PineForge-compiled strategies link against. It implements PineScript v6 strategy semantics — order matching, fills, the magnifier, technical indicators, time/session math — as a static C++ library with a stable C ABI.
 
-The runtime is parity-tested **trade-for-trade against TradingView's "List of Trades" CSV exports** on a reference corpus: **309 excellent + 2 strong of 311 graded** under the canonical verifier (**+1 documented TV-side anomaly**, excluded from the headline). The corpus ships as a **public Apache-2.0 submodule**.
+The runtime is parity-tested **trade-for-trade against TradingView's "List of Trades" exports** on two boards: the public reference corpus (**309/309 graded excellent** under the canonical verifier) and the closed parity campaign above (**3,880/3,881 excellent-or-strong**). The corpus ships as a **public Apache-2.0 submodule**.
 
 This repository ships:
 
 - `libpineforge.a` — the static runtime library
 - `<pineforge/pineforge.h>` — the public C ABI (the canonical, stability-pinned consumer surface)
 - `<pineforge/*.hpp>` — the internal C++ headers (the PineForge transpiler emits against these; not part of the stability guarantee)
-- A 126-binary ctest suite (125 C++ + 1 pure-C ABI sanity test) that runs in CI on every commit (93.26% line coverage / 81.07% branch coverage of `src/` measured via `bash scripts/coverage.sh`)
-- `**corpus/`** (**public git submodule**) — **312 reference strategies** under a single `corpus/validation/` tree. Each folder ships `strategy.pine`, `generated.cpp`, `tv_trades.csv`, and `engine_trades.csv`. Run `bash scripts/run_corpus.sh` after `git submodule update --init corpus`.
-- `[benchmarks/](benchmarks/)` — **three-way engine comparison** (PineForge ↔ [PyneCore](https://github.com/PyneSys/pynecore) ↔ [PineTS](https://github.com/LuxAlgo/PineTS)) on 100 strategies (50 public + 50 promoted corpus probes) and 10 canonical indicators. The harness code and reports live here; **fixtures** (pinned OHLCV, every `strategies/`* folder with TV exports and trade CSVs) ship via the optional **`benchmarks/assets` submodule** — a separate optional **public** submodule (Apache-2.0). With that init’d, `bash benchmarks/run_all.sh` reproduces the headline numbers with zero external API calls. PyneCore Python is official cloud-compiler output (no hand-ports). Headline: PineForge hits canonical *excellent* tier on **50/50** strategies (first 50) vs PyneCore’s 47/50; on the expanded **100-strategy suite (~167,000 TV trades verified)**, PineForge holds **100/100 excellent** vs PyneCore’s 85/100. Median speedup: 162× vs PyneCore across 99 commonly-timed strategies.
+- A 198-test ctest suite (C++ unit and replay tests plus a pure-C ABI sanity test) that runs in CI on every commit — most parity rules land with a replay test on the recorded TradingView bars (`bash scripts/coverage.sh` measures line/branch coverage of `src/`)
+- **`corpus/`** (**public git submodule**) — **312 reference strategies** under a single `corpus/validation/` tree. Each folder ships `strategy.pine`, `generated.cpp`, `tv_trades.csv`, and `engine_trades.csv`; the feed is a 1-minute Binance ETH/USDT:USDT tape with the 15-minute bars derived from it (`corpus/data/derived/`). Run `bash scripts/run_corpus.sh` after `git submodule update --init corpus`.
+- **[`benchmarks/`](benchmarks/)** — **three-way engine comparison** (PineForge ↔ [PyneCore](https://github.com/PyneSys/pynecore) ↔ [PineTS](https://github.com/LuxAlgo/PineTS)) on 100 strategies (50 public + 50 promoted corpus probes) and 10 canonical indicators, plus the throughput reproduction package (`benchmarks/throughput/`). The harness code and reports live here; **fixtures** (pinned OHLCV, every `strategies/*` folder with TV exports and trade CSVs) ship via the optional **public** `benchmarks/assets` submodule (Apache-2.0). With that init'd, `bash benchmarks/run_all.sh` reproduces the headline numbers with zero external API calls. PyneCore Python is official cloud-compiler output (no hand-ports). Headline: on the **100-strategy suite (~167,000 TV trades verified)** PineForge holds **100/100 excellent** vs PyneCore's 85/100; median speedup 162× vs PyneCore across 99 commonly-timed strategies.
 
 ## Coverage
 
@@ -228,7 +265,7 @@ If you encounter day-boundary alignment issues or want to force the engine to pr
 
 **This is a backtest engine, not a charting library.** PineScript drawing primitives (`plot`, `bgcolor`, `label`, …) compile cleanly but do nothing at runtime. The runtime computes trade execution and reports — it does not render.
 
-**This is not a TradingView clone.** PineForge intentionally diverges from TradingView in a handful of places where TV's behaviour is undocumented or platform-specific (the bar magnifier, deterministic float ordering). Where it converges, it converges **exactly** on the reference corpus (`309/311` excellent + 4 strong; 1 documented TV-side anomaly excluded. Init the public `corpus` submodule per `[CONTRIBUTING.md](CONTRIBUTING.md)`). Where it diverges, it documents the divergence.
+**This is not a TradingView clone.** PineForge intentionally diverges from TradingView in a handful of places where TV's behaviour is undocumented or platform-specific (the bar magnifier, deterministic float ordering). Where it converges, it converges **exactly**: 309/309 graded corpus strategies excellent, 3,880/3,881 closed-test probes excellent-or-strong (init the public `corpus` submodule per [CONTRIBUTING.md](CONTRIBUTING.md)). Where it diverges, it documents the divergence.
 
 ## Quickstart
 
@@ -248,7 +285,7 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Expect 105 tests to pass. The largest (`test_integration`, `test_request_security`) take a few hundred milliseconds; everything else completes faster.
+Expect 198 tests to pass. The largest (`test_integration`, `test_request_security`, the replay tests on recorded TradingView bars) take a few hundred milliseconds each; everything else completes faster.
 
 ### Install
 
@@ -260,12 +297,27 @@ Installs:
 
 - `lib/libpineforge.a`
 - `include/pineforge/*.hpp` and `include/pineforge/pineforge.h`
+- `lib/cmake/PineForge/PineForge{Config,Targets,ConfigVersion}.cmake`
 
----
+### Use from another CMake project
+
+```cmake
+find_package(PineForge 0.1 REQUIRED)
+target_link_libraries(my_target PRIVATE PineForge::pineforge)
+```
+
+```c
+#include <pineforge/pineforge.h>
+
+int main(void) {
+    pf_version_t v = pf_version_get();
+    /* ... */
+}
+```
 
 ## Validating Performance & Optimizations
 
-We recently achieved over **10× speedup** on hot-loop outlier bottlenecks (such as `19-scalping-wunder-bots`) by implementing:
+The v0.6.0 performance sprint achieved over **10× speedup** on hot-loop outlier bottlenecks (such as `19-scalping-wunder-bots`) by implementing:
 1. **Global Static Inputs Caching:** We group and evaluate non-source global inputs once inside a first-bar initialization block, completely eliminating redundant string-keyed map lookups inside the strategy's C++ `on_bar()` loop.
 2. **Thread-Local Timestamp Caching:** We cache inputs and outputs of `timestamp()` and timezone-aware date conversions in `thread_local` structures, reducing costly libc calendar lookups (`timegm` / `mktime`) to simple integer comparisons.
 3. **Lazy Timezone Caching:** We optimized the C++ `ScopedTimezone` implementation to lazy-cache active timezone environments across executions, avoiding redundant environment mutations (`setenv`) and parsing overhead (`tzset`) on every bar.
@@ -276,7 +328,7 @@ To easily reproduce and validate these throughput distribution and optimization 
 
 ```bash
 # 1. Navigate to the reproduction package
-cd performance
+cd benchmarks/throughput
 
 # 2. Run the automated reproduction script
 ./reproduce.sh
@@ -298,23 +350,6 @@ SKIP_PYNE=1 SKIP_PINETS=1 SKIP_PINEFORGE=1 SKIP_REPORTS=1 ./benchmarks/run_all.s
 
 # 3. View the updated speed table
 cat benchmarks/results/speed.md
-```
-- `lib/cmake/PineForge/PineForge{Config,Targets,ConfigVersion}.cmake`
-
-### Use from another CMake project
-
-```cmake
-find_package(PineForge 0.1 REQUIRED)
-target_link_libraries(my_target PRIVATE PineForge::pineforge)
-```
-
-```c
-#include <pineforge/pineforge.h>
-
-int main(void) {
-    pf_version_t v = pf_version_get();
-    /* ... */
-}
 ```
 
 ## Public C ABI (the stability surface)
@@ -347,6 +382,10 @@ int main(void) {
 | `strategy_set_syminfo_mintick`           | Set symbol tick size                          |
 | `strategy_set_syminfo_pointvalue`        | Set symbol point value                        |
 | `strategy_set_syminfo_metadata`          | Inject numeric symbol metadata                |
+| `strategy_set_syminfo_type`              | Set the instrument class (`syminfo.type`)     |
+| `strategy_set_syminfo_string`            | Set a string `syminfo.*` member by name       |
+| `strategy_set_native_security_feed`      | Install a native higher-timeframe feed for `request.security()` |
+| `strategy_set_aux_security_feed`         | Install an auxiliary feed aligned bar-for-bar to the chart |
 | `strategy_set_account_currency_fx_series`| Set effective-time quote-to-account FX        |
 | `strategy_get_last_error`                | Read the latest runtime error                 |
 | `pf_version_get`                         | Runtime version                              |
@@ -364,7 +403,7 @@ The C++ headers (`<pineforge/engine.hpp>`, `<pineforge/ta.hpp>`, ...) are *inter
 
 ```
 include/pineforge/      - public C ABI + internal C++ headers
-src/                    - implementation (~25 .cpp files split by concern)
+src/                    - implementation (26 .cpp files split by concern)
   ├── c_abi.cpp                       runtime-side C ABI implementations + layout asserts
   ├── engine_*.cpp                    BacktestEngine implementation, split by concern:
   │   ├── engine_path_resolve.cpp     intra-bar OHLC path-resolution helpers
@@ -385,12 +424,13 @@ src/                    - implementation (~25 .cpp files split by concern)
   │   ├── ta_extremes_volume.cpp      Highest/Lowest, OBV, AccDist, NVI/PVI/PVT, VWAP, ...
   │   └── ta_misc.cpp                 Linreg, PercentRank, BarsSince, ValueWhen, ...
   └── magnifier.cpp / matrix.cpp / session_time.cpp / str_utils.cpp / timeframe.cpp / timezone.cpp / math.cpp
-tests/                  - 126 ctest binaries (125 C++ + 1 pure-C ABI sanity)
+tests/                  - 198 ctest cases (C++ unit + TradingView replay tests, 1 pure-C ABI sanity)
 corpus/                 - public submodule: 312 strategies; see CONTRIBUTING.md
-  ├── data/             - reference 36k-bar OHLCV feed (Binance ETH/USDT:USDT 15m)
+  ├── data/             - reference 1-minute Binance ETH/USDT:USDT feed + derived/ 15m bars
   └── CMakeLists.txt    - opt-in subproject that compiles every generated.cpp into strategy.so
 benchmarks/             - three-way comparison harness vs PyneCore + PineTS
   ├── assets/           - public submodule: data/ (OHLCV) + strategies/ (100 folders, TV-linked CSVs + generated.cpp + strategy_pyne.py)
+  ├── throughput/       - throughput reproduction package (reproduce.sh, grid-search + quartile plot)
   ├── runners/          - 3 runtime runners (run_pynecore.py + run_pinets_canonical.mjs + run_pineforge_canonical.cpp)
   ├── speed/            - Google Benchmark harness + subprocess timers + aggregator
   ├── results/          - summary.md, trade_comparison.md, indicator_comparison.md, speed.md
@@ -408,7 +448,7 @@ cmake/smoke_consumer/   - Minimal find_package(PineForge) CI smoke project
 
 ## Visibility hygiene
 
-Every compiled strategy `.so` that statically links `libpineforge.a` exports **exactly the 28 documented C ABI symbols** and zero internal C++ symbols. This is enforced at the library level:
+Every compiled strategy `.so` that statically links `libpineforge.a` exports **exactly the 32 documented C ABI symbols** and zero internal C++ symbols. This is enforced at the library level:
 
 - `libpineforge.a` is built with `-fvisibility=hidden -fvisibility-inlines-hidden`
 - Public symbols are tagged `PF_API` (visibility=default)
@@ -434,7 +474,7 @@ is bundled in the [`pineforge-release`](https://github.com/pineforge-4pass/pinef
 re-derived from its `strategy.pine`. The committed `generated.cpp` still
 ships, so the build also works with just a C++17 compiler and no Docker.
 
-**Scale:** 312 strategies × ~431,200 trades verified trade-for-trade against TradingView.
+**Scale:** 312 strategies × ~430,000 trades verified trade-for-trade against TradingView.
 
 ```bash
 git clone https://github.com/pineforge-4pass/pineforge-engine.git
@@ -458,7 +498,7 @@ python3 scripts/regen_validation_report.py
 That builds `libpineforge.a` plus one `strategy.so` per probe, runs each
 against the reference OHLCV feed, rewrites each `engine_trades.csv`,
 and prints the canonical corpus summary described in
-`corpus/README.md`. Headline result: **309 excellent + 2 strong of 311 graded** — the 1 remaining probe is a documented TV-side anomaly, excluded from the headline (`anomaly-equity-mirror-strategy-equity-01`, TV broker non-deterministic at 1× equity boundary). Total trades: TV 431,202, engine 431,208 (`+6` ≈ 0.001 % over TV).
+`corpus/README.md`. Headline result: **309/309 graded excellent**. (The probe once filed as a TradingView anomaly, `anomaly-equity-mirror-strategy-equity-01`, turned out to be TradingView's ten-significant-digit margin call; the campaign pinned the rule and the probe now matches trade-for-trade.)
 
 ## Cross-engine comparison
 
@@ -488,16 +528,18 @@ Current standings (canonical align-then-trim window, 4-dimension diff vs TV):
 
 The 15 PyneCore-only outliers from excellent involve `strategy.exit(stop=…, limit=…)` brackets, `trail_*` exits, `strategy.close(qty_percent=…)` partial exits, and bar-magnifier paths — categories where PyneCore's broker emulator differs from TV and PineForge does not. See [`benchmarks/results/summary.md`](benchmarks/results/summary.md) for the per-strategy table and methodology.
 
-Last refresh: **2026-06-11** against engine v0.9.0 + core-improvements-wave01, PyneCore 6.4.6, PineTS 0.9.16. Per-strategy speed table at [`benchmarks/results/speed.md`](benchmarks/results/speed.md) — median **162× faster than PyneCore** on 99 commonly-timed strategies.
+Last refresh: **2026-06-11** against engine v0.9.0 + core-improvements-wave01, PyneCore 6.4.6, PineTS 0.9.16 — a refresh against the current engine and PyneCore, extended to the full 312-strategy corpus, is the next benchmark milestone. Per-strategy speed table at [`benchmarks/results/speed.md`](benchmarks/results/speed.md) — median **162× faster than PyneCore** on 99 commonly-timed strategies.
 
 ## Status
 
+- v0.13.0 (2026-09-05) — the parity campaign, rounds 1–11: TradingView's broker rules pinned with sensor exports and landed with replay tests — ten-significant-digit money (equity rounding, the whole-order drop band, the one-contract margin call, the raw lot floor), trailing-stop restarts and the issuing-bar fold, zero-offset trails, declined-reversal bracket legs, the surviving `strategy.close`, sparse `ta.atr`/`ta.tr` on the chart's previous close, pivot-level tick snap, same-bar entry/close transactions, early-close higher-timeframe buckets, 64-bit epoch arrays. Closed test 3,880/3,881 excellent-or-strong across 15 lanes; public corpus 309/309 excellent. ABI v3 (`open_at_end`), 32 exported symbols, 198 ctest cases.
+- v0.7–v0.12 (June–August 2026) — native and auxiliary `request.security()` feeds, ABI v2 trading metrics + equity curve, streaming (historical → realtime) mode, range-end accounting; see the [GitHub releases](https://github.com/pineforge-4pass/pineforge-engine/releases).
 - v0.6.0 — Performance Optimization Sprint. Grouped and cached global static inputs to avoid string-keyed map getters on every bar. Implemented highly optimized thread-local timestamp caching, accelerating backtest throughput by over 13x (up to 6.7M bars/sec). Added end-to-end performance reproduction package and strict input.source() chart series validation.
 - v0.5.0 — Pine v6 HIGH+MEDIUM sprint. Resolved 20 critical compatibility issues across symbol mappings, constant namespaces, timezone-aware timestamp overloads, collection sorting, and bare TA property reads. Corpus expanded to 234 probes (233 excellent + 1 documented anomaly). Expanded ctest suite to 39 binaries.
 - v0.4.1 — corpus rewritten as 228 clean-room probes; corpus submodule flipped public; 5 engine bug fixes (OCA same-direction RAW_ORDER, intraday-cap latch, etc.) + chart-TZ infra + 5 new ctests. **227 excellent + 1 documented anomaly = 228/228 strong-or-better**.
-- v0.1 — initial public release. C ABI defined and pinned. Reported **165 strict-excellent + 2 strong = 167/168** TV parity on the internal corpus (then-private submodule, since made public; 168 strategies including 5 parity probes + 1 anomaly probe); the lone outlier is a 1×-margin stress probe on an undocumented TV edge case. 48/50 strategies hit canonical *excellent* tier in the three-way benchmark. CI runs on Ubuntu + macOS (ctest + install smoke; no corpus).
-- v0.2 — same-id stop/replace deferred to post-bar OHLC resolution (PR #13); RMA warmup seed aligned to Pine reference formula, `-ffp-contract=off` build flag added (PR #14).
 - v0.3 — magnifier wrong-side gap fill fixed for entry bar; directional mintick rounding in `apply_slippage` (PR #15). ctest suite expanded to 30 binaries.
+- v0.2 — same-id stop/replace deferred to post-bar OHLC resolution (PR #13); RMA warmup seed aligned to Pine reference formula, `-ffp-contract=off` build flag added (PR #14).
+- v0.1 — initial public release. C ABI defined and pinned. Reported **165 strict-excellent + 2 strong = 167/168** TV parity on the internal corpus (then-private submodule, since made public; 168 strategies including 5 parity probes + 1 anomaly probe); the lone outlier is a 1×-margin stress probe on an undocumented TV edge case. 48/50 strategies hit canonical *excellent* tier in the three-way benchmark. CI runs on Ubuntu + macOS (ctest + install smoke; no corpus).
 
 ## License
 
