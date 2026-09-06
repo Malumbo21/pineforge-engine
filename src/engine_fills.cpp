@@ -4518,7 +4518,8 @@ void BacktestEngine::apply_filled_order_to_state(
     // so a flag set mid-segment by an earlier candidate's decline is not seen
     // by classify — catch it here (no-op the fill, mark for compaction). Shared
     // by both kernels; must precede every state mutation below.
-    if (order.suppress_as_declined_reversal_close) {
+    if (order.suppress_as_declined_reversal_close
+        || order.declined_by_replaced_short_market) {
         decline_and_cancel();
         return;
     }
@@ -6287,6 +6288,7 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
         || syminfo_.pointvalue != 1 || account_currency_fx_ != 1
         || !account_currency_fx_timestamps_.empty()
         || max_intraday_filled_orders_ != 0
+        || risk_direction_ != RiskDirection::BOTH
         || risk_max_intraday_loss_ != 0 || risk_max_drawdown_ != 0
         || risk_max_cons_loss_days_ != 0 || risk_max_position_size_ != 0) {
         return false;

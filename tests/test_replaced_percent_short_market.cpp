@@ -25,7 +25,9 @@ class Probe : public BacktestEngine {
 public:
     double seed_qty = 3;
     int calls = 2;
-    bool sibling = true, child = true, mirror = false, revive = false;
+    bool sibling = true, child = true, last_child = true;
+    bool mirror = false, revive = false, default_seed = false;
+    bool long_only_at_race = false;
     bool replace_after_sibling = false, explicit_qty = false;
     bool priced_first = false, cancel_first = false, reenter = false;
     int issued_calls = 0;
@@ -41,6 +43,7 @@ public:
         slippage_ = 0;
         qty_step_ = 0.01;
     }
+    void percent(double value) { default_qty_value_ = value; }
     void first() {
         if (cancel_first && issued_calls == 1) strategy_cancel("First");
         strategy_entry("First", mirror, nan,
@@ -53,15 +56,17 @@ public:
     void on_bar(const Bar&) override {
         if (bar_index_ == 0) {
             issued_calls = 0;
-            strategy_entry("Seed", !mirror, nan, nan, seed_qty, "");
+            strategy_entry("Seed", !mirror, nan, nan,
+                default_seed ? nan : seed_qty, "");
             strategy_exit("Seed exit", "Seed", mirror ? 80 : 110,
                 mirror ? 120 : 80, nan, nan, nan, 100, "", nan, "");
         }
         if (bar_index_ == 2) {
+            if (long_only_at_race) risk_direction_ = RiskDirection::LONG_ONLY;
             for (int i=0; i<(replace_after_sibling ? 1 : calls); ++i) first();
             if (sibling) {
                 strategy_entry("Last", mirror, nan, nan, nan, "");
-                strategy_exit("Last exit", "Last", mirror ? 125 : 75,
+                if (last_child) strategy_exit("Last exit", "Last", mirror ? 125 : 75,
                     mirror ? 75 : 125, nan, nan, nan, 100, "", nan, "");
             }
             if (replace_after_sibling) for (int i=1;i<calls;++i) first();
@@ -90,11 +95,12 @@ void run(Probe& p,bool touch=false) {
     const auto bars=feed(touch); p.run(bars.data(),static_cast<int>(bars.size()));
 }
 void test_partial_and_topology() {
-    for (int variant=0;variant<5;++variant) {
+    for (int variant=0;variant<6;++variant) {
         Probe p;
         p.sibling=variant!=1; p.child=variant!=2;
         p.calls=variant==3 ? 3 : 2;
         p.replace_after_sibling=variant==4;
+        p.last_child=variant!=5;
         run(p); run(p);  // reuse must not carry a cancelled sibling marker
         CHECK(p.seen[3].side==PositionSide::LONG);
         CHECK(near(p.seen[3].qty,1));
@@ -134,6 +140,33 @@ void test_old_bracket_lifetime() {
         CHECK(near(p.closed[1].exit_price,110));
     }
 }
+void test_default_seed_and_high_percent() {
+    Probe p; p.default_seed=true;
+    auto bars=feed();
+    for (int i=0;i<2;++i) bars[i]={99,99.5,98.5,99,1000,(i+1)*900000LL};
+    p.run(bars.data(),static_cast<int>(bars.size()));
+    CHECK(near(p.seen[1].qty,2.02));
+    CHECK(p.seen[3].side==PositionSide::LONG);
+    CHECK(near(p.seen[3].qty,0.02));
+    CHECK(p.closed.size()==1);
+    if (p.closed.size()==1) CHECK(near(p.closed[0].qty,2));
+    // Reversal admission has held=0 (only SAME-direction adds reserve the
+    // held margin), so a funded 75/99-percent sell is not declined at 50%.
+    for (double pct : {51.0,75.0,99.0}) {
+        Probe high; high.percent(pct); run(high);
+        CHECK(high.seen[3].side==PositionSide::SHORT);
+        CHECK(near(high.seen[3].qty,pct-3));
+        CHECK(high.seen[3].id=="First");
+        CHECK(high.closed.size()==1);
+    }
+}
+void test_direction_risk_exclusion() {
+    Probe p; p.seed_qty=1; p.long_only_at_race=true; run(p);
+    CHECK(p.seen[3].side==PositionSide::FLAT);
+    CHECK(near(p.seen[3].qty,0));
+    CHECK(p.closed.size()==1);
+    if (p.closed.size()==1) CHECK(near(p.closed[0].qty,1));
+}
 // Preserve the existing engine lanes that this narrow sell-side repair
 // does not claim to redefine. The old same-tick suite pins their details.
 void test_excluded_lanes() {
@@ -165,6 +198,7 @@ void test_excluded_lanes() {
 int main() {
     test_partial_and_topology(); test_equal_and_crossing();
     test_old_bracket_lifetime(); test_excluded_lanes();
+    test_default_seed_and_high_percent(); test_direction_risk_exclusion();
     std::printf("%d passed, %d failed\n",passed,failed);
     return failed ? 1 : 0;
 }
