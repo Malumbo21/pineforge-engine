@@ -884,7 +884,13 @@ void BacktestEngine::strategy_close(const std::string& id,
     double qty_to_close = 0.0;
     bool all_entries_match = false;
     double retired_ledger_qty = 0.0;
+    const bool use_script_position_view =
+        pooc_can_fill_at_this_cursor && !immediately
+        && std::isnan(qty) && !std::isnan(qty_percent)
+        && pos_view_freeze_bar_ == bar_index_
+        && pos_view_frozen_side_ == position_side_;
     if (!compute_close_target_qty(id, qty, qty_percent,
+                                  use_script_position_view,
                                   matching_qty, qty_to_close, all_entries_match,
                                   retired_ledger_qty)) {
         return;
@@ -950,6 +956,7 @@ void BacktestEngine::strategy_close(const std::string& id,
             && !coof_scheduler_active_;
         execute_immediate_close(id, comment, qty_to_close, matching_qty,
                                 closes_full_position, closes_fifo_qty, closes_any_qty,
+                                use_script_position_view,
                                 ordinary_pooc_close_all);
         return;
     }
@@ -2547,6 +2554,7 @@ void BacktestEngine::invalidate_unsafe_pooc_global_full_exit_dynamic_qty() {
 bool BacktestEngine::compute_close_target_qty(const std::string& id,
                                               double qty,
                                               double qty_percent,
+                                              bool use_script_position_view,
                                               double& matching_qty_out,
                                               double& qty_to_close_out,
                                               bool& all_entries_match_out,
@@ -2605,7 +2613,22 @@ bool BacktestEngine::compute_close_target_qty(const std::string& id,
     bool has_matching_entry = id.empty();
     all_entries_match_out = id.empty() ? true : !pyramid_entries_.empty();
     matching_qty_out = id.empty() ? position_qty_ : 0.0;
-    if (!id.empty()) {
+    if (use_script_position_view) {
+        // AG-D: ordinary POOC closes are booked inline, but both calls in
+        // one script pass see the pre-fill lots. Re-summing the reduced
+        // physical position made two 30% closes of 800000 close 240000 then
+        // 168000 instead of the TV-pinned 240000 + 240000. The view expires
+        // after on_bar, so a later bar still sizes from the remainder.
+        if (id.empty()) {
+            matching_qty_out = pos_view_frozen_qty_;
+        } else {
+            const auto it = pos_view_frozen_entry_qty_.find(id);
+            has_matching_entry = it != pos_view_frozen_entry_qty_.end();
+            matching_qty_out = has_matching_entry ? it->second : 0.0;
+            all_entries_match_out = has_matching_entry
+                && pos_view_frozen_entry_qty_.size() == 1;
+        }
+    } else if (!id.empty()) {
         has_matching_entry = false;
         for (const auto& pe : pyramid_entries_) {
             if (pe.entry_id == id) {
@@ -2777,6 +2800,7 @@ void BacktestEngine::execute_immediate_close(const std::string& id,
                                              bool closes_full_position,
                                              bool closes_fifo_qty,
                                              bool closes_any_qty,
+                                             bool use_script_position_view,
                                              bool preserve_undercap_entries) {
     const double eps = kQtyEpsilon;
     size_t trades_before = trades_.size();
@@ -2804,8 +2828,14 @@ void BacktestEngine::execute_immediate_close(const std::string& id,
             purge_exit_orders();
         }
     } else if (closes_any_qty) {
-        double pct = matching_qty > eps ? (qty_to_close / matching_qty) * 100.0 : 100.0;
-        execute_partial_exit_by_entry_percent(broker_price, id, pct);
+        if (use_script_position_view) {
+            // Reapplying a percentage to the reduced broker lot would shrink
+            // this already-resolved script-pass quantity a second time.
+            execute_partial_exit_by_entry_qty(broker_price, id, qty_to_close);
+        } else {
+            double pct = matching_qty > eps ? (qty_to_close / matching_qty) * 100.0 : 100.0;
+            execute_partial_exit_by_entry_percent(broker_price, id, pct);
+        }
         if (position_side_ == PositionSide::FLAT) {
             purge_exit_orders();
         }

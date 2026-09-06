@@ -1194,9 +1194,10 @@ protected:
     // opentrades/position_avg_price na-guards derived from it) reporting the
     // PRE-close position until the NEXT bar. While ``pos_view_freeze_bar_ ==
     // bar_index_`` the script-facing signed_position_size() returns this frozen
-    // snapshot; broker / order state and every internal position_qty_ /
-    // position_side_ read (order sizing, affordability, reversal qty, exit
-    // sizing) are UNAFFECTED. Armed in strategy_close on the ordinary POOC
+    // snapshot. Ordinary POOC strategy.close(qty_percent) also sizes against
+    // the snapshot's per-id quantities (round 12 AG-D); other broker/order
+    // sizing and internal position_qty_ / position_side_ reads are unaffected.
+    // Armed in strategy_close on the ordinary POOC
     // immediate-close path (NOT immediately=true, which is defined to reflect
     // its fill at once); cleared at the top of flush_same_bar_close() — the
     // first thing after every POOC on_bar — so step-4 and post-run reads see
@@ -1206,6 +1207,7 @@ protected:
     int pos_view_freeze_bar_ = -1;
     PositionSide pos_view_frozen_side_ = PositionSide::FLAT;
     double pos_view_frozen_qty_ = 0.0;
+    std::unordered_map<std::string, double> pos_view_frozen_entry_qty_;
 
     // --- Strategy parameters (set from strategy() declaration) ---
     double initial_capital_ = 1000000.0;
@@ -2626,6 +2628,10 @@ protected:
         pos_view_freeze_bar_ = bar_index_;
         pos_view_frozen_side_ = position_side_;
         pos_view_frozen_qty_ = position_qty_;
+        pos_view_frozen_entry_qty_.clear();
+        for (const auto& entry : pyramid_entries_) {
+            pos_view_frozen_entry_qty_[entry.entry_id] += entry.qty;
+        }
     }
     // KI-64: release the freeze so the next script-visible read returns the real
     // (post-close) position. Called at the top of flush_same_bar_close(), i.e.
@@ -3785,6 +3791,7 @@ private:
     bool compute_close_target_qty(const std::string& id,
                                   double qty,
                                   double qty_percent,
+                                  bool use_script_position_view,
                                   double& matching_qty_out,
                                   double& qty_to_close_out,
                                   bool& all_entries_match_out,
@@ -3824,6 +3831,7 @@ private:
                                  bool closes_full_position,
                                  bool closes_fifo_qty,
                                  bool closes_any_qty,
+                                 bool use_script_position_view,
                                  bool preserve_undercap_entries);
     uint64_t queue_deferred_close_order(
         const std::string& id,

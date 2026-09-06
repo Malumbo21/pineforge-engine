@@ -139,6 +139,7 @@ set(TEST_SOURCES
     test_tv_money_precision
     test_tv_money_band
     test_famag_close_survives
+    test_close_percent_calltime_basis
     test_live_position_market_gross_admission
     test_lower_tf_parse_extra
     test_ta_ma_warmup_extra
