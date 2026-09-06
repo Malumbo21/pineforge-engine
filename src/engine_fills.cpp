@@ -4980,6 +4980,43 @@ void BacktestEngine::apply_filled_order_to_state(
             }
         }
     }
+    // Round17 ADXAE F: rule1 sizes from ten-digit rounded equity, so an
+    // integer-lot exact-budget tie need not satisfy the raw-equity floor
+    // invariant. At the zero-gap Apr28 open, Q768 * P12.31 is 9454.08 but
+    // frozen E is 9454.0799999999981; TV drops the entry. The general float
+    // allowance must not donate that missing budget in this pinned shape.
+    // Keep fractional lots, reversals, fees, other execution modes and all
+    // non-tie/gap admission rules on their established paths.
+    if (order.type == OrderType::MARKET && order.is_long && std::isnan(order.qty)
+        && !order.affordability_close_only && !order.sbmt_member
+        && position_side_ == PositionSide::FLAT
+        && order.created_position_side == PositionSide::FLAT
+        && !order.created_after_position_close_in_bar
+        && !order.created_by_same_id_replacement
+        && order.created_bar == bar_index_ - 1 && pending_orders_.size() == 1
+        && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
+        && default_qty_value_ == 100 && margin_long_ == 100 && pyramiding_ == 0
+        && qty_step_ == 1 && syminfo_.pointvalue == 1
+        && account_currency_fx_ == 1 && account_currency_fx_timestamps_.empty()
+        && order.sizing_fx == 1 && slippage_ == 0 && commission_value_ == 0
+        && !process_orders_on_close_ && !calc_on_order_fills_
+        && !coof_scheduler_active_ && !bar_magnifier_enabled_
+        && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
+        && max_intraday_filled_orders_ == 0
+        && risk_max_intraday_loss_ == 0 && risk_max_drawdown_ == 0
+        && risk_max_cons_loss_days_ == 0
+        && std::isfinite(order.sizing_equity) && order.sizing_equity > 0
+        && std::isfinite(order.frozen_default_qty) && order.frozen_default_qty > 0
+        && std::isfinite(order.sizing_price) && order.sizing_price >= 1
+        && round_to_mintick(fill_price) == order.sizing_price) {
+        const double cost = order.frozen_default_qty * order.sizing_price;
+        if (std::isfinite(cost) && cost == tv_money_round(order.sizing_equity)
+            && cost > order.sizing_equity) {
+            decline_and_cancel();
+            return;
+        }
+    }
+
     // A reversal reduced to its closing leg (family R above, or the placement
     // half) needs no opening admission: the KI-54 / gap gates below judge an
     // OPENING quantity, and declining the close leg here would turn TV's

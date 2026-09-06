@@ -144,6 +144,7 @@ set(TEST_SOURCES
     test_famag_close_first_admission
     test_famag_opening_money
     test_taro_price_gap_admission
+    test_integer_flat_budget_tie
     test_taro_mc_close_residue
     test_live_position_market_gross_admission
     test_lower_tf_parse_extra
