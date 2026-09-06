@@ -347,6 +347,14 @@ struct PendingOrder {
     // Exact clean-room two-call rules must fail closed on this provenance
     // rather than mistaking retained priority for current source order.
     bool created_by_same_id_replacement = false;
+    // Exact default MARKET replaced on this source bar. A priced order or
+    // a prior-bar carry with the same id does not prove this call topology.
+    uint64_t replaced_default_market_incarnation = 0;
+    // A filled default-percent short replacement consumes the pending sell
+    // slot even when its plain transaction leaves an old LONG remainder.
+    // Mark only the exact later MARKET objects after that fill; a reissue
+    // creates a fresh object, and cancelled siblings spend no broker event.
+    bool declined_by_replaced_short_market = false;
     // For a strategy.exit replacement, the unique incarnation of the exact
     // matching (id, from_entry) EXIT object it replaced. Zero for a fresh
     // child. This correlates retained broker priority with a concrete prior
@@ -3761,6 +3769,7 @@ private:
     // Per-OrderType fill kernels. Called only after risk + intraday
     // gates pass; each updates the engine's position/trade state and
     // any per-type out-parameters the post-fill bookkeeping needs.
+    bool replaced_percent_short_market_is_live(const PendingOrder& order) const;
     void apply_market_order_fill(PendingOrder& order, double fill_price,
                                  const Bar& bar,
                                  double& trail_best_path_state,

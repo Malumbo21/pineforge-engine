@@ -6248,6 +6248,80 @@ static void set_entry_fill_excursion_masks(PyramidEntry& pe, const Bar& bar,
     pe.skip_entry_bar_low  = (low_pos < fill_pos);
 }
 
+// R18 TV replacement pins: with an unchanged LONG lot, calling the same
+// default-percent sell MARKET id again replaces its augmented reversal with
+// the plain signal-sized transaction. Any later sell MARKET is declined by
+// that pending sell slot. 4.54 - 4.53 leaves 0.01 LONG; 3 - 4.53 opens 1.53
+// SHORT under the replaced id; equality stays flat. Bracket presence and the
+// reissue's position before/after the later sibling do not change the rule.
+// The buy-side mirror has a different last-entry outcome. Preserve it and
+// the existing priced/FIXED/explicit, fee, FX, risk and scheduler contracts.
+bool BacktestEngine::replaced_percent_short_market_is_live(
+        const PendingOrder& order) const {
+    if (order.type != OrderType::MARKET || order.is_long
+        || !order.created_by_same_id_replacement
+        || order.replaced_default_market_incarnation == 0
+        || !std::isnan(order.qty) || order.qty_type >= 0
+        || order.affordability_close_only || order.sbmt_member
+        || order.created_bar != bar_index_ - 1
+        || order.created_during_coof_recalc
+        || order.created_after_position_close_in_bar
+        || order.created_position_side != PositionSide::LONG
+        || position_side_ != PositionSide::LONG
+        || order.created_position_cycle_seq != position_cycle_seq_
+        || order.tv_carry_qty != position_qty_
+        || pyramid_entries_.size() != 1
+        || pyramid_entries_.front().entry_id == order.id
+        || pyramiding_ < 0 || pyramiding_ > 1 || position_entry_count_ != 1
+        || default_qty_type_ != QtyType::PERCENT_OF_EQUITY
+        || !(default_qty_value_ > 0 && default_qty_value_ < 100)
+        || !(qty_step_ > 0)
+        || !std::isfinite(order.frozen_default_qty)
+        || order.frozen_default_qty <= kQtyEpsilon
+        || !order.oca_name.empty() || order.oca_type != 0
+        || process_orders_on_close_ || calc_on_order_fills_
+        || bar_magnifier_enabled_ || coof_scheduler_active_
+        || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
+        || slippage_ != 0 || commission_value_ != 0
+        || margin_long_ != 100 || margin_short_ != 100
+        || syminfo_.pointvalue != 1 || account_currency_fx_ != 1
+        || !account_currency_fx_timestamps_.empty()
+        || max_intraday_filled_orders_ != 0
+        || risk_max_intraday_loss_ != 0 || risk_max_drawdown_ != 0
+        || risk_max_cons_loss_days_ != 0 || risk_max_position_size_ != 0) {
+        return false;
+    }
+    for (const PendingOrder& other : pending_orders_) {
+        if (&other == &order) continue;
+        if (other.type == OrderType::EXIT) {
+            const bool bracket = std::isfinite(other.stop_price)
+                || std::isfinite(other.limit_price)
+                || std::isfinite(other.profit_ticks)
+                || std::isfinite(other.loss_ticks);
+            if (other.from_entry.empty() || other.requested_partial
+                || !std::isnan(other.qty) || other.qty_percent != 100
+                || !bracket || other.suppress_as_declined_reversal_close
+                || !other.oca_name.empty()
+                || !std::isnan(other.trail_points)
+                || !std::isnan(other.trail_price)
+                || !std::isnan(other.trail_offset)) return false;
+            continue;
+        }
+        // A competing earlier entry, other direction, explicit size, or
+        // priced/RAW order is outside the covered same-call sell book.
+        if (other.type != OrderType::MARKET || other.is_long
+            || other.created_seq <= order.created_seq
+            || other.created_bar != order.created_bar
+            || other.created_position_cycle_seq != order.created_position_cycle_seq
+            || other.created_after_position_close_in_bar
+            || !std::isnan(other.qty) || other.qty_type >= 0
+            || other.frozen_default_qty != order.frozen_default_qty
+            || other.affordability_close_only || other.sbmt_member
+            || !other.oca_name.empty() || other.oca_type != 0) return false;
+    }
+    return true;
+}
+
 void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_price,
                                              const Bar& bar,
                                              double& trail_best_path_state,
@@ -6410,6 +6484,31 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
     // bar's close; hand it through as fixed contracts (qty_type < 0) so the
     // fill does not re-derive it from the fill price. Explicit-qty and
     // FIXED-default orders keep their own (qty, qty_type) pair unchanged.
+    if (replaced_percent_short_market_is_live(order)) {
+        // The old from_entry bracket is dormant after a reducing sell and
+        // reactivates only through its established reissue/margin lifecycle.
+        // Do not erase pending_orders_ while the fill loop holds references.
+        mark_position_brackets_dormant_on_declined_reversal(bar);
+        close_opposite_then_enter(order.id, false, fill_price,
+            order.frozen_default_qty, -1, /*purge_pending_exits=*/false,
+            /*explicit_qty_prequantized=*/true, order.incarnation);
+        for (PendingOrder& sibling : pending_orders_) {
+            if (sibling.type == OrderType::MARKET
+                && sibling.created_seq > order.created_seq
+                && sibling.created_bar == order.created_bar && !sibling.is_long) {
+                sibling.declined_by_replaced_short_market = true;
+            }
+        }
+        if (position_side_ == PositionSide::SHORT && !pyramid_entries_.empty())
+            pyramid_entries_.back().entry_comment = order.comment;
+        const double trail_best_after_fill = trail_best_price_;
+        if (position_side_ == PositionSide::LONG)
+            trail_best_price_ = std::max(trail_best_price_, bar.high);
+        else if (position_side_ == PositionSide::SHORT)
+            trail_best_price_ = std::min(trail_best_price_, bar.low);
+        trail_best_path_state = trail_best_after_fill;
+        return;
+    }
     const bool frozen =
         !std::isnan(order.frozen_default_qty) || sbmt_flat_frozen_tx;
     const bool paired_flat_market =
@@ -7296,6 +7395,9 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         int exit_closed_from_bar, uint64_t exit_closed_from_incarnation,
         bool exit_closed_was_long, const Bar& bar) {
     using internal::DualEntryStopPathWinner;
+    if (order.declined_by_replaced_short_market) {
+        return OrderEligibility::Remove;
+    }
     // design-declined-reversal-close-leg: a close flagged at the KI-54 reversal
     // decline is held atomically with the refused reversal — Remove it from both
     // fill kernels before any other classification runs. Unconditional (across

@@ -513,9 +513,15 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         }
     }
     int64_t preserved_seq = 0;
+    uint64_t replaced_default_market_incarnation = 0;
     for (const auto& o : pending_orders_) {
         if (o.id == id) {
             preserved_seq = o.created_seq;
+            if (o.type == OrderType::MARKET && o.created_bar == bar_index_
+                && o.is_long == is_long && std::isnan(o.qty) && o.qty_type < 0
+                && o.created_position_cycle_seq == position_cycle_seq_) {
+                replaced_default_market_incarnation = o.incarnation;
+            }
             break;
         }
     }
@@ -559,6 +565,8 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     order.created_seq = preserved_seq > 0 ? preserved_seq : next_order_seq_++;
     order.incarnation = next_order_incarnation_++;
     order.created_by_same_id_replacement = preserved_seq > 0;
+    order.replaced_default_market_incarnation =
+        replaced_default_market_incarnation;
     if (preserved_seq == 0) {
         order.recreated_after_named_cancelled_entry_incarnation =
             named_cancel_context.entry_incarnation;
