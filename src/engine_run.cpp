@@ -328,9 +328,10 @@ uint64_t BacktestEngine::run_coof_recalc_chain(
         bool recalc_at_bar_open,
         uint64_t triggering_events,
         uint64_t max_events,
-        uint64_t events_already) {
+        uint64_t events_already,
+        bool grouped_stop_recalc) {
     uint64_t total_events = triggering_events;
-    uint64_t pending_recalcs = triggering_events;
+    uint64_t pending_recalcs = grouped_stop_recalc ? 1 : triggering_events;
     uint64_t handled = 0;
     while (pending_recalcs > 0 && events_already + handled < max_events) {
         --pending_recalcs;
@@ -437,7 +438,8 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
         fill_events += run_coof_recalc_chain(
             script_bar, fill.fill_price, /*cursor_is_bar_point=*/false, cursor_is_close,
             filled_at_bar_open_point,
-            fill.fill_events, kNoFillEventBudget, fill_events);
+            fill.fill_events, kNoFillEventBudget, fill_events,
+            fill.grouped_stop_recalc);
         // The carried order's open fill triggers one execution at O, and the
         // order born in that first execution may also fill at O. Every later
         // fill—including the first fill when it occurs inside a path segment—

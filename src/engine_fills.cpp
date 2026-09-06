@@ -324,8 +324,9 @@ void BacktestEngine::process_pending_orders(const Bar& bar) {
 
 // Flag-gated KI-60 counterpart to process_pending_orders. It preserves the
 // established eligibility / price / application kernels, but returns after
-// exactly one ACTUAL broker fill so the scheduler can restore script state and
-// execute on_bar before any later order sees the remaining path. Orders that
+// one ACTUAL broker fill so the scheduler can restore script state and execute
+// on_bar before later orders see the path. The bounded resting-stop cohort
+// below reports its real fill count and requests one recalculation. Orders that
 // are cancelled, rejected by risk/margin, or quantize to zero are compacted
 // without producing a fill event and scanning continues.
 BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
@@ -553,6 +554,60 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 return a.created_seq < b.created_seq;
             });
 
+        // ES daily COOF pins: resting same-entry stop siblings reached on
+        // this adverse leg settle before the script observes their reduced
+        // position. This includes distinct stop prices on the same leg;
+        // an unconsumed later stop remains cancellable after the group, and
+        // a newly created stop/market exit still waits for its waypoint.
+        // Keep this exception on the pinned single-long-lot, ordinary
+        // historical book. Other order races and scheduler modes retain
+        // the existing one-fill/recalc path.
+        const bool group_resting_stops = [&] {
+            if (candidates.size() < 2 || !filled_indices.empty()
+                || !calc_on_order_fills_ || !coof_scheduler_active_
+                || !coof_evaluating_path_segment_ || !coof_hist_is_segment_
+                || process_orders_on_close_ || bar_magnifier_enabled_
+                || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
+                || position_side_ != PositionSide::LONG
+                || position_open_bar_ >= bar_index_ || pyramiding_ != 0
+                || pyramid_entries_.size() != 1 || close_entries_rule_any_
+                || commission_value_ != 0 || slippage_ != 0
+                || account_currency_fx_ != 1
+                || !account_currency_fx_timestamps_.empty()
+                || max_intraday_filled_orders_ > 0
+                || risk_max_intraday_loss_ != 0 || risk_max_drawdown_ != 0
+                || risk_max_cons_loss_days_ > 0
+                || margin_long_ != 100 || opening_affordability_pending_
+                || !(bar.close < bar.open)) return false;
+            const std::string& entry_id = pyramid_entries_.front().entry_id;
+            double reserved = 0;
+            for (const PendingOrder& pending : pending_orders_) {
+                if (pending.type != OrderType::EXIT
+                    || pending.from_entry != entry_id || entry_id.empty()
+                    || pending.created_bar >= bar_index_
+                    || pending.dormant_bracket || !pending.oca_name.empty()
+                    || !std::isfinite(pending.stop_price)
+                    || !std::isnan(pending.trail_points)
+                    || !std::isnan(pending.trail_price)
+                    || !std::isfinite(pending.qty) || pending.qty <= 0)
+                    return false;
+                reserved += pending.qty;
+            }
+            if (reserved > position_qty_ + kQtyEpsilon) return false;
+            for (const FillCandidate& candidate : candidates) {
+                const PendingOrder& pending = pending_orders_[candidate.order_index];
+                if (candidate.was_trail || candidate.fill.is_limit_fill
+                    || !candidate.fill.exit_path_fill
+                    || pending.stop_price > bar.open
+                    || pending.stop_price < bar.close
+                    || std::abs(candidate.fill.fill_price - pending.stop_price)
+                           > kSegmentDenomEps) return false;
+            }
+            return true;
+        }();
+        uint64_t grouped_fill_events = 0;
+        size_t grouped_fills = 0;
+
         for (const FillCandidate& candidate : candidates) {
             PendingOrder& order = pending_orders_[candidate.order_index];
             last_exit_fill_was_trail_ = candidate.was_trail;
@@ -587,6 +642,18 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 continue;
             }
 
+            grouped_fill_events += produced;
+            ++grouped_fills;
+            result.filled = true;
+            result.fill_price = candidate.fill.fill_price;
+            result.fill_events = grouped_fill_events;
+            result.chart_waypoint_price = candidate.chart_waypoint_price;
+            result.grouped_stop_recalc = group_resting_stops && grouped_fills > 1;
+            // No callbacks, new orders or OCA erasures can occur in the
+            // proven group. Keep indices stable until its last existing
+            // candidate has passed through the ordinary fill kernel.
+            if (group_resting_stops && position_side_ != PositionSide::FLAT) continue;
+
             std::sort(filled_indices.begin(), filled_indices.end());
             filled_indices.erase(
                 std::unique(filled_indices.begin(), filled_indices.end()),
@@ -608,10 +675,6 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             if (position_side_ == PositionSide::FLAT) {
                 purge_exit_orders(/*retain_for_pending_entries=*/true);
             }
-            result.filled = true;
-            result.fill_price = candidate.fill.fill_price;
-            result.fill_events = produced;
-            result.chart_waypoint_price = candidate.chart_waypoint_price;
             return result;
         }
 
@@ -623,6 +686,10 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             filled_indices, exit_closed_from_bar,
             exit_closed_from_incarnation,
             exit_closed_was_long);
+        if (result.filled) {
+            finish_intraday_loss_cancel();
+            return result;
+        }
     }
 
     // No fill consumed this segment, so the broker reached its endpoint and

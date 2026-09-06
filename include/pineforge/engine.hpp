@@ -1839,6 +1839,10 @@ protected:
         // advances from the raw H/L it actually reached. Never walk back from
         // an outward-rounded fill price into an already-consumed segment.
         double chart_waypoint_price = std::numeric_limits<double>::quiet_NaN();
+        // A pinned group of resting stop siblings settles on one historical
+        // adverse leg before one script recalculation. Broker fills remain
+        // individually counted by fill_events and broker_fill_event_seq_.
+        bool grouped_stop_recalc = false;
     };
     CoofFillResult process_next_pending_order(const Bar& bar,
                                               bool allow_market_orders,
@@ -4059,7 +4063,8 @@ private:
                                    bool recalc_at_bar_open,
                                    uint64_t triggering_events,
                                    uint64_t max_events,
-                                   uint64_t events_already);
+                                   uint64_t events_already,
+                                   bool grouped_stop_recalc = false);
     void run_simple_bar_loop(const Bar* input_bars, int n_input);
     void run_aggregation_bar_loop(const Bar* input_bars, int n_input,
                                   bool bar_magnifier, int expected_script_bars);
