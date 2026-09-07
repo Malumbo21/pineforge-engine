@@ -26,7 +26,7 @@
 
 TradingView's strategy tester is the reference every Pine author trusts, and nothing outside TradingView reproduced it — until now. PineForge is a C++17 runtime with a stable C ABI that runs PineScript v6 strategies exactly the way TradingView's broker emulator does: same fills, same sizing, same margin calls, same trailing stops, same `request.security()` buckets, on any OHLCV you give it, in microseconds per bar.
 
-- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,173 excellent, 17 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,243 matched by the verifier.
+- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,174 excellent, 16 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,305 matched by the verifier.
 - **Open.** Engine, transpiler, corpus, benchmarks and the validation tooling are all public and Apache-2.0. The only thing you cannot download is the closed test set, because TradingView's Terms of Service forbid redistributing community scripts.
 - **Fast.** In-process, no interpreter: median **162× faster than PyneCore** on 99 timed strategies. Parameter sweeps re-run a loaded `.so` with new inputs — no recompile, no fork.
 - **Deterministic to the bit.** Two runs with the same inputs produce identical trade lists. Same on Linux and macOS.
@@ -76,7 +76,7 @@ Prefer zero install? The hosted server at **[mcp.pineforge.dev/mcp](https://mcp.
 git clone https://github.com/pineforge-4pass/pineforge-engine.git && cd pineforge-engine
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build --output-on-failure     # 223 tests
+ctest --test-dir build --output-on-failure     # 224 tests
 bash tutorial/run.sh                            # MACD on BTC/USDT, end to end
 python3 tutorial/run_stream.py                  # OHLCV warm-up → realtime trades
 ```
@@ -108,16 +108,16 @@ Every PineForge-compiled strategy `.so` exports this same ABI — write the harn
 
 ## Validation scoreboard
 
-**Round 30 · 2026-09-08:** **4,173 excellent / 17 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
+**Round 31 · 2026-09-08:** **4,174 excellent / 16 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
 
 | Board | Test set | Result | TradingView trades evaluated |
 |---|---|---|---|
 | **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | 429,866 |
-| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,864 excellent + 17 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
+| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,865 excellent + 16 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
 
-**2,819,967 TradingView trades** evaluated, **2,817,243 matched by the verifier** (99.90%), from the round 30 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
+**2,819,967 TradingView trades** evaluated, **2,817,305 matched by the verifier** (99.91%), from the round 31 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
 
-Round 30 improves the EUR/USD 15m **Master Trend Strategy [Jake TheBoss]** from strong to excellent, with **100% trade matching and zero count gap**. A carried long now receives its opening money-rounding margin check before a later owned, fully reserved priced exit. Exits already marketable at the open retain priority. The engine keeps the actual chart bar for eligibility and checks only its opening point, preserving existing margin arithmetic and other execution modes. The fix uses broker state and order ownership, with no strategy, symbol, date, or benchmark-ID conditions. Grading rules, verifier, harness, population, and tapes are unchanged.
+Round 31 improves the EUR/USD 15m **Fast Scalper With Stops** from strong to excellent, with **100% trade matching and zero count gap**. Standing stops and limits now stay active when a reversal fails its placement-budget check. A reversal admitted at placement and rejected at the opening gap retains its existing exit-ownership behavior. The fix uses order state and ownership, with no strategy, symbol, date, or benchmark-ID conditions. Admission arithmetic, grading rules, verifier, harness, population, inputs, and tapes are unchanged.
 
 ### The closed test, lane by lane
 
@@ -135,10 +135,10 @@ Round 30 improves the EUR/USD 15m **Master Trend Strategy [Jake TheBoss]** from 
 | NSE:NIFTY · 1D | 145 | 145 | — | — |
 | NYSE:F · 15m | 340 | 336 | 4 | — |
 | NYSE:F · 1D | 263 | 263 | — | — |
-| OANDA:EURUSD · 15m | 373 | 368 | 5 | — |
+| OANDA:EURUSD · 15m | 373 | 369 | 4 | — |
 | OANDA:XAUUSD · 15m | 376 | 374 | 2 | — |
 | OANDA:XAUUSD · 1D | 248 | 248 | — | — |
-| **Total** | **3,881** | **3,864** | **17** | **0** |
+| **Total** | **3,881** | **3,865** | **16** | **0** |
 
 ### How a probe is graded
 
@@ -152,7 +152,7 @@ A grade is never one lucky run. Every candidate build is measured over the whole
 
 ### What the closed test taught the engine
 
-Every gap was closed by pinning the rule TradingView actually follows — never by loosening the grader. Each rule was isolated with sensor strategies exported from TradingView (capital sweeps, literal replays, per-bar state encoded into order comments) and landed with a replay test on the recorded bars. Among them: the broker carries money at **ten significant digits** (equity rounding, the whole-order drop band, the one-contract margin call, the raw lot floor on every lot-stepped symbol); a trailing stop restarts from the issuing bar's *close* when `trail_points` changes and never folds that bar's extreme; a zero-offset trail rides the raw running best and its arming open fills at the nearest-tick print; a declined all-in reversal kills a bracket's stop and limit legs but never its trail leg, and a `strategy.close` queued beside a dropped reversal still fills; sparse `ta.atr`/`ta.tr` read the chart's previous close on every execution; pivot levels snap to the tick grid; early-close sessions complete their higher-timeframe bucket; and account-currency conversion is left out of the comparison entirely, because TradingView's FX series is a moving target no fixed table reproduces.
+Every gap was closed by pinning the rule TradingView actually follows — never by loosening the grader. Each rule was isolated with sensor strategies exported from TradingView (capital sweeps, literal replays, per-bar state encoded into order comments) and landed with a replay test on the recorded bars. Among them: the broker carries money at **ten significant digits** (equity rounding, the whole-order drop band, the one-contract margin call, the raw lot floor on every lot-stepped symbol); a trailing stop restarts from the issuing bar's *close* when `trail_points` changes and never folds that bar's extreme; a zero-offset trail rides the raw running best and its arming open fills at the nearest-tick print; a reversal rejected at placement preserves standing exits and a separately queued `strategy.close`, while the distinct fill-time rejection rules govern stop, limit, and trailing legs; sparse `ta.atr`/`ta.tr` read the chart's previous close on every execution; pivot levels snap to the tick grid; early-close sessions complete their higher-timeframe bucket; and account-currency conversion is left out of the comparison entirely, because TradingView's FX series is a moving target no fixed table reproduces.
 
 ### Reproduce the public board yourself
 
