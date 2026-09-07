@@ -112,6 +112,53 @@ void check_script_after_open_call() {
     CHECK(near(out[2].qty, 446173.12));
     CHECK(out[2].exit_time == input[6].timestamp);
 }
+
+// The existing high-value fractional class excludes priced-origin lots.
+// A bar can cross the one-account-unit lot-value boundary; evaluating only O
+// must not change which existing class the actual chart bar belongs to.
+class BoundaryProbe : public BacktestEngine {
+public:
+    static constexpr double qty = 100001.1;
+    static constexpr double entry_price = 9.9999;
+    BoundaryProbe() {
+        initial_capital_ = qty * entry_price + 0.00001;
+        qty_step_ = 0.1;
+        set_syminfo_mintick(0.00001);
+        syminfo_.pointvalue = 1.0;
+        margin_long_ = margin_short_ = 100.0;
+        commission_value_ = 0.0;
+        pyramiding_ = 0;
+    }
+    void on_bar(const Bar& current) override {
+        if (bar_index_ != 0) return;
+        // A priced lot born at the prior close has no earlier path to mark.
+        position_side_ = PositionSide::LONG;
+        position_qty_ = qty;
+        position_entry_price_ = entry_price;
+        position_entry_time_ = current.timestamp;
+        position_entry_count_ = 1;
+        position_open_bar_ = 0;
+        PyramidEntry entry{};
+        entry.price = entry_price; entry.qty = qty;
+        entry.time = current.timestamp; entry.entry_id = "Boundary";
+        entry.entry_bar_index = 0; entry.entry_path_position = 3.0;
+        entry.entry_commission_account = 0.0;
+        pyramid_entries_.push_back(entry);
+        strategy_exit("Resting", "Boundary", 11.0, 9.0);
+    }
+    const std::vector<Trade>& closed() const { return trades_; }
+    double position() const { return signed_position_size(); }
+};
+void check_original_money_scope_is_preserved() {
+    const std::vector<Bar> input = {
+        make_bar(0, 9.9999, 9.9999, 9.9999, 9.9999),
+        make_bar(1, 9.99995, 10.0002, 9.9998, 10.0001),
+    };
+    BoundaryProbe p;
+    p.run(input.data(), static_cast<int>(input.size()));
+    CHECK(p.closed().empty());
+    CHECK(near(p.position(), BoundaryProbe::qty));
+}
 }
 int main() {
     check_priced_exit(Mode::Bracket, true, 1.12401);
@@ -125,6 +172,7 @@ int main() {
     check_priced_exit(Mode::Stop, true, 1.12365);
     check_priced_exit(Mode::Disabled, false, 1.12401);
     check_script_after_open_call();
+    check_original_money_scope_is_preserved();
     std::printf("open money before priced exit: %d passed / %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;
 }

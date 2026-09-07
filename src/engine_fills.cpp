@@ -242,9 +242,8 @@ void BacktestEngine::process_carried_long_money_before_priced_orders(
     // Only the opening checkpoint precedes every eligible exit. The normal
     // end-of-bar call owns later waypoints; a successful trim already records
     // its consumed bar and retains the bracket on the surviving physical lot.
-    Bar opening = bar;
-    opening.high = opening.low = opening.close = opening.open;
-    tv_money_long_margin_call(opening);
+    tv_money_long_margin_call(bar, /*carried_pooc_pre_close=*/false,
+                              /*opening_only=*/true);
 }
 
 void BacktestEngine::process_pending_orders(const Bar& bar) {
@@ -1788,7 +1787,8 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
 // on the trigger bar read PS 878944.99 before sizing their close orders
 // (log-20260906t091207z-83d4bea0), so dispatch_bar calls this BEFORE on_bar.
 bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
-                                              bool carried_pooc_pre_close) {
+                                              bool carried_pooc_pre_close,
+                                              bool opening_only) {
     if (!margin_call_enabled_) return false;
     if (position_side_ != PositionSide::LONG) return false;
     if (!std::isfinite(margin_long_)
@@ -1865,7 +1865,8 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
     double fire_price = std::numeric_limits<double>::quiet_NaN();
     double deficit = 0.0;
     int fire_path_point = -1;
-    for (int i = start; i < 4; ++i) {
+    const int path_end = opening_only ? 1 : 4;
+    for (int i = start; i < path_end; ++i) {
         const double p = path[i];
         if (!std::isfinite(p) || !(p > 0.0)) continue;
         const double value = qty * p * pv * fx;

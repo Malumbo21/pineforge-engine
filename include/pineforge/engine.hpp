@@ -3889,8 +3889,11 @@ private:
     // The POOC extension is called only before the close-time script, with
     // no pending broker orders. End-of-bar callers keep it disabled so a
     // close/add cannot make earlier prices act on the post-close position.
+    // Opening-only callers retain the actual chart bar for all eligibility
+    // checks while restricting valuation to its first path point.
     bool tv_money_long_margin_call(const Bar& bar,
-                                  bool carried_pooc_pre_close = false);
+                                  bool carried_pooc_pre_close = false,
+                                  bool opening_only = false);
     // finding-311: mark the live position's standing strategy.exit brackets
     // dormant when an in-position reversal entry is declined at fill.
     void mark_position_brackets_dormant_on_declined_reversal(const Bar& bar);
