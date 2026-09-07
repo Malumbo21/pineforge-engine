@@ -5703,16 +5703,18 @@ void BacktestEngine::apply_filled_order_to_state(
             const double held_qty =
                 std::isfinite(order.affordability_held_qty)
                     ? order.affordability_held_qty : 0.0;
-            // Explicit fixed quantities use the same two-stage price-scale
-            // admission as default all-in sizing. The actual lot-floored
-            // contracts must fit the rounded placement balance at the
-            // tick-built signal price. Fees remain a separate post-fill
-            // margin concern; the existing signal/fill cost check follows.
+            // Explicit fixed quantities use the same monetary admission
+            // checks as default all-in sizing: the unrounded placement
+            // balance must cover the rounded signal cost, then the price
+            // affordable from that balance must reach the signal price.
+            // Both use the actual lot-floored contracts. Fees remain a
+            // separate post-fill concern; the exact signal/fill cost check
+            // follows. A lower opening price does not rescue these checks.
             // Covered ordinary flat-parent controls pin both directions,
             // percent fees, one-lot perturbations and the rounded-equity
             // transition. Keep other order lifecycles and financial modes
             // on their existing admission paths.
-            const bool explicit_price_scope =
+            const bool explicit_money_scope =
                 std::isfinite(order.qty) && order.qty > 0.0
                 && (order.qty_type < 0
                     || order.qty_type == static_cast<int>(QtyType::FIXED))
@@ -5740,7 +5742,14 @@ void BacktestEngine::apply_filled_order_to_state(
                 && order.affordability_placement_equity > 0.0
                 && std::isfinite(own_qty) && own_qty > 0.0
                 && tv_money_scope(order.affordability_signal_price);
-            if (explicit_price_scope) {
+            if (explicit_money_scope) {
+                const double signal_cost =
+                    own_qty * order.affordability_signal_price;
+                if (order.affordability_placement_equity + 1e-9
+                    < tv_money_round(signal_cost)) {
+                    decline_and_cancel();
+                    return;
+                }
                 const double affordable_price = tv_money_round(
                     tv_money_round(order.affordability_placement_equity) / own_qty);
                 if (std::isfinite(affordable_price)
