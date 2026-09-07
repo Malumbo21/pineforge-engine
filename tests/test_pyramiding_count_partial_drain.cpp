@@ -3,8 +3,10 @@
  * OCCUPIED ENTRY SLOTS in the current directional position, tested at
  * admission time. A slot is returned when the entry is retired by a CLOSE-PATH
  * order (strategy.close / close_all / reversal / broker close) and is NOT
- * returned when the entry is drained by a strategy.exit BRACKET leg fill.
- * Reaching flat releases every slot.
+ * returned when another logical entry's BRACKET drains it by FIFO. R20 adds
+ * the proved ordinary two-distinct-ID exception: brackets fully retiring
+ * their own unique lot release its slot if no earlier foreign/ambiguous
+ * bracket slice shadowed it. Reaching flat releases every slot.
  *
  * Bug (pre-fix): settle_position_after_partial_exit() unconditionally
  * re-derived position_entry_count_ from pyramid_entries_.size(). A
@@ -160,7 +162,10 @@ public:
 //  bar 10 close_all fills
 class DrainProbe : public PyramidProbe {
 public:
-    explicit DrainProbe(bool flat_reset_tail) : flat_reset_tail_(flat_reset_tail) {}
+    explicit DrainProbe(bool flat_reset_tail, bool owned_drain = false)
+        : flat_reset_tail_(flat_reset_tail), owned_drain_(owned_drain) {}
+    std::string third_id = "C";
+    int slots_after_drain = -1;
 
     void on_bar(const Bar& /*bar*/) override {
         switch (bar_index_) {
@@ -168,9 +173,11 @@ public:
             case 1: strategy_exit("X1", "A", 110.0, kNaN, kNaN, kNaN, kNaN,
                                   100.0, "", 1.0); break;
             case 2: strategy_entry("B", true, kNaN, kNaN, 2.0); break;
-            case 3: strategy_exit("X2", "B", 120.0, kNaN, kNaN, kNaN, kNaN,
+            case 3: strategy_exit("X2", owned_drain_ ? "A" : "B", 120.0, kNaN, kNaN, kNaN, kNaN,
                                   100.0, "", 1.0); break;
-            case 4: strategy_entry("C", true, kNaN, kNaN, 2.0); break;
+            case 4:
+                slots_after_drain = position_entry_count_;
+                strategy_entry(third_id, true, kNaN, kNaN, 2.0); break;
             case 6: if (flat_reset_tail_) strategy_close_all(); break;
             case 7: if (flat_reset_tail_) strategy_entry("D", true, kNaN, kNaN, 2.0);
                     break;
@@ -181,6 +188,7 @@ public:
 
 private:
     bool flat_reset_tail_;
+    bool owned_drain_;
 };
 
 static std::vector<Bar> drain_bars() {
@@ -363,6 +371,83 @@ static void test_close_path_drain_frees_a_pyramid_slot() {
     CHECK(near(eng.position_size(), 0.0));
 }
 
+// R20 covered TV owner/cross-owner contrast: an A-bound bracket retiring
+// the unique A lot returns one slot while B remains. The original X2-from-B
+// fixture above drains A by FIFO on behalf of B and must keep both slots.
+static void test_owned_bracket_retirement_returns_slot() {
+    for (const std::string& id : {std::string("C"),std::string("A")}) {
+        DrainProbe eng(false, true);
+        eng.third_id=id;
+        auto bars=drain_bars();
+        eng.run(bars.data(),static_cast<int>(bars.size()));
+        CHECK(eng.slots_after_drain==1);
+        CHECK(eng.trade_count()==2);
+        CHECK(eng.entry_id(0)=="A" && eng.entry_id(1)=="A");
+        CHECK(eng.exit_id(0)=="X1" && eng.exit_id(1)=="X2");
+        CHECK(near(eng.position_size(),4.0));
+    }
+}
+
+class OwnedHistoryProbe : public PyramidProbe {
+public:
+    bool cross_first=false;
+    bool is_long=true, full_first=false;
+    double first_qty=1, final_qty=1;
+    int slots=-1;
+    void on_bar(const Bar&) override {
+        switch(bar_index_) {
+            case 0:
+                slots=-1;
+                strategy_entry("A",is_long,kNaN,kNaN,2);
+                strategy_entry("B",is_long,kNaN,kNaN,2);break;
+            case 1: strategy_exit("X1",cross_first?"B":"A",is_long?110:90,kNaN,kNaN,kNaN,kNaN,100,"",first_qty);break;
+            case 3:
+                if(!full_first) strategy_exit("X2","A",is_long?120:80,kNaN,kNaN,kNaN,kNaN,100,"",final_qty);
+                break;
+            case 4:
+                slots=position_entry_count_;
+                strategy_entry("C",is_long,kNaN,kNaN,2);break;
+        }
+    }
+};
+static void test_prior_cross_owner_slice_keeps_slot() {
+    for(bool cross : {false,true}) {
+        OwnedHistoryProbe p;p.cross_first=cross;auto bars=drain_bars();
+        p.run(bars.data(),static_cast<int>(bars.size()));
+        CHECK(p.slots==(cross?2:1));
+        CHECK(near(p.position_size(),cross?2:4));
+        CHECK(p.trade_count()==2);
+        CHECK(p.entry_id(0)=="A" && p.entry_id(1)=="A");
+    }
+}
+
+static void test_owned_slot_full_zero_and_reuse() {
+    for(bool is_long : {false,true}) {
+        auto bars=drain_bars();
+        if(!is_long) for(auto& b:bars) {
+            const double hi=b.high,lo=b.low;
+            b.open=200-b.open;b.high=200-lo;b.low=200-hi;b.close=200-b.close;
+        }
+        for(bool zero_first : {false,true}) {
+            OwnedHistoryProbe p;p.is_long=is_long;
+            p.full_first=!zero_first;p.first_qty=zero_first?0:2;
+            p.final_qty=2;p.cross_first=zero_first;
+            p.run(bars.data(),static_cast<int>(bars.size()));
+            CHECK(p.slots==1);
+            CHECK(near(p.position_size(),is_long?4:-4));
+            CHECK(p.trade_count()==1);
+            CHECK(near(p.size(0),2));
+        }
+        OwnedHistoryProbe reuse;reuse.is_long=is_long;reuse.cross_first=true;
+        reuse.run(bars.data(),static_cast<int>(bars.size()));
+        CHECK(reuse.slots==2);
+        reuse.cross_first=false;
+        reuse.run(bars.data(),static_cast<int>(bars.size()));
+        CHECK(reuse.slots==1);
+        CHECK(near(reuse.position_size(),is_long?4:-4));
+    }
+}
+
 int main() {
     std::printf("=== test_pyramiding_count_partial_drain ===\n");
 
@@ -370,6 +455,9 @@ int main() {
     test_flat_reset_readmits_the_entry();
     test_partial_exit_without_drain_is_inert();
     test_close_path_drain_frees_a_pyramid_slot();
+    test_owned_bracket_retirement_returns_slot();
+    test_prior_cross_owner_slice_keeps_slot();
+    test_owned_slot_full_zero_and_reuse();
 
     std::printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return (tests_failed > 0) ? 1 : 0;

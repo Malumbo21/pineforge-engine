@@ -6868,6 +6868,36 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
     const auto cause = is_bracket_exit ? PositionReductionCause::BRACKET_EXIT
                                        : PositionReductionCause::SCRIPT_ORDER;
 
+    // R20 owner/FIFO contrast: with two distinct live entry IDs, a bracket
+    // that retires its own unique oldest lot releases that slot. A B-bound
+    // exit merely draining A by FIFO still occupies B's logical reservation
+    // and keeps the existing monotone count (the thula ETH March pin).
+    // Remember the exact physical owner, then prove its retirement below;
+    // no slot is returned for a partial slice or a different lot's closure.
+    uint64_t releasable_owned_slot = 0;
+    int bound_lots_before = 0;
+    if (is_bracket_exit && !close_entries_rule_any_ && pyramiding_ == 2) {
+        for (const auto& pe : pyramid_entries_)
+            if (pe.entry_id == order.from_entry) ++bound_lots_before;
+    }
+    if (is_bracket_exit && has_explicit_qty_to_close
+        && std::isfinite(order.qty) && order.qty > kQtyEpsilon
+        && !order.from_entry.empty() && !close_entries_rule_any_
+        && !process_orders_on_close_ && !calc_on_order_fills_
+        && !bar_magnifier_enabled_ && !coof_scheduler_active_
+        && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
+        && !sbmt_frozen_close && !dynamic_full_live_qty
+        && pyramiding_ == 2 && position_entry_count_ == 2
+        && pyramid_entries_.size() == 2
+        && pyramid_entries_[0].entry_id == order.from_entry
+        && !pyramid_entries_[0].bracket_slot_shadowed
+        && pyramid_entries_[1].entry_id != order.from_entry
+        && pyramid_entries_[0].entry_bar_index < bar_index_
+        && pyramid_entries_[1].entry_bar_index < bar_index_
+        && order.qty <= pyramid_entries_[0].qty + kQtyEpsilon) {
+        releasable_owned_slot = pyramid_entries_[0].entry_incarnation;
+    }
+
     if (close_entries_rule_any_ && !order.from_entry.empty()) {
         // close_entries_rule="ANY": close only matching entries
         if (is_partial) {
@@ -6904,6 +6934,34 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
         } else {
             execute_market_exit(fill_price);
         }
+    }
+
+    if (is_bracket_exit && !close_entries_rule_any_ && pyramiding_ == 2) {
+        for (size_t i=trades_before_exit; i<trades_.size(); ++i) {
+            const auto& trade = trades_[i];
+            if (!order.from_entry.empty() && bound_lots_before == 1
+                && trade.entry_id == order.from_entry) continue;
+            for (auto& pe : pyramid_entries_) {
+                if (pe.entry_incarnation == trade.entry_incarnation)
+                    pe.bracket_slot_shadowed = true;
+            }
+        }
+    }
+
+    if (releasable_owned_slot != 0
+        && position_side_ == side_before_exit
+        && position_side_ != PositionSide::FLAT
+        && position_entry_count_ == 2 && pyramid_entries_.size() == 1
+        && pyramid_entries_[0].entry_incarnation != releasable_owned_slot
+        && trades_.size() > trades_before_exit) {
+        bool only_owner_closed = true;
+        for (size_t i=trades_before_exit; i<trades_.size(); ++i) {
+            if (trades_[i].entry_incarnation != releasable_owned_slot) {
+                only_owner_closed = false;
+                break;
+            }
+        }
+        if (only_owner_closed) position_entry_count_ = 1;
     }
 
     // The one-shot guard belongs to the exit ID, but an id can carry more than

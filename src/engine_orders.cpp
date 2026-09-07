@@ -764,9 +764,12 @@ void BacktestEngine::settle_position_after_partial_exit(
         // order — the grid-bot family depends on it (3commas-ena: 1021 fills
         // over 64 reused ids, 776 entries between flats under a cap of 200,
         // never more than 50 CONCURRENT entries). TV does NOT return the slot
-        // when the entry is drained by strategy.exit bracket fills
+        // when a strategy.exit bracket drains another logical slot by FIFO
         // (thulashimohanr 2026-03-29: the 03-26 entry was fully retired by two
-        // T1 fills and TV still refused the third entry).
+        // T1 fills and TV still refused the third entry). The narrowly proven
+        // unique-owner retirement in apply_exit_order_fill can release a slot
+        // after this conservative settlement; a prior foreign-bracket slice
+        // or ambiguous same-ID ownership remains pinned.
         if (cause == PositionReductionCause::BRACKET_EXIT) {
             position_entry_count_ =
                 std::max(position_entry_count_, (int)pyramid_entries_.size());

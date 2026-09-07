@@ -195,6 +195,10 @@ struct PyramidEntry {
     // same physical-entry provenance. Zero is reserved for legacy/test-only
     // synthetic lots that were not created by a PendingOrder.
     uint64_t entry_incarnation = 0;
+    // A foreign/global or ambiguous same-ID bracket consumed part of this
+    // physical lot by FIFO. Its logical slot cannot later be released merely
+    // because an owner-bound bracket closes the last physical remainder.
+    bool bracket_slot_shadowed = false;
 };
 
 struct Trade {
