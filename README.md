@@ -76,7 +76,7 @@ Prefer zero install? The hosted server at **[mcp.pineforge.dev/mcp](https://mcp.
 git clone https://github.com/pineforge-4pass/pineforge-engine.git && cd pineforge-engine
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build --output-on-failure     # 221 tests
+ctest --test-dir build --output-on-failure     # 222 tests
 bash tutorial/run.sh                            # MACD on BTC/USDT, end to end
 python3 tutorial/run_stream.py                  # OHLCV warm-up → realtime trades
 ```
@@ -190,7 +190,7 @@ PyneCore's 15 non-excellent strategies involve `strategy.exit(stop=…, limit=�
 - `libpineforge.a` — the static runtime: order matching and fills, sizing and margin, the bar magnifier, 66 indicator classes, `request.security()`, time and session math.
 - `<pineforge/pineforge.h>` — the public C ABI, the stability-pinned consumer surface.
 - `<pineforge/*.hpp>` — internal C++ headers the transpiler emits against (not part of the stability guarantee).
-- 221 ctest cases, most of them replays of recorded TradingView bars; CI on Linux + macOS × Release + Debug, sanitizers, and a `find_package` smoke consumer.
+- 222 ctest cases, most of them replays of recorded TradingView bars; CI on Linux + macOS × Release + Debug, sanitizers, and a `find_package` smoke consumer.
 - `corpus/` — the 312-strategy public validation corpus (submodule).
 - `benchmarks/` — the three-way comparison harness and the throughput package.
 - `scripts/` — `run_corpus.sh`, `verify_corpus.py`, `run_strategy.py` (load any `.so` via ctypes), `regen_corpus_cpp.sh`, `coverage.sh`.
@@ -244,7 +244,7 @@ src/                    26 .cpp files split by concern
   ├── ta_*.cpp                        66 indicator classes (moving averages, oscillators,
   │                                   volatility/trend, extremes/volume, misc)
   └── magnifier / matrix / session_time / timeframe / timezone / math / str_utils
-tests/                  221 ctest cases (C++ unit + TradingView replay tests, 1 pure-C ABI check)
+tests/                  222 ctest cases (C++ unit + TradingView replay tests, 1 pure-C ABI check)
 corpus/                 public submodule: 312 strategies + the 1-minute feed and derived 15m bars
 benchmarks/             three-way comparison harness, throughput package, results/
 scripts/                run_corpus.sh, verify_corpus.py, run_strategy.py, regen_corpus_cpp.sh, coverage.sh
