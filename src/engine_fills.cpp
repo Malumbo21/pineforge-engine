@@ -1011,6 +1011,9 @@ bool BacktestEngine::entry_bar_post_fill_adverse(const Bar& bar,
 // reproduce Ycelestine July 6: a full liquidation before the script permits
 // its flat-gated Long entry. A resting own bracket that did not fill does not
 // postpone that margin event; after a full close it belongs to the old cycle.
+// R25 covered controls extend this ordering to a flat-born pure STOP entry
+// actually filled at the open. One other pure STOP that never touched the
+// broker's bar cannot postpone liquidation and retains its pending lifetime.
 void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
     if (!margin_call_enabled_ || position_side_ != PositionSide::SHORT
         || process_orders_on_close_ || calc_on_order_fills_
@@ -1023,7 +1026,8 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
         || !(qty_step_ > 0.0 && qty_step_ < 1.0)
         || pyramiding_ < 0 || pyramiding_ > 1
         || position_entry_count_ != 1 || pyramid_entries_.size() != 1
-        || !pyramid_entries_.front().ordinary_market_open
+        || !(pyramid_entries_.front().ordinary_market_open
+             || pyramid_entries_.front().ordinary_stop_open)
         || pyramid_entries_.front().entry_bar_index != position_open_bar_
         || commission_value_ != 0.0 || slippage_ != 0
         || margin_short_ != 100.0 || syminfo_.pointvalue != 1.0
@@ -1036,10 +1040,40 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
         return;
     }
     for (const auto& order : pending_orders_) {
-        // Pending entries/closes, foreign or global brackets, and dormant or
-        // trailing lifecycles retain their established scheduling. The order
-        // kernel has already evaluated this ordinary own priced bracket over
-        // the bar; if it filled, the resulting position is what we see here.
+        if (order.type == OrderType::ENTRY
+            && pyramid_entries_.front().ordinary_stop_open) {
+            // An unfilled order may have been triggered and deferred by a
+            // broker rule. Prove this pure STOP was unhit over the entire
+            // tick-quantized bar before treating it as independent.
+            const Bar trigger_bar = broker_trigger_bar(bar);
+            double pending_touch = 0.0;
+            if (order.created_bar >= bar_index_
+                || order.created_position_side != PositionSide::FLAT
+                || order.created_while_in_position
+                || order.created_after_position_close_in_bar
+                || order.created_during_coof_recalc
+                || !std::isfinite(order.stop_price)
+                || !std::isnan(order.limit_price)
+                || order.stop_limit_activated
+                || !std::isnan(order.trail_points)
+                || !std::isnan(order.trail_price)
+                || !std::isnan(order.trail_offset)
+                || !order.oca_name.empty() || order.oca_type != 0
+                || !std::isfinite(trigger_bar.open)
+                || !std::isfinite(trigger_bar.high)
+                || !std::isfinite(trigger_bar.low)
+                || !std::isfinite(trigger_bar.close)
+                || internal::entry_stop_first_touch(
+                    trigger_bar, internal::bar_path_uses_high_first(bar),
+                    order.stop_price, order.is_long, &pending_touch)) {
+                return;
+            }
+            continue;
+        }
+        // Other entries/closes, foreign/global brackets, and dormant or
+        // trailing lifecycles keep their scheduling. The order kernel has
+        // already evaluated this ordinary own priced bracket over the bar;
+        // if it filled, the resulting position is what we see here.
         if (order.type != OrderType::EXIT
             || order.from_entry != pyramid_entries_.front().entry_id
             || order.dormant_bracket || order.dormant_reissue_pending
@@ -1057,8 +1091,8 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
         // must not revisit that high after the script.
         intrabar_exit_margin_call_bar_ = bar_index_;
         if (position_side_ == PositionSide::FLAT) {
-            // No pending parent entry passed the scope check above. Retire the
-            // old cycle's bracket now; the upcoming script can independently
+            // Retire only EXIT brackets from the old cycle. An unhit pending
+            // ENTRY survives, and the upcoming script can independently
             // attach an explicit bracket to a newly placed replacement.
             purge_exit_orders();
         }
@@ -5823,6 +5857,33 @@ void BacktestEngine::apply_filled_order_to_state(
             && pyramid_entries_.front().entry_bar_index == bar_index_
             && position_entry_price_ == round_to_mintick(bar.open)) {
             pyramid_entries_.front().ordinary_market_open = true;
+        }
+        if (order.type == OrderType::ENTRY
+            && std::isfinite(order.stop_price)
+            && std::isnan(order.limit_price)
+            && !order.stop_limit_activated
+            && std::isnan(order.trail_points)
+            && std::isnan(order.trail_price)
+            && std::isnan(order.trail_offset)
+            && order.oca_name.empty() && order.oca_type == 0
+            && !process_orders_on_close_ && !calc_on_order_fills_
+            && !bar_magnifier_enabled_ && !coof_scheduler_active_
+            && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
+            && !order.created_during_coof_recalc
+            && !order.created_while_in_position
+            && !order.created_after_position_close_in_bar
+            && order.created_position_side == PositionSide::FLAT
+            && order.created_bar < bar_index_
+            && position_side_before_fill == PositionSide::FLAT
+            && position_side_ != PositionSide::FLAT
+            && pyramid_entries_.size() == 1
+            && order.incarnation != 0
+            && pyramid_entries_.front().entry_incarnation == order.incarnation
+            && pyramid_entries_.front().entry_bar_index == bar_index_
+            && pyramid_entries_.front().entry_path_position == 0.0
+            && std::isfinite(bar.open)
+            && position_entry_price_ == round_to_mintick(bar.open)) {
+            pyramid_entries_.front().ordinary_stop_open = true;
         }
         ++broker_fill_event_seq_;
     }

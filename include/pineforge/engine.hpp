@@ -215,6 +215,10 @@ struct PyramidEntry {
     // Exact ordinary MARKET fill at the next bar open. Priced/RAW entries
     // cannot infer this provenance from an equal numeric entry price.
     bool ordinary_market_open = false;
+    // A flat-born pure STOP strategy.entry actually filled at the bar open.
+    // Keep this separate from MARKET provenance: equal fill prices do not
+    // make the two order classes interchangeable for affordability rules.
+    bool ordinary_stop_open = false;
 };
 
 struct Trade {
