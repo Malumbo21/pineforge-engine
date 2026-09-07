@@ -1,5 +1,5 @@
 set(TEST_SOURCES
-    test_opening_short_margin_script_state
+    test_short_margin_script_state
     test_ringbuffer
     test_timeframe
     test_magnifier

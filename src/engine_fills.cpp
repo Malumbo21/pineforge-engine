@@ -906,8 +906,9 @@ bool BacktestEngine::process_carried_position_fx_rollover(const Bar& bar) {
 
 // TradingView force-liquidation (margin call).
 //
-// Run once per script bar (end of dispatch_bar / magnifier bar) after all
-// order processing. Finite liquidation-price positions use the bar's ADVERSE
+// The end-of-bar dispatcher retains the general checkpoint. Scoped pre-exit
+// and pre-script sites settle earlier events and mark their consumed adverse
+// check so the end-of-bar call cannot repeat it. Finite-price positions use the bar's ADVERSE
 // extreme (bar HIGH for shorts, bar LOW for leveraged longs). A long at
 // margin_long=100 has no adverse-price liquidation; it can only receive the
 // one-shot affordability event queued by a successful opening/add fill:
@@ -1006,18 +1007,24 @@ bool BacktestEngine::entry_bar_post_fill_adverse(const Bar& bar,
 // Covered TV controls also expose a partial's reduced size (-0.08729) to a
 // 50% close, keep a funded short, and preserve an explicit bracket issued for
 // the pending replacement. Reuse the existing broker arithmetic and settle
-// it before the script in this bounded, interaction-free opening topology.
-void BacktestEngine::process_opening_short_margin_before_script(const Bar& bar) {
+// it before the script in this bounded topology. The carried-position pins
+// reproduce Ycelestine July 6: a full liquidation before the script permits
+// its flat-gated Long entry. A resting own bracket that did not fill does not
+// postpone that margin event; after a full close it belongs to the old cycle.
+void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
     if (!margin_call_enabled_ || position_side_ != PositionSide::SHORT
-        || !entry_bar_margin_path_scope()
+        || process_orders_on_close_ || calc_on_order_fills_
+        || bar_magnifier_enabled_ || coof_scheduler_active_
+        || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
+        || position_open_bar_ < 0 || position_open_bar_ > bar_index_
         || bar.timestamp != current_bar_.timestamp
-        || !pending_orders_.empty()
+        || pending_orders_.size() > 1
         || !(position_qty_ > 0.0 && position_qty_ <= 1.0)
         || !(qty_step_ > 0.0 && qty_step_ < 1.0)
         || pyramiding_ < 0 || pyramiding_ > 1
         || position_entry_count_ != 1 || pyramid_entries_.size() != 1
         || !pyramid_entries_.front().ordinary_market_open
-        || pyramid_entries_.front().entry_bar_index != bar_index_
+        || pyramid_entries_.front().entry_bar_index != position_open_bar_
         || commission_value_ != 0.0 || slippage_ != 0
         || margin_short_ != 100.0 || syminfo_.pointvalue != 1.0
         || active_account_currency_fx() != 1.0
@@ -1028,12 +1035,33 @@ void BacktestEngine::process_opening_short_margin_before_script(const Bar& bar) 
         || last_margin_call_event_bar_ == bar_index_) {
         return;
     }
+    for (const auto& order : pending_orders_) {
+        // Pending entries/closes, foreign or global brackets, and dormant or
+        // trailing lifecycles retain their established scheduling. The order
+        // kernel has already evaluated this ordinary own priced bracket over
+        // the bar; if it filled, the resulting position is what we see here.
+        if (order.type != OrderType::EXIT
+            || order.from_entry != pyramid_entries_.front().entry_id
+            || order.dormant_bracket || order.dormant_reissue_pending
+            || !std::isnan(order.trail_points)
+            || !std::isnan(order.trail_price)
+            || (!std::isfinite(order.limit_price)
+                && !std::isfinite(order.stop_price))) {
+            return;
+        }
+    }
     const std::size_t trades_before = trades_.size();
     process_margin_call(bar);
     if (trades_.size() != trades_before) {
-        // The opening checkpoint and its adverse retry have both completed.
-        // A surviving partial must not revisit that high after the script.
+        // All checkpoints in this call have completed. A surviving partial
+        // must not revisit that high after the script.
         intrabar_exit_margin_call_bar_ = bar_index_;
+        if (position_side_ == PositionSide::FLAT) {
+            // No pending parent entry passed the scope check above. Retire the
+            // old cycle's bracket now; the upcoming script can independently
+            // attach an explicit bracket to a newly placed replacement.
+            purge_exit_orders();
+        }
     }
 }
 

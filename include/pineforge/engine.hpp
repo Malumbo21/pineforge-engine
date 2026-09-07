@@ -1346,10 +1346,10 @@ protected:
     // extreme (on the engine's own OHLC path) must let a pre-fill deficit
     // slice first. ``last_margin_call_event_bar_`` records the last
     // bar_index_ on which ANY margin-call trade row was booked (FX broker-
-    // open rollover, end-of-bar cascade, or the pre-exit slice); the
+    // open rollover, pre-script/end-of-bar cascade, or the pre-exit slice); the
     // pre-exit hook consults it so at most one forced-liquidation event
-    // fires per bar. ``intrabar_exit_margin_call_bar_`` is set ONLY by the
-    // pre-exit slice and tells the end-of-bar process_margin_call that this
+    // fires per bar. ``intrabar_exit_margin_call_bar_`` is set by a pre-exit
+    // slice or the scoped pre-script checkpoint and tells the later call that this
     // bar's adverse-extreme event was already consumed chronologically (the
     // surviving remainder is re-checked from the next bar on, preserving
     // TV's one-nibble-per-bar cascade).
@@ -1891,9 +1891,9 @@ protected:
     // adverse-price liquidation; only an eligible one-shot post-fill
     // affordability event can trim it.
     void process_margin_call(const Bar& bar);
-    // Ordinary fresh sub-contract shorts with no resting orders expose their
-    // opening-bar liquidation to the close-time script (R23 TV controls).
-    void process_opening_short_margin_before_script(const Bar& bar);
+    // Ordinary sub-contract shorts expose completed liquidation to the
+    // close-time script (R23 opening and carried-position TV controls).
+    void process_short_margin_before_script(const Bar& bar);
     // finding-308: chronological pre-exit forced-liquidation slice. Called
     // from the process_pending_orders fill loop immediately BEFORE a priced
     // exit of the live position is applied. Fires only when (a) no margin
