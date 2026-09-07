@@ -159,6 +159,7 @@ set(TEST_SOURCES
     test_metrics
     test_drawing
     test_margin_call
+    test_high_value_fractional_money_margin
     test_margin_call_intrabar_chronology
     test_margin_call_trail_exit_chronology
     test_margin_call_1x_long_entry_fill

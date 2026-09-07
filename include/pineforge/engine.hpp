@@ -34,7 +34,7 @@ enum class PositionSide { FLAT, LONG, SHORT };
 // (entry-leg admission), log-20260905t180249z-10358e84 (margin-call
 // trigger)): TradingView's broker carries MONEY at TEN SIGNIFICANT DIGITS,
 // half-up — 3 decimals at >= 1e6, 4 decimals below. Five consequences are
-// pinned and implemented, all scoped by tv_money_scope (below):
+// pinned and implemented, with the per-rule scopes described below:
 //   1. SIZING — a default percent_of_equity order is floored from the
 //      ROUNDED equity (calc_qty): the lot count flips one lot early/late
 //      when the exact equity is within half a money unit of a lot boundary
@@ -62,7 +62,7 @@ enum class PositionSide { FLAT, LONG, SHORT };
 //      the every-bar sensors have E_s < round(cost), 0/3086 admissions do.
 //   3. MARGIN CALL — a margin-100 LONG is liquidated (one contract, the
 //      broker's minimum) at the first bar path point where the exact equity
-//      is <= the position value ROUNDED to 10 significant digits
+//      is below the position value ROUNDED to 10 significant digits
 //      (process_margin_call): revL L18..L25 16/16, taro 6/6 one-unit trims.
 // Where equity ~ 1e6 and a lot is worth ~0.011 (EURUSD: qty step 0.01 at
 // price ~1.1) the 0.0005 rounding crosses a lot boundary on ~9 % of all-in
@@ -73,8 +73,10 @@ enum class PositionSide { FLAT, LONG, SHORT };
 // 4583, the float-accumulated ledger's 4584.000000000001 or a 1e-6-nudged
 // floor gives 4584, one share the account cannot pay at the 238.78 fill), so
 // rule 1 sizes every lot-stepped instrument (tv_money_lot_sizing); rules
-// 2, 3 and 5 stay scoped by tv_money_scope — outside it the exact fill-price
-// admission already decides (1094521.681 -> Q 4584 dropped on AAPL).
+// 2 and 5 stay scoped by tv_money_scope — outside it the exact fill-price
+// admission already decides (1094521.681 -> Q 4584 dropped on AAPL). Rule 3
+// additionally covers ordinary, fee/slippage-free single-position fractional
+// unit-pointvalue/same-currency books with lot value >=1 (R21 BTC/XAU pins).
 //   5. WHOLE-ORDER DROP (round 9 family R follow-up, campaign notes
 //      log-20260905t205824z-af397c83 and log-20260905t210117z-ab914192;
 //      the residual of log-20260905t180249z-4bd857ad): once the rounded-cost

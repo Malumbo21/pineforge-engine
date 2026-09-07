@@ -1499,7 +1499,11 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
 // C 1.17653, 09-17 09:45Z C 1.18457, 10-03 01:45Z H 1.17293, 11-25 06:45Z H
 // 1.15217, 12-30 06:15Z H 1.17798); 0 false fires over 612 every-bar sensor
 // longs (their equity sits below 1e6). One broker event per bar, plain
-// close-calc dispatch only (the pinned tapes), scoped by tv_money_scope.
+// close-calc dispatch only (the pinned tapes). R21 also pins fee/slippage-free
+// single-lot fractional books whose minimum lot is worth >=1 account unit:
+// BTC Q10.68387 at105380.96, cash0.0003048999 fires1 at low105355.26;
+// +0.0001cash does not. BTC Q10.68388 and XAU Q300.01 with0.00001cash
+// fire at the opening price itself. Other money/admission scopes stay fixed.
 // Shorts keep the finite-price cascade: the same rounding moves their
 // liquidation price by ~1e-10, below a tick.
 //
@@ -1555,7 +1559,15 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
         || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE) {
         return false;
     }
-    if (!std::isfinite(bar.close) || !tv_money_scope(bar.close)) return false;
+    const bool legacy_money_scope = tv_money_scope(bar.close);
+    const bool high_value_fractional_scope = !legacy_money_scope
+        && qty_step_ > 0.0 && qty_step_ < 1.0
+        && !process_orders_on_close_ && commission_value_ == 0.0 && slippage_ == 0
+        && syminfo_.pointvalue == 1.0 && active_account_currency_fx() == 1.0
+        && pyramiding_ >= 0 && pyramiding_ <= 1
+        && position_entry_count_ == 1 && pyramid_entries_.size() == 1;
+    if (!std::isfinite(bar.close) || bar.close <= 0.0
+        || !(legacy_money_scope || high_value_fractional_scope)) return false;
     // Pinned on same-currency accounts only. A converted (quote -> account
     // FX series) ledger is cent-rounded in TradingView's export and already
     // carries its own sub-half-cent tolerance on the opening path; the
@@ -1584,6 +1596,11 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
         int seg = static_cast<int>(std::floor(fill_pos + internal::kPathPosEps));
         if (seg < 0) seg = 0;
         start = seg + 1;
+        // The newly covered high-value fractional pins include an immediate
+        // post-entry valuation at O. Only a fill actually at O can inspect it;
+        // a priced entry later on the path still skips earlier waypoints.
+        if (high_value_fractional_scope && fill_pos == 0.0
+            && position_entry_price_ == round_to_mintick(bar.open)) start = 0;
     }
     double fire_price = std::numeric_limits<double>::quiet_NaN();
     double deficit = 0.0;
