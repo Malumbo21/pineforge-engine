@@ -5162,7 +5162,7 @@ void BacktestEngine::apply_filled_order_to_state(
     // Same-direction adds are out of scope (no tape).
     // round 9 family R follow-up — rule 5 (engine.hpp; campaign notes
     // log-20260905t205824z-af397c83, log-20260905t210117z-ab914192): once
-    // the rounded-cost admission has passed, the broker's fill-time margin
+    // the rounded-cost admission has passed, the broker's placement margin
     // check runs on the PRICE scale. The price at which the rounded equity
     // exactly buys the frozen quantity,
     //
@@ -5275,13 +5275,14 @@ void BacktestEngine::apply_filled_order_to_state(
                     // famag-A1-ef/A3-ef/A4-ef/A5-ef) is atomic with its
                     // co-queued close (#91, suppress_declined_reversal_
                     // close_legs) — so the suppression is NOT applied here.
-                    // The position's priced brackets still go dormant as
-                    // for any declined reversal (the close, if any, takes
-                    // the position at the open; if none, the hold is the
-                    // KI-54 shape).
-                    if (reversal_entry) {
-                        mark_position_brackets_dormant_on_declined_reversal(bar);
-                    }
+                    // A placement-rejected order never acquires the old
+                    // position's priced exits either. Covered R31 TV
+                    // controls r31-r5-stop-z-tie/g-tie preserve the standing
+                    // stop; adding 0.0005 cash to the gap control admits at
+                    // placement, then the opening-gap rejection kills it.
+                    // The partial-margin controls r31-fast-r5-child/bare
+                    // also keep the old stop, identical to no reversal.
+                    // Only the fill-time rejection below owns that kill.
                     decline_and_cancel();
                     return;
                 }
