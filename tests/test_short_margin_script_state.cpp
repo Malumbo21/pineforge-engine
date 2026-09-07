@@ -280,7 +280,8 @@ public:
         default: break;
         }
         if (scenario >= 11) {
-            PendingOrder order;
+            PendingOrder order{};
+            order.trail_points = order.trail_offset = qnan;
             order.id = "Exit";
             order.type = OrderType::EXIT;
             order.from_entry = "Short";
@@ -304,11 +305,17 @@ public:
 };
 
 void test_other_checkpoint_owners_are_untouched() {
-    CheckpointOwnership owned(0);
-    owned.checkpoint();
-    CHECK(owned.trades_count() == 1);
-    CHECK(owned.quantity() == 0.0);
+    // R28's covered one-unit opening/carried TV controls supersede the old
+    // synthetic integer exclusion: an ordinary integer MARKET book also
+    // exposes its completed margin event before the script.
+    for (int scenario : {0, 7}) {
+        CheckpointOwnership owned(scenario);
+        owned.checkpoint();
+        CHECK(owned.trades_count() == 1);
+        CHECK(owned.quantity() == 0.0);
+    }
     for (int scenario = 1; scenario <= 16; ++scenario) {
+        if (scenario == 7) continue;
         CheckpointOwnership other(scenario);
         const double quantity_before = other.quantity();
         const auto orders_before = other.pending_count();

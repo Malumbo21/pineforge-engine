@@ -1014,6 +1014,10 @@ bool BacktestEngine::entry_bar_post_fill_adverse(const Bar& bar,
 // R25 covered controls extend this ordering to a flat-born pure STOP entry
 // actually filled at the open. One other pure STOP that never touched the
 // broker's bar cannot postpone liquidation and retains its pending lifetime.
+// R28 integer MARKET controls expose both opening and carried liquidation to
+// the script too. An owned priced bracket killed by this bar's opening
+// declined reversal may revive at that margin event; settle that existing
+// broker path before the script can build a replacement from the dead average.
 void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
     if (!margin_call_enabled_ || position_side_ != PositionSide::SHORT
         || process_orders_on_close_ || calc_on_order_fills_
@@ -1022,8 +1026,8 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
         || position_open_bar_ < 0 || position_open_bar_ > bar_index_
         || bar.timestamp != current_bar_.timestamp
         || pending_orders_.size() > 1
-        || !(position_qty_ > 0.0 && position_qty_ <= 1.0)
-        || !(qty_step_ > 0.0 && qty_step_ < 1.0)
+        || !(position_qty_ > 0.0) || !std::isfinite(position_qty_)
+        || !(qty_step_ > 0.0) || !std::isfinite(qty_step_)
         || pyramiding_ < 0 || pyramiding_ > 1
         || position_entry_count_ != 1 || pyramid_entries_.size() != 1
         || !(pyramid_entries_.front().ordinary_market_open
@@ -1039,6 +1043,15 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
         || last_margin_call_event_bar_ == bar_index_) {
         return;
     }
+    const bool fractional_subcontract = qty_step_ < 1.0 && position_qty_ <= 1.0;
+    // Keep STOP-origin coverage at its R25 subcontract scope. The new
+    // integer path requires an ordinary MARKET lot on the instrument grid.
+    const bool integer_market = qty_step_ >= 1.0
+        && pyramid_entries_.front().ordinary_market_open
+        && qty_step_ == std::floor(qty_step_)
+        && position_qty_ == std::floor(position_qty_)
+        && position_qty_ == std::round(position_qty_ / qty_step_) * qty_step_;
+    if (!fractional_subcontract && !integer_market) return;
     for (const auto& order : pending_orders_) {
         if (order.type == OrderType::ENTRY
             && pyramid_entries_.front().ordinary_stop_open) {
@@ -1070,13 +1083,26 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
             }
             continue;
         }
-        // Other entries/closes, foreign/global brackets, and dormant or
-        // trailing lifecycles keep their scheduling. The order kernel has
-        // already evaluated this ordinary own priced bracket over the bar;
-        // if it filled, the resulting position is what we see here.
+        // Only the current opening-decline stamp establishes that this
+        // dormant bracket predates the script. Unknown/old dormancy and
+        // close-time holds/reissues retain their existing scheduler.
+        const bool opening_decline_bracket = integer_market
+            && order.dormant_reversal_kill_bar == bar_index_
+            && order.dormant_hold_bar == -1
+            && !order.dormant_reissue_pending
+            && std::isnan(order.trail_offset)
+            && std::isfinite(order.stop_price)
+            && (std::isnan(order.qty)
+                ? order.qty_percent >= 100.0 - internal::kFullPercentEps
+                : std::isfinite(order.qty) && order.qty >= position_qty_);
+        // Other entries/closes, foreign/global and trailing brackets retain
+        // their scheduling. A live own priced bracket already had its order
+        // pass; a dormant opening-decline bracket may revive only if the
+        // unchanged margin machinery actually records a liquidation.
         if (order.type != OrderType::EXIT
             || order.from_entry != pyramid_entries_.front().entry_id
-            || order.dormant_bracket || order.dormant_reissue_pending
+            || (order.dormant_bracket && !opening_decline_bracket)
+            || order.dormant_reissue_pending
             || !std::isnan(order.trail_points)
             || !std::isnan(order.trail_price)
             || (!std::isfinite(order.limit_price)

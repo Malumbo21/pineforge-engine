@@ -1905,8 +1905,8 @@ protected:
     // adverse-price liquidation; only an eligible one-shot post-fill
     // affordability event can trim it.
     void process_margin_call(const Bar& bar);
-    // Ordinary sub-contract shorts expose completed liquidation to the
-    // close-time script (R23 opening and carried-position TV controls).
+    // Ordinary subcontract shorts and integer MARKET lots expose completed
+    // liquidation to the close-time script (R23/R25/R28 TV controls).
     void process_short_margin_before_script(const Bar& bar);
     // An unchanged carried POOC short finishes its adverse-path margin event
     // before the close script observes or reverses it. The caller proves no
