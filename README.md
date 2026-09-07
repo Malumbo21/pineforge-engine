@@ -26,7 +26,7 @@
 
 TradingView's strategy tester is the reference every Pine author trusts, and nothing outside TradingView reproduced it — until now. PineForge is a C++17 runtime with a stable C ABI that runs PineScript v6 strategies exactly the way TradingView's broker emulator does: same fills, same sizing, same margin calls, same trailing stops, same `request.security()` buckets, on any OHLCV you give it, in microseconds per bar.
 
-- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,167 excellent, 23 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,127 matched by the verifier.
+- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,168 excellent, 22 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,133 matched by the verifier.
 - **Open.** Engine, transpiler, corpus, benchmarks and the validation tooling are all public and Apache-2.0. The only thing you cannot download is the closed test set, because TradingView's Terms of Service forbid redistributing community scripts.
 - **Fast.** In-process, no interpreter: median **162× faster than PyneCore** on 99 timed strategies. Parameter sweeps re-run a loaded `.so` with new inputs — no recompile, no fork.
 - **Deterministic to the bit.** Two runs with the same inputs produce identical trade lists. Same on Linux and macOS.
@@ -108,23 +108,23 @@ Every PineForge-compiled strategy `.so` exports this same ABI — write the harn
 
 ## Validation scoreboard
 
-**Round 24 · 2026-09-07:** **4,167 excellent / 23 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
+**Round 25 · 2026-09-07:** **4,168 excellent / 22 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
 
 | Board | Test set | Result | TradingView trades evaluated |
 |---|---|---|---|
 | **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | 429,866 |
-| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,858 excellent + 23 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
+| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,859 excellent + 22 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
 
-**2,819,967 TradingView trades** evaluated, **2,817,127 matched by the verifier** (99.90%), from the round 24 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
+**2,819,967 TradingView trades** evaluated, **2,817,133 matched by the verifier** (99.90%), from the round 25 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
 
-Round 24 improves the BTC/USDT 15m **Ajay Fibonacci Market Structure Pro AI V2.1** strategy from strong to excellent. All **4,850 trade rows** match TradingView exactly on side, time, price, and quantity. The engine fix uses shared broker state and order ownership; it contains no strategy, symbol, date, or benchmark-ID conditions. Grading rules, verifier, harness, population, and tapes are unchanged.
+Round 25 improves the BTC/USDT 15m **Inside Day Breakout** strategy from strong to excellent. All **386 trade rows** match TradingView exactly on side, time, price, and quantity. The engine now exposes margin liquidation after a stop entry at the bar open before the script runs, allowing the script to place its replacement on time while preserving an unhit pending entry. The fix uses shared broker state and order ownership; it contains no strategy, symbol, date, or benchmark-ID conditions. Grading rules, verifier, harness, population, and tapes are unchanged.
 
 ### The closed test, lane by lane
 
 | Market · timeframe | Probes | Excellent | Strong | Moderate |
 |---|---:|---:|---:|---:|
 | BINANCE:ETHUSDT.P · 15m *(hard lane: zero regression allowed)* | 395 | 394 | 1 | — |
-| BINANCE:BTCUSDT · 15m | 354 | 351 | 3 | — |
+| BINANCE:BTCUSDT · 15m | 354 | 352 | 2 | — |
 | BINANCE:BTCUSDT · 1D | 259 | 259 | — | — |
 | CME_MINI:ES1! · 15m | 174 | 173 | 1 | — |
 | CME_MINI:ES1! · 1D | 117 | 117 | — | — |
@@ -138,7 +138,7 @@ Round 24 improves the BTC/USDT 15m **Ajay Fibonacci Market Structure Pro AI V2.1
 | OANDA:EURUSD · 15m | 373 | 365 | 8 | — |
 | OANDA:XAUUSD · 15m | 376 | 374 | 2 | — |
 | OANDA:XAUUSD · 1D | 248 | 248 | — | — |
-| **Total** | **3,881** | **3,858** | **23** | **0** |
+| **Total** | **3,881** | **3,859** | **22** | **0** |
 
 ### How a probe is graded
 
