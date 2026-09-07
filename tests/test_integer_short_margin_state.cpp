@@ -26,6 +26,7 @@ public:
     double opening_view = qnan, carried_view = qnan, carried_average = qnan;
     double carried_balance = qnan;
     std::size_t carried_closed = 0;
+    uint64_t explicit_child_incarnation = 0, filled_parent_child_incarnation = 0;
     explicit IntegerScript(Mode value, double capital = 10315.59)
         : mode(value) {
         initial_capital_ = capital;
@@ -63,10 +64,24 @@ public:
             carried_balance = current_equity();
             carried_closed = trades_.size();
             if (mode == Mode::CARRIED_HALF) strategy_close("S", "half", std::floor(-carried_view / 2.0));
-            if (mode == Mode::DYNAMIC || mode == Mode::EXPLICIT) reverse(0.040359524400365);
+            if (mode == Mode::DYNAMIC || mode == Mode::EXPLICIT) {
+                reverse(0.040359524400365);
+                if (mode == Mode::EXPLICIT) {
+                    for (const auto& order : pending_orders_) {
+                        if (order.id == "XL") explicit_child_incarnation = order.incarnation;
+                    }
+                }
+            }
             if (mode == Mode::UNIT) strategy_entry("Observer", true, qnan, qnan, 1.0);
         }
-        if (signed_position_size() > 0.0 && bar_index_ >= 3 && mode != Mode::UNIT) {
+        if (mode == Mode::EXPLICIT && bar_index_ == 3) {
+            for (const auto& order : pending_orders_) {
+                if (order.id == "XL") filled_parent_child_incarnation = order.incarnation;
+            }
+        }
+        // The EXPLICIT child must survive on its original incarnation;
+        // reissuing it here would mask a lost pending-parent bracket.
+        if (signed_position_size() > 0.0 && bar_index_ >= 3 && mode == Mode::DYNAMIC) {
             strategy_exit("XL", "L", 10.63, 10.49);
         }
         if (bar_index_ == 5) strategy_close_all();
@@ -93,6 +108,10 @@ void test_revival_precedes_replacement_script() {
         CHECK(std::isnan(engine.carried_average));
         CHECK(near(engine.carried_balance, 10159.91));
         CHECK(engine.carried_closed == 3);
+        if (mode == Mode::EXPLICIT) {
+            CHECK(engine.explicit_child_incarnation != 0);
+            CHECK(engine.filled_parent_child_incarnation == engine.explicit_child_incarnation);
+        }
         CHECK(engine.rows().size() == 4);
         if (engine.rows().size() != 4) continue;
         CHECK(engine.rows()[0].exit_id == "__margin_call__");
@@ -168,7 +187,7 @@ void test_one_unit_adverse_high() {
 enum class Shape { CURRENT, UNKNOWN, OLD, FUTURE, HELD, OLD_HOLD, REISSUED, TRAIL,
                    FOREIGN, GLOBAL, UNPRICED, STOP_ORIGIN, OFF_GRID, BIG_STEP,
                    LIMIT_ONLY, PARTIAL, COARSE_FRACTIONAL, TRAIL_OFFSET, NAKED,
-                   PENDING_ENTRY };
+                   PENDING_ENTRY, INFINITE_PERCENT };
 class DormantCheckpoint : public BacktestEngine {
 public:
     explicit DormantCheckpoint(Shape shape) {
@@ -238,6 +257,7 @@ public:
             owned.stop_price = 110.0;
             owned.dormant_bracket = false;
             break;
+        case Shape::INFINITE_PERCENT: owned.qty_percent = INFINITY; break;
         case Shape::NAKED: pending_orders_.clear(); break;
         default: break;
         }
@@ -271,7 +291,7 @@ void test_dormant_lifetime_boundary() {
                         Shape::FOREIGN, Shape::GLOBAL, Shape::UNPRICED,
                         Shape::STOP_ORIGIN, Shape::OFF_GRID, Shape::LIMIT_ONLY,
                         Shape::PARTIAL, Shape::COARSE_FRACTIONAL,
-                        Shape::TRAIL_OFFSET, Shape::PENDING_ENTRY}) {
+                        Shape::TRAIL_OFFSET, Shape::PENDING_ENTRY, Shape::INFINITE_PERCENT}) {
         DormantCheckpoint other(shape);
         const double before = other.quantity();
         other.checkpoint();

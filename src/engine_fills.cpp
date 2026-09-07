@@ -1093,7 +1093,8 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
             && std::isnan(order.trail_offset)
             && std::isfinite(order.stop_price)
             && (std::isnan(order.qty)
-                ? order.qty_percent >= 100.0 - internal::kFullPercentEps
+                ? std::isfinite(order.qty_percent)
+                    && order.qty_percent >= 100.0 - internal::kFullPercentEps
                 : std::isfinite(order.qty) && order.qty >= position_qty_);
         // Other entries/closes, foreign/global and trailing brackets retain
         // their scheduling. A live own priced bracket already had its order
