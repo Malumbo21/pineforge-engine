@@ -1738,6 +1738,15 @@ protected:
 
     // --- Cached trade metrics (updated incrementally in execute_market_exit) ---
     double net_profit_sum_ = 0.0;
+    // Conservative absolute roundoff accumulated by additions to the cached
+    // net-profit sum. This is numerical provenance only: reported PnL and
+    // equity continue to use the unchanged sum above. Infinity means a
+    // narrower margin comparison cannot be justified from this history.
+    double net_profit_roundoff_bound_ = 0.0;
+    // The net value whose additions this bound tracked. Direct/synthetic or
+    // future restore writes without matching provenance cannot narrow the
+    // established margin comparison; the next trade makes them unbounded.
+    double net_profit_roundoff_value_ = 0.0;
     double gross_profit_sum_ = 0.0;
     double gross_loss_sum_ = 0.0;
     int win_trades_count_ = 0;

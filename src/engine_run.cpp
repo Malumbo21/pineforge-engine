@@ -650,6 +650,8 @@ void BacktestEngine::reset_run_state() {
     trades_.reserve(256);
     range_end_trades_.clear();
     net_profit_sum_ = 0.0;
+    net_profit_roundoff_bound_ = 0.0;
+    net_profit_roundoff_value_ = 0.0;
     gross_profit_sum_ = 0.0;
     gross_loss_sum_ = 0.0;
     win_trades_count_ = 0;

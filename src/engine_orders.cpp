@@ -688,7 +688,33 @@ void BacktestEngine::emit_close_trade(const PyramidEntry& pe, double close_qty,
     const double pnl = trade.pnl;
     const double trade_pnl = trade.pnl;
     trades_.push_back(std::move(trade));
+    const double previous_net_profit = net_profit_sum_;
     net_profit_sum_ += trade_pnl;
+    // Knuth TwoSum recovers this addition's exact binary64 residual without
+    // changing the authoritative cached sum. Accumulate absolute residuals
+    // upward so vanished intermediate profits cannot disappear from the
+    // uncertainty used by a later rounded-money margin comparison.
+    if (previous_net_profit == net_profit_roundoff_value_
+        && std::isfinite(previous_net_profit) && std::isfinite(trade_pnl)
+        && std::isfinite(net_profit_sum_)
+        && std::isfinite(net_profit_roundoff_bound_)) {
+        const double virtual_pnl = net_profit_sum_ - previous_net_profit;
+        const double residual =
+            (previous_net_profit - (net_profit_sum_ - virtual_pnl))
+            + (trade_pnl - virtual_pnl);
+        if (std::isfinite(residual)) {
+            if (residual != 0.0) {
+                net_profit_roundoff_bound_ = std::nextafter(
+                    net_profit_roundoff_bound_ + std::abs(residual),
+                    std::numeric_limits<double>::infinity());
+            }
+        } else {
+            net_profit_roundoff_bound_ = std::numeric_limits<double>::infinity();
+        }
+    } else {
+        net_profit_roundoff_bound_ = std::numeric_limits<double>::infinity();
+    }
+    net_profit_roundoff_value_ = net_profit_sum_;
     if (trade_pnl > 0) { gross_profit_sum_ += trade_pnl; win_trades_count_++; }
     else if (trade_pnl < 0) { gross_loss_sum_ += trade_pnl; loss_trades_count_++; }
     else { ++eventrades_count_; }  // strategy.eventrades: exact zero P&L (TV uses == 0)

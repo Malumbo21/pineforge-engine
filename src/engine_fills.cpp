@@ -1785,11 +1785,38 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
         // Only a ROUNDING deficit is this trigger's: the exact ledger must
         // still cover the position (a real shortfall — a fee, an adverse
         // mark — belongs to the established paths and their tolerances).
-        // Strict, with a float guard far below the pinned margins (the
-        // closest fire is 3.4e-6 under, revL L23): flat p0000 (C == cost, so
-        // equity == value == its rounding at the fill bar's low, up to the
-        // ulp of 925000 x 1.08094) is not called.
-        if (equity + 1e-7 >= value && equity + 1e-7 < rounded_value) {
+        // A real 1e-7 rounding deficit is observable in TV: Q = 891538.56
+        // at 1.15798, capital = 1032383.8221439, marked at 1.15808 has
+        // equity 1032472.9759999 against required money 1032472.976.
+        // The exact tie (+1e-7 capital) and funded controls do not fire.
+        // Only narrow the established guard when both current evaluation
+        // and accumulated realized-PnL roundoff support the decision. Fees
+        // and multiple live lots retain their existing numerical behavior.
+        double arithmetic_guard = 1e-7;
+        if (commission_value_ == 0.0 && position_entry_count_ == 1
+            && pyramid_entries_.size() == 1
+            && net_profit_sum_ == net_profit_roundoff_value_
+            && std::isfinite(net_profit_roundoff_bound_)) {
+            // A large prior loss must not inflate the scale of an identical
+            // current book. Its vanished intermediate summation residuals
+            // are represented separately by net_profit_roundoff_bound_.
+            const double entry_value = qty * position_entry_price_ * pv * fx;
+            const double money_scale = std::max({
+                std::abs(current_equity()), std::abs(open_profit(p)),
+                std::abs(entry_value), std::abs(value), std::abs(equity),
+                std::abs(rounded_value)});
+            const double evaluation_guard = 8.0
+                * std::numeric_limits<double>::epsilon() * money_scale;
+            const double supported_guard = std::nextafter(
+                evaluation_guard + net_profit_roundoff_bound_,
+                std::numeric_limits<double>::infinity());
+            // Never widen the prior boundary for a large account or an
+            // uncertain history; those books keep the established guard.
+            if (std::isfinite(supported_guard))
+                arithmetic_guard = std::min(arithmetic_guard, supported_guard);
+        }
+        if (equity + arithmetic_guard >= value
+            && equity + arithmetic_guard < rounded_value) {
             fire_price = p;
             deficit = rounded_value - equity;
             fire_path_point = i;
