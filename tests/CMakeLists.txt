@@ -1,4 +1,5 @@
 set(TEST_SOURCES
+    test_high_value_signal_cost
     test_short_margin_script_state
     test_ringbuffer
     test_timeframe

@@ -72,9 +72,10 @@ enum class PositionSide { FLAT, LONG, SHORT };
 // floors the ten-digit equity's raw double quotient 4583.999999999999 to
 // 4583, the float-accumulated ledger's 4584.000000000001 or a 1e-6-nudged
 // floor gives 4584, one share the account cannot pay at the 238.78 fill), so
-// rule 1 sizes every lot-stepped instrument (tv_money_lot_sizing); rules
-// 2 and 5 stay scoped by tv_money_scope — outside it the exact fill-price
-// admission already decides (1094521.681 -> Q 4584 dropped on AAPL). Rule 3
+// rule 1 sizes every lot-stepped instrument (tv_money_lot_sizing). Rule 2
+// additionally covers ordinary, fee-free high-value fractional lots (R24);
+// rule 5 stays scoped by tv_money_scope. Other admission keeps its existing
+// checks (1094521.681 -> Q 4584 dropped on AAPL). Rule 3
 // additionally covers ordinary MARKET-opened, fee/slippage-free single-position
 // fractional unit-pointvalue/same-currency books with lot value >=1 (R21 pins).
 //   5. WHOLE-ORDER DROP (round 9 family R follow-up, campaign notes
@@ -2009,6 +2010,47 @@ protected:
         const double lot_value = qty_step_ * price * syminfo_.pointvalue
                                  * active_account_currency_fx();
         return std::isfinite(lot_value) && lot_value < 1.0;
+    }
+    // R24 signal-cost controls: a fractional lot worth >=1 account unit can
+    // still cross the rounded-money admission boundary. BTC Q9.36259 at
+    // 112380.33 costs 1052170.9538547, rounded to 1052170.954; exact signal
+    // equity 1052170.9536054998 therefore keeps only a reversal's close leg.
+    // XAU Q300 at 3443.625 likewise rejects capital cost-0.0001, while exact
+    // cost and cost+0.0001 admit, despite the cheaper next opening price.
+    // This extends rule 2 alone; rule 5 and margin valuation keep their scope.
+    bool rounded_signal_cost_scope(const PendingOrder& order) const {
+        if (tv_money_scope(order.sizing_price)) return true;
+        if (!(qty_step_ > 0.0 && qty_step_ < 1.0)
+            || !std::isfinite(order.sizing_price) || order.sizing_price <= 0.0
+            || !std::isfinite(order.sizing_equity)
+            || !std::isfinite(order.frozen_default_qty)
+            || order.sizing_fx != 1.0 || active_account_currency_fx() != 1.0
+            || !account_currency_fx_timestamps_.empty()
+            || syminfo_.pointvalue != 1.0
+            || commission_value_ != 0.0 || slippage_ != 0
+            || process_orders_on_close_ || calc_on_order_fills_
+            || bar_magnifier_enabled_ || coof_scheduler_active_
+            || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
+            || pyramiding_ < 0 || pyramiding_ > 1
+            || position_entry_count_ > 1 || pyramid_entries_.size() > 1
+            || max_intraday_filled_orders_ > 0
+            || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
+            || risk_max_cons_loss_days_ > 0 || order.incarnation == 0) {
+            return false;
+        }
+        for (const auto& other : pending_orders_) {
+            if (other.incarnation == order.incarnation) continue;
+            // Coqueued unpriced strategy.close legs are part of the pins.
+            // Competing entries and priced/trailing brackets retain their
+            // existing admission and transaction-ordering paths.
+            if (other.type != OrderType::EXIT
+                || !std::isnan(other.limit_price) || !std::isnan(other.stop_price)
+                || !std::isnan(other.trail_points) || !std::isnan(other.trail_price)
+                || !std::isnan(other.profit_ticks) || !std::isnan(other.loss_ticks)) {
+                return false;
+            }
+        }
+        return true;
     }
     // Rule 1's scope (round 10 family AE): the ten-digit equity and the raw
     // lot floor size EVERY lot-stepped instrument — integer shares included

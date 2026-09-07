@@ -4974,7 +4974,7 @@ void BacktestEngine::apply_filled_order_to_state(
         && std::isfinite(order.sizing_price) && order.sizing_price > 0.0
         && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
         && std::abs(default_qty_value_ - 100.0) < 1e-12
-        && tv_money_scope(order.sizing_price)) {
+        && rounded_signal_cost_scope(order)) {
         const double margin_dir = order.is_long ? margin_long_ : margin_short_;
         const PositionSide requested_side =
             order.is_long ? PositionSide::LONG : PositionSide::SHORT;
@@ -5024,8 +5024,10 @@ void BacktestEngine::apply_filled_order_to_state(
                 }
                 order.affordability_close_only = true;
                 order.rounded_signal_cost_close_only = true;
-            } else if (!close_first_flat_open) {
+            } else if (!close_first_flat_open && tv_money_scope(order.sizing_price)) {
                 // Rule 5: the price-scale margin check (comment above).
+                // The R24 high-value fractional-lot extension pins rule 2
+                // only; it does not widen this independent price-scale rule.
                 const double notional_per_price =
                     order.frozen_default_qty * syminfo_.pointvalue * fx_s;
                 const double affordable_price = tv_money_round(
