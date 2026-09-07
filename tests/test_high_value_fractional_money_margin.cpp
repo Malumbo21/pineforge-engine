@@ -16,6 +16,8 @@ bool near(double a,double b){return std::abs(a-b)<1e-7;}
 class Probe : public BacktestEngine {
 public:
     double explicit_qty=qnan;
+    double entry_limit=qnan, entry_stop=qnan;
+    bool raw_order=false;
     Probe(double capital,double step,double tick) {
         initial_capital_=capital;default_qty_type_=QtyType::PERCENT_OF_EQUITY;
         default_qty_value_=100;qty_step_=step;syminfo_mintick_=tick;
@@ -28,7 +30,10 @@ public:
     void double_point_value(){syminfo_.pointvalue=2;}
     void larger_pyramid_cap(){pyramiding_=2;}
     void on_bar(const Bar&) override {
-        if(bar_index_==0)strategy_entry("L",true,qnan,qnan,explicit_qty);
+        if(bar_index_==0){
+            if(raw_order)strategy_order("L",true,explicit_qty,entry_limit,entry_stop);
+            else strategy_entry("L",true,entry_limit,entry_stop,explicit_qty);
+        }
         if(bar_index_==1)strategy_close("L");
     }
     int margin_count()const{
@@ -102,11 +107,31 @@ void test_other_money_paths_preserved(){
     cap.fixed_default();cap.explicit_qty=10.68387;cap.larger_pyramid_cap();
     run(cap,btc());check_margin(cap,0,0);
 }
+void test_priced_entries_do_not_enter_market_extension(){
+    for(bool stop : {false,true}){
+        Probe p(1125876.4774201,0.00001,0.01);
+        p.fixed_default();p.explicit_qty=10.68387;
+        if(stop)p.entry_stop=105380.95;else p.entry_limit=105380.97;
+        run(p,btc());check_margin(p,0,0);
+    }
+    Probe p(1129689.1229734,0.00001,0.01);
+    p.fixed_default();p.explicit_qty=10.68387;
+    p.entry_stop=105737.83;p.entry_limit=105737.82;
+    const std::vector<Bar> bars={
+        {105496.54,105737.84,105494.72,105737.82,100,1000},
+        {105737.82,105737.83,105458.83,105476.19,100,2000},
+        {105476.19,105551.68,105439.73,105490.68,100,3000}};
+    run(p,bars);check_margin(p,0,0);
+    Probe raw(1125876.4774201,0.00001,0.01);
+    raw.fixed_default();raw.explicit_qty=10.68387;raw.raw_order=true;
+    run(raw,btc());check_margin(raw,0,0);
+}
 }
 int main(){
     test_btc_cash_boundary();test_xau_opening_cash_boundary();
     test_btc_opening_valuation();
     test_continuous_and_integer_excluded();
     test_other_money_paths_preserved();
+    test_priced_entries_do_not_enter_market_extension();
     std::printf("%d passed, %d failed\n",passed,failures);return failures?1:0;
 }

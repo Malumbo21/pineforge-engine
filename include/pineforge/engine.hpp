@@ -75,8 +75,8 @@ enum class PositionSide { FLAT, LONG, SHORT };
 // rule 1 sizes every lot-stepped instrument (tv_money_lot_sizing); rules
 // 2 and 5 stay scoped by tv_money_scope — outside it the exact fill-price
 // admission already decides (1094521.681 -> Q 4584 dropped on AAPL). Rule 3
-// additionally covers ordinary, fee/slippage-free single-position fractional
-// unit-pointvalue/same-currency books with lot value >=1 (R21 BTC/XAU pins).
+// additionally covers ordinary MARKET-opened, fee/slippage-free single-position
+// fractional unit-pointvalue/same-currency books with lot value >=1 (R21 pins).
 //   5. WHOLE-ORDER DROP (round 9 family R follow-up, campaign notes
 //      log-20260905t205824z-af397c83 and log-20260905t210117z-ab914192;
 //      the residual of log-20260905t180249z-4bd857ad): once the rounded-cost
@@ -201,6 +201,9 @@ struct PyramidEntry {
     // physical lot by FIFO. Its logical slot cannot later be released merely
     // because an owner-bound bracket closes the last physical remainder.
     bool bracket_slot_shadowed = false;
+    // Exact ordinary MARKET fill at the next bar open. Priced/RAW entries
+    // cannot infer this provenance from an equal numeric entry price.
+    bool ordinary_market_open = false;
 };
 
 struct Trade {

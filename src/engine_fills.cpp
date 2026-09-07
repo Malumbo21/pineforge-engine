@@ -1500,7 +1500,8 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
 // 1.15217, 12-30 06:15Z H 1.17798); 0 false fires over 612 every-bar sensor
 // longs (their equity sits below 1e6). One broker event per bar, plain
 // close-calc dispatch only (the pinned tapes). R21 also pins fee/slippage-free
-// single-lot fractional books whose minimum lot is worth >=1 account unit:
+// single fractional lots opened by an ordinary MARKET entry, whose minimum
+// lot is worth >=1 account unit:
 // BTC Q10.68387 at105380.96, cash0.0003048999 fires1 at low105355.26;
 // +0.0001cash does not. BTC Q10.68388 and XAU Q300.01 with0.00001cash
 // fire at the opening price itself. Other money/admission scopes stay fixed.
@@ -1565,7 +1566,8 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
         && !process_orders_on_close_ && commission_value_ == 0.0 && slippage_ == 0
         && syminfo_.pointvalue == 1.0 && active_account_currency_fx() == 1.0
         && pyramiding_ >= 0 && pyramiding_ <= 1
-        && position_entry_count_ == 1 && pyramid_entries_.size() == 1;
+        && position_entry_count_ == 1 && pyramid_entries_.size() == 1
+        && pyramid_entries_.front().ordinary_market_open;
     if (!std::isfinite(bar.close) || bar.close <= 0.0
         || !(legacy_money_scope || high_value_fractional_scope)) return false;
     // Pinned on same-currency accounts only. A converted (quote -> account
@@ -1598,7 +1600,7 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
         start = seg + 1;
         // The newly covered high-value fractional pins include an immediate
         // post-entry valuation at O. Only a fill actually at O can inspect it;
-        // a priced entry later on the path still skips earlier waypoints.
+        // the exact MARKET-origin marker excludes priced and RAW entries.
         if (high_value_fractional_scope && fill_pos == 0.0
             && position_entry_price_ == round_to_mintick(bar.open)) start = 0;
     }
@@ -5741,6 +5743,17 @@ void BacktestEngine::apply_filled_order_to_state(
     }
 
     if (primary_fill_applied) {
+        if (order.type == OrderType::MARKET
+            && !process_orders_on_close_ && !calc_on_order_fills_
+            && !bar_magnifier_enabled_ && !coof_scheduler_active_
+            && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
+            && order.created_bar == bar_index_ - 1
+            && pyramid_entries_.size() == 1
+            && pyramid_entries_.front().entry_incarnation == order.incarnation
+            && pyramid_entries_.front().entry_bar_index == bar_index_
+            && position_entry_price_ == round_to_mintick(bar.open)) {
+            pyramid_entries_.front().ordinary_market_open = true;
+        }
         ++broker_fill_event_seq_;
     }
 
