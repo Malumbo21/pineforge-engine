@@ -192,6 +192,9 @@ void BacktestEngine::dispatch_bar() {
             && broker_fill_event_seq_ == fills_before_pending) {
             tv_money_long_margin_call(current_bar_, /*carried_pooc_pre_close=*/true);
         }
+        if (broker_fill_event_seq_ == fills_before_pending) {
+            process_carried_pooc_short_margin_before_script(current_bar_);
+        }
         update_per_trade_extremes();             // step 2: update before strategy reads
         invoke_chart_on_bar(current_bar_);       // step 3: strategy logic
         flush_same_bar_close();                  // step 3b: surviving strategy.close fill

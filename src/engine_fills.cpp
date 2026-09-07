@@ -1099,6 +1099,72 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
     }
 }
 
+// A carried POOC short owns the whole current bar before its terminal close
+// evaluation. The old order pass has completed without a broker fill, so an
+// unfilled owned bracket cannot postpone the high's margin event until after
+// the script closes or reverses the position. TV's partial-close control reads
+// -12.33168 after a .11264 liquidation, then closes half (6.16584); a reversal
+// closes that same reduced remainder and opens only its requested new quantity.
+// Fresh close fills and bars with an earlier fill keep their existing paths.
+void BacktestEngine::process_carried_pooc_short_margin_before_script(const Bar& bar) {
+    if (!process_orders_on_close_ || !margin_call_enabled_
+        || position_side_ != PositionSide::SHORT
+        || calc_on_order_fills_ || coof_scheduler_active_ || bar_magnifier_enabled_
+        || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
+        || position_open_bar_ < 0 || position_open_bar_ >= bar_index_
+        || bar.timestamp != current_bar_.timestamp
+        || !std::isfinite(bar.open) || !std::isfinite(bar.high)
+        || !std::isfinite(bar.low) || !std::isfinite(bar.close)
+        || !(position_qty_ > 0.0) || !std::isfinite(position_qty_)
+        || !(qty_step_ > 0.0 && qty_step_ < 1.0)
+        || pyramiding_ < 0 || pyramiding_ > 1
+        || position_entry_count_ != 1 || pyramid_entries_.size() != 1
+        || pyramid_entries_.front().entry_bar_index != position_open_bar_
+        || pyramid_entries_.front().entry_incarnation == 0
+        || pending_orders_.size() > 1
+        || commission_value_ != 0.0 || slippage_ != 0
+        || margin_short_ != 100.0 || syminfo_.pointvalue != 1.0
+        || active_account_currency_fx() != 1.0
+        || !account_currency_fx_timestamps_.empty()
+        || max_intraday_filled_orders_ > 0
+        || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
+        || risk_max_cons_loss_days_ > 0
+        || last_margin_call_event_bar_ == bar_index_) {
+        return;
+    }
+    // These controls cover exact required-margin valuation. A sub-account-unit
+    // lot uses the separately rounded-money cascade; its carried POOC state
+    // still has unresolved ownership/budget evidence and retains its existing
+    // scheduling. Use the broker's established financial class at this same
+    // adverse mark, rather than inferring the class from a symbol or strategy.
+    if (tv_money_scope(round_to_mintick(bar.high))) return;
+    for (const auto& order : pending_orders_) {
+        // The completed old-order pass proved this bracket unfilled. Reject
+        // competing entries/closes, foreign/global owners and deferred order
+        // lifecycles; none of those transactions is part of this checkpoint.
+        const bool priced = std::isfinite(order.limit_price)
+            || std::isfinite(order.stop_price);
+        const bool trailing = std::isfinite(order.trail_offset)
+            && (std::isfinite(order.trail_points) || std::isfinite(order.trail_price));
+        if (order.type != OrderType::EXIT
+            || order.from_entry != pyramid_entries_.front().entry_id
+            || order.created_bar >= bar_index_
+            || order.dormant_bracket || order.dormant_reissue_pending
+            || !std::isnan(order.profit_ticks) || !std::isnan(order.loss_ticks)
+            || (!priced && !trailing)) {
+            return;
+        }
+    }
+    const std::size_t trades_before = trades_.size();
+    process_margin_call(bar);
+    if (trades_.size() != trades_before) {
+        // A partial has consumed this high. A new close fill still receives
+        // its separate opening-affordability event after the script.
+        intrabar_exit_margin_call_bar_ = bar_index_;
+        if (position_side_ == PositionSide::FLAT) purge_exit_orders();
+    }
+}
+
 void BacktestEngine::process_margin_call(const Bar& bar) {
     // Consume first, including on disabled/degenerate paths. This is an event
     // attached to the just-completed fill cycle, never durable per-position

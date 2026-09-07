@@ -1899,6 +1899,10 @@ protected:
     // Ordinary sub-contract shorts expose completed liquidation to the
     // close-time script (R23 opening and carried-position TV controls).
     void process_short_margin_before_script(const Bar& bar);
+    // An unchanged carried POOC short finishes its adverse-path margin event
+    // before the close script observes or reverses it. The caller proves no
+    // resting order filled earlier on this bar.
+    void process_carried_pooc_short_margin_before_script(const Bar& bar);
     // finding-308: chronological pre-exit forced-liquidation slice. Called
     // from the process_pending_orders fill loop immediately BEFORE a priced
     // exit of the live position is applied. Fires only when (a) no margin
@@ -2015,6 +2019,51 @@ protected:
                                  * active_account_currency_fx();
         return std::isfinite(lot_value) && lot_value < 1.0;
     }
+    // POOC flat-parent controls: cost rounding also precedes admission at the
+    // terminal close. Named child brackets created after the sole pending
+    // parent have no live owner yet; they cannot compete for its opening cash.
+    bool rounded_pooc_flat_signal_cost_scope(const PendingOrder& order) const {
+        if (!process_orders_on_close_ || calc_on_order_fills_
+            || bar_magnifier_enabled_ || coof_scheduler_active_
+            || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
+            || order.type != OrderType::MARKET || order.incarnation == 0
+            || order.created_bar != bar_index_
+            || order.created_position_side != PositionSide::FLAT
+            || order.created_after_position_close_in_bar
+            || order.created_by_same_id_replacement
+            || order.oca_type != 0 || !order.oca_name.empty()
+            || position_side_ != PositionSide::FLAT
+            || position_entry_count_ != 0 || !pyramid_entries_.empty()
+            || !(qty_step_ > 0.0 && qty_step_ < 1.0)
+            || !std::isfinite(order.sizing_price) || order.sizing_price <= 0.0
+            || order.sizing_fx != 1.0 || active_account_currency_fx() != 1.0
+            || !account_currency_fx_timestamps_.empty()
+            || syminfo_.pointvalue != 1.0 || commission_value_ != 0.0
+            || slippage_ != 0 || pyramiding_ < 0 || pyramiding_ > 1
+            || max_intraday_filled_orders_ > 0
+            || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
+            || risk_max_cons_loss_days_ > 0 || pending_orders_.size() > 3) {
+            return false;
+        }
+        for (const auto& other : pending_orders_) {
+            if (other.incarnation == order.incarnation) continue;
+            const bool priced = std::isfinite(other.limit_price)
+                || std::isfinite(other.stop_price);
+            const bool trailing = std::isfinite(other.trail_offset)
+                && (std::isfinite(other.trail_points) || std::isfinite(other.trail_price));
+            if (other.type != OrderType::EXIT || other.from_entry.empty()
+                || other.created_bar != order.created_bar
+                || other.created_seq <= order.created_seq
+                || other.dormant_bracket || other.dormant_reissue_pending
+                || (!priced && !trailing)) {
+                return false;
+            }
+            // Matching from_entry attaches only if this parent is admitted.
+            // A different named from_entry has neither a live lot (flat) nor
+            // another pending parent (every other object is an EXIT).
+        }
+        return true;
+    }
     // R24 signal-cost controls: a fractional lot worth >=1 account unit can
     // still cross the rounded-money admission boundary. BTC Q9.36259 at
     // 112380.33 costs 1052170.9538547, rounded to 1052170.954; exact signal
@@ -2024,6 +2073,7 @@ protected:
     // This extends rule 2 alone; rule 5 and margin valuation keep their scope.
     bool rounded_signal_cost_scope(const PendingOrder& order) const {
         if (tv_money_scope(order.sizing_price)) return true;
+        if (rounded_pooc_flat_signal_cost_scope(order)) return true;
         if (!(qty_step_ > 0.0 && qty_step_ < 1.0)
             || !std::isfinite(order.sizing_price) || order.sizing_price <= 0.0
             || !std::isfinite(order.sizing_equity)

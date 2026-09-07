@@ -1,5 +1,7 @@
 set(TEST_SOURCES
     test_stop_open_margin_script_state
+    test_carried_pooc_short_margin_state
+    test_pooc_flat_signal_cost
     test_high_value_signal_cost
     test_short_margin_script_state
     test_ringbuffer
