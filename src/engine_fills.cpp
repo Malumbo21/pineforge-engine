@@ -997,6 +997,46 @@ bool BacktestEngine::entry_bar_post_fill_adverse(const Bar& bar,
     return true;
 }
 
+// R23 BTC Rhyme17: the 13:45 opening short (0.08733 @ 115842.33) is fully
+// liquidated at H=115852.95 before the script places a replacement. The
+// script therefore reads position_size=0 and position_avg_price=na. Running
+// this checkpoint after the script instead creates a bracket from the dead
+// entry's average, which then closes the replacement one bar too early.
+//
+// Covered TV controls also expose a partial's reduced size (-0.08729) to a
+// 50% close, keep a funded short, and preserve an explicit bracket issued for
+// the pending replacement. Reuse the existing broker arithmetic and settle
+// it before the script in this bounded, interaction-free opening topology.
+void BacktestEngine::process_opening_short_margin_before_script(const Bar& bar) {
+    if (!margin_call_enabled_ || position_side_ != PositionSide::SHORT
+        || !entry_bar_margin_path_scope()
+        || bar.timestamp != current_bar_.timestamp
+        || !pending_orders_.empty()
+        || !(position_qty_ > 0.0 && position_qty_ <= 1.0)
+        || !(qty_step_ > 0.0 && qty_step_ < 1.0)
+        || pyramiding_ < 0 || pyramiding_ > 1
+        || position_entry_count_ != 1 || pyramid_entries_.size() != 1
+        || !pyramid_entries_.front().ordinary_market_open
+        || pyramid_entries_.front().entry_bar_index != bar_index_
+        || commission_value_ != 0.0 || slippage_ != 0
+        || margin_short_ != 100.0 || syminfo_.pointvalue != 1.0
+        || active_account_currency_fx() != 1.0
+        || !account_currency_fx_timestamps_.empty()
+        || max_intraday_filled_orders_ > 0
+        || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
+        || risk_max_cons_loss_days_ > 0
+        || last_margin_call_event_bar_ == bar_index_) {
+        return;
+    }
+    const std::size_t trades_before = trades_.size();
+    process_margin_call(bar);
+    if (trades_.size() != trades_before) {
+        // The opening checkpoint and its adverse retry have both completed.
+        // A surviving partial must not revisit that high after the script.
+        intrabar_exit_margin_call_bar_ = bar_index_;
+    }
+}
+
 void BacktestEngine::process_margin_call(const Bar& bar) {
     // Consume first, including on disabled/degenerate paths. This is an event
     // attached to the just-completed fill cycle, never durable per-position

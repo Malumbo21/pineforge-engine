@@ -1891,6 +1891,9 @@ protected:
     // adverse-price liquidation; only an eligible one-shot post-fill
     // affordability event can trim it.
     void process_margin_call(const Bar& bar);
+    // Ordinary fresh sub-contract shorts with no resting orders expose their
+    // opening-bar liquidation to the close-time script (R23 TV controls).
+    void process_opening_short_margin_before_script(const Bar& bar);
     // finding-308: chronological pre-exit forced-liquidation slice. Called
     // from the process_pending_orders fill loop immediately BEFORE a priced
     // exit of the live position is applied. Fires only when (a) no margin

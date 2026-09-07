@@ -76,6 +76,7 @@ double BacktestEngine::active_account_currency_fx() const {
 // evaluation. The latter installs its own scope around every security
 // evaluator dispatch and restores the prior thread-local value on return.
 void BacktestEngine::invoke_chart_on_bar(const Bar& bar) {
+    process_opening_short_margin_before_script(bar);
     struct ChartEmaNaWarmupScope {
         bool previous;
         explicit ChartEmaNaWarmupScope(bool enabled)
