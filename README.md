@@ -26,7 +26,7 @@
 
 TradingView's strategy tester is the reference every Pine author trusts, and nothing outside TradingView reproduced it — until now. PineForge is a C++17 runtime with a stable C ABI that runs PineScript v6 strategies exactly the way TradingView's broker emulator does: same fills, same sizing, same margin calls, same trailing stops, same `request.security()` buckets, on any OHLCV you give it, in microseconds per bar.
 
-- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,171 excellent, 19 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,219 matched by the verifier.
+- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,172 excellent, 18 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,239 matched by the verifier.
 - **Open.** Engine, transpiler, corpus, benchmarks and the validation tooling are all public and Apache-2.0. The only thing you cannot download is the closed test set, because TradingView's Terms of Service forbid redistributing community scripts.
 - **Fast.** In-process, no interpreter: median **162× faster than PyneCore** on 99 timed strategies. Parameter sweeps re-run a loaded `.so` with new inputs — no recompile, no fork.
 - **Deterministic to the bit.** Two runs with the same inputs produce identical trade lists. Same on Linux and macOS.
@@ -108,16 +108,16 @@ Every PineForge-compiled strategy `.so` exports this same ABI — write the harn
 
 ## Validation scoreboard
 
-**Round 28 · 2026-09-07:** **4,171 excellent / 19 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
+**Round 29 · 2026-09-07:** **4,172 excellent / 18 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
 
 | Board | Test set | Result | TradingView trades evaluated |
 |---|---|---|---|
 | **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | 429,866 |
-| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,862 excellent + 19 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
+| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,863 excellent + 18 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
 
-**2,819,967 TradingView trades** evaluated, **2,817,219 matched by the verifier** (99.90%), from the round 28 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
+**2,819,967 TradingView trades** evaluated, **2,817,239 matched by the verifier** (99.90%), from the round 29 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
 
-Round 28 improves the Ford (NYSE:F) 15m **Trendline and Horizontal Breakout [Rhyme17]** strategy from strong to excellent, with **100% trade matching and zero count gap**. The engine settles completed integer short margin events and their revived exits before the script evaluates replacement orders, so those orders read the current position state. Existing margin arithmetic and fill prices are unchanged. The fix uses broker position and order ownership, with no strategy, symbol, date, or benchmark-ID conditions. Grading rules, verifier, harness, population, and tapes are unchanged.
+Round 29 improves the EUR/USD 15m **Regime Execution Strategy [JOAT]** from strong to excellent, with **100% trade matching and zero count gap**. The filled-order limit now resets on the supplied symbol session clock across order placement, fills, and direct closes. Its broker day remains independent of holiday bars combined by the indicator calendar; continuous-session behavior and other risk-day rules are unchanged. The fix uses the existing symbol configuration, with no strategy, symbol, date, or benchmark-ID conditions. Grading rules, verifier, harness, population, and tapes are unchanged.
 
 ### The closed test, lane by lane
 
@@ -135,10 +135,10 @@ Round 28 improves the Ford (NYSE:F) 15m **Trendline and Horizontal Breakout [Rhy
 | NSE:NIFTY · 1D | 145 | 145 | — | — |
 | NYSE:F · 15m | 340 | 336 | 4 | — |
 | NYSE:F · 1D | 263 | 263 | — | — |
-| OANDA:EURUSD · 15m | 373 | 366 | 7 | — |
+| OANDA:EURUSD · 15m | 373 | 367 | 6 | — |
 | OANDA:XAUUSD · 15m | 376 | 374 | 2 | — |
 | OANDA:XAUUSD · 1D | 248 | 248 | — | — |
-| **Total** | **3,881** | **3,862** | **19** | **0** |
+| **Total** | **3,881** | **3,863** | **18** | **0** |
 
 ### How a probe is graded
 
