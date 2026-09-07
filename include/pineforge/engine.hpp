@@ -1916,11 +1916,12 @@ protected:
                                               const Bar* chart_bar = nullptr);
 
     // TradingView forced-liquidation (margin call). Finite-price liquidation
-    // paths use the bar's adverse extreme. A 100%-margin long has no later
-    // adverse-price liquidation; only an eligible one-shot post-fill
-    // affordability event can trim it.
-    void process_carried_long_money_before_priced_orders(const Bar& bar);
+    // paths use the bar's adverse extreme. A 100%-margin long instead uses
+    // opening affordability and the separately scoped rounded-money checks.
     void process_margin_call(const Bar& bar);
+    // Settle an opening money restore before a later eligible owned exit,
+    // retaining the actual chart bar for financial-class eligibility.
+    void process_carried_long_money_before_priced_orders(const Bar& bar);
     // Ordinary subcontract shorts and integer MARKET lots expose completed
     // liquidation to the close-time script (R23/R25/R28 TV controls).
     void process_short_margin_before_script(const Bar& bar);
