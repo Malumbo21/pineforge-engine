@@ -2484,11 +2484,11 @@ protected:
                 // Reject (qty 0) on a non-finite / non-positive fill price — a
                 // degenerate $0/NaN print must NOT size as the raw % number.
                 if (!(std::isfinite(basis) && basis > 0)) return 0.0;
-                // round 8 family R, rule 1 (tv_money_floor_lot above): on
-                // ten-digit money the broker's lot floor is the raw double
-                // floor of sig10(E) / tick(close) — the 1e-6 nudge of
-                // apply_qty_step would hand the everybar 1.085 placement one
-                // lot more than TradingView filled.
+                // Rule 1 floors the rounded-equity quantity onto the lot
+                // grid via tv_money_floor_lot, including its guarded recovery
+                // of a representable cent-lot point. No representation nudge:
+                // apply_qty_step's epsilon would still over-size the pinned
+                // everybar 1.085 placement by one lot.
                 if (tv_money_lot_sizing()) {
                     return tv_money_floor_lot(cash / (basis * syminfo_.pointvalue),
                                               qty_step_);
