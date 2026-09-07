@@ -34,7 +34,7 @@ std::vector<Bar> bars() {
         make_bar(6, 1.12154, 1.12198, 1.11798, 1.11866),
     };
 }
-enum class Mode { Bracket, Funded, OpenRace, Half, Stop, Disabled };
+enum class Mode { Bracket, Funded, OpenRace, NonpositiveOpen, Half, Stop, Disabled };
 class Probe : public BacktestEngine {
     Mode mode_;
 public:
@@ -55,12 +55,15 @@ public:
     void on_bar(const Bar& b) override {
         if (bar_index_ == 0) {
             strategy_entry("Owned", true);
-            if (mode_ != Mode::OpenRace && mode_ != Mode::Stop)
+            if (mode_ != Mode::OpenRace && mode_ != Mode::NonpositiveOpen
+                && mode_ != Mode::Stop)
                 strategy_exit("Bracket", "Owned", mode_ == Mode::Half ? 1.2 : b.close * 1.003,
                               mode_ == Mode::Half ? kNa : b.close * 0.998);
         }
         if (bar_index_ == 3) {
             if (mode_ == Mode::OpenRace) strategy_exit("AtOpen", "Owned", 1.12373, kNa);
+            if (mode_ == Mode::NonpositiveOpen)
+                strategy_exit("FiniteAtOpen", "Owned", -1.0, 1.11839);
             if (mode_ == Mode::Stop) strategy_exit("Stop", "Owned", kNa, 1.12365);
         }
         if (bar_index_ == 4) {
@@ -116,6 +119,9 @@ int main() {
     // the take-profit has already filled. Do not pre-process that future point.
     check_priced_exit(Mode::Funded, false, 1.12401);
     check_priced_exit(Mode::OpenRace, false, 1.12373);
+    // A finite nonpositive limit is still marketable at this positive open;
+    // a valid stop sibling must not hide its established opening priority.
+    check_priced_exit(Mode::NonpositiveOpen, false, 1.12373);
     check_priced_exit(Mode::Stop, true, 1.12365);
     check_priced_exit(Mode::Disabled, false, 1.12401);
     check_script_after_open_call();

@@ -234,8 +234,10 @@ void BacktestEngine::process_carried_long_money_before_priced_orders(
     const bool has_stop = std::isfinite(order.stop_price) && order.stop_price > 0.0;
     if (!has_limit && !has_stop) return;
     const double open = broker_trigger_bar(bar).open;
-    if ((has_limit && open >= order.limit_price)
-        || (has_stop && open <= order.stop_price)) return;
+    // Every finite leg participates in opening marketability. A nonpositive
+    // limit can still be marketable; do not ignore it beside a valid stop.
+    if ((std::isfinite(order.limit_price) && open >= order.limit_price)
+        || (std::isfinite(order.stop_price) && open <= order.stop_price)) return;
 
     // Only the opening checkpoint precedes every eligible exit. The normal
     // end-of-bar call owns later waypoints; a successful trim already records
