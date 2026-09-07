@@ -185,9 +185,70 @@ void BacktestEngine::finalize_same_bar_market_tx_book() {
     }
 }
 
+// A carried long can owe the broker's one-contract money-rounding trim at
+// the OPEN before its resting take-profit/stop is reached later on the path.
+// The full-bar exit pass used to erase that position first. Covered controls
+// keep an exit already marketable at O ahead of the trim, and do not borrow a
+// rounding deficit that occurs only at the final close after a TP has filled.
+void BacktestEngine::process_carried_long_money_before_priced_orders(
+        const Bar& bar) {
+    if (!margin_call_enabled_ || position_side_ != PositionSide::LONG
+        || process_orders_on_close_ || calc_on_order_fills_
+        || bar_magnifier_enabled_ || coof_scheduler_active_
+        || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
+        || position_open_bar_ < 0 || position_open_bar_ >= bar_index_
+        || bar.timestamp != current_bar_.timestamp
+        || pending_orders_.size() != 1 || pyramid_entries_.size() != 1
+        || position_entry_count_ != 1 || !(position_qty_ > 1.0)
+        || pyramid_entries_.front().entry_bar_index >= bar_index_
+        || commission_value_ != 0.0 || slippage_ != 0
+        || margin_long_ != 100.0 || syminfo_.pointvalue != 1.0
+        || active_account_currency_fx() != 1.0
+        || !account_currency_fx_timestamps_.empty()
+        || max_intraday_filled_orders_ > 0
+        || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
+        || risk_max_cons_loss_days_ > 0
+        || !std::isfinite(bar.open) || !(bar.open > 0.0)
+        || !std::isfinite(bar.high) || !std::isfinite(bar.low)
+        || !std::isfinite(bar.close)) return;
+
+    const auto& order = pending_orders_.front();
+    const auto& entry = pyramid_entries_.front();
+    if (order.type != OrderType::EXIT || entry.entry_id.empty()
+        || order.from_entry != entry.entry_id
+        || order.created_bar >= bar_index_
+        || order.dormant_bracket || order.dormant_reissue_pending
+        || order.suppress_as_declined_reversal_close
+        || !order.oca_name.empty() || order.oca_type != 0
+        || !std::isnan(order.trail_points)
+        || !std::isnan(order.trail_offset) || !std::isnan(order.trail_price)
+        || (!std::isnan(order.limit_price) && !std::isfinite(order.limit_price))
+        || (!std::isnan(order.stop_price) && !std::isfinite(order.stop_price))) return;
+    // The covered book has one ordinary own full-position reservation. Keep
+    // partial-reservation and sibling ownership races on their existing path.
+    if (std::isnan(order.qty)) {
+        if (!std::isfinite(order.qty_percent) || order.qty_percent < 100.0) return;
+    } else if (!std::isfinite(order.qty)
+               || order.qty < position_qty_ - kQtyEpsilon) return;
+    const bool has_limit = std::isfinite(order.limit_price) && order.limit_price > 0.0;
+    const bool has_stop = std::isfinite(order.stop_price) && order.stop_price > 0.0;
+    if (!has_limit && !has_stop) return;
+    const double open = broker_trigger_bar(bar).open;
+    if ((has_limit && open >= order.limit_price)
+        || (has_stop && open <= order.stop_price)) return;
+
+    // Only the opening checkpoint precedes every eligible exit. The normal
+    // end-of-bar call owns later waypoints; a successful trim already records
+    // its consumed bar and retains the bracket on the surviving physical lot.
+    Bar opening = bar;
+    opening.high = opening.low = opening.close = opening.open;
+    tv_money_long_margin_call(opening);
+}
+
 void BacktestEngine::process_pending_orders(const Bar& bar) {
     // Update risk state
     update_risk_state();
+    process_carried_long_money_before_priced_orders(bar);
     finalize_default_flat_market_gross_admission();
     finalize_pending_flat_market_pairs(bar);
     finalize_same_bar_market_tx_book();

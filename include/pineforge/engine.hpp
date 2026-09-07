@@ -1919,6 +1919,7 @@ protected:
     // paths use the bar's adverse extreme. A 100%-margin long has no later
     // adverse-price liquidation; only an eligible one-shot post-fill
     // affordability event can trim it.
+    void process_carried_long_money_before_priced_orders(const Bar& bar);
     void process_margin_call(const Bar& bar);
     // Ordinary subcontract shorts and integer MARKET lots expose completed
     // liquidation to the close-time script (R23/R25/R28 TV controls).
