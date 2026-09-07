@@ -6870,8 +6870,8 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
 
     // R20 owner/FIFO contrast: with two distinct live entry IDs, a bracket
     // that retires its own unique oldest lot releases that slot. A B-bound
-    // exit merely draining A by FIFO still occupies B's logical reservation
-    // and keeps the existing monotone count (the thula ETH March pin).
+    // exit merely draining A by FIFO leaves A's drained logical slot pinned
+    // while B still occupies its live slot (the thula ETH March pin).
     // Remember the exact physical owner, then prove its retirement below;
     // no slot is returned for a partial slice or a different lot's closure.
     uint64_t releasable_owned_slot = 0;
