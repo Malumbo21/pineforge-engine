@@ -139,6 +139,7 @@ set(TEST_SOURCES
     test_fams_same_bar_market_tx
     test_default_flat_market_gross_admission
     test_tv_money_precision
+    test_cent_lot_decimal_scale
     test_tv_money_band
     test_famag_close_survives
     test_close_percent_calltime_basis

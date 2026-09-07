@@ -136,11 +136,21 @@ inline double tv_money_round(double value) {
     return value < 0.0 ? -rounded : rounded;
 }
 // The broker's lot floor on ten-digit money (rule 1): the RAW double floor
-// of qty / step, no representation nudge — the nudge would promote the
-// 918062.29999999992 quotient above to 918062.30, one lot more than TV.
+// of the scaled quantity, no representation nudge — a nudge would promote
+// the 918062.29999999992 quotient above to918062.30, one lot more than TV.
+// R22 cent-lot pins: division by binary64(0.01) can lose a grid point that
+// is exactly representable by qty. Try the *100 candidate only when its
+// reconstructed grid quantity does not exceed the input. The 1.169 pin
+// keeps8595.81; the older 1.085 pin still floors918062.29999999993 to918062.29
+// because the next grid point is above that input. Other scales stay unchanged.
 inline double tv_money_floor_lot(double qty, double step) {
     if (!(step > 0.0) || !std::isfinite(qty) || qty <= 0.0) return qty;
-    const double floored = std::floor(qty / step) * step;
+    double floored = std::floor(qty / step) * step;
+    if (step == 0.01) {
+        const double cent_candidate = std::floor(qty * 100.0) * step;
+        if (cent_candidate > floored && cent_candidate <= qty)
+            floored = cent_candidate;
+    }
     return floored < qty ? floored : qty;
 }
 
