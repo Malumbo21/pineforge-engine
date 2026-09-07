@@ -5703,6 +5703,52 @@ void BacktestEngine::apply_filled_order_to_state(
             const double held_qty =
                 std::isfinite(order.affordability_held_qty)
                     ? order.affordability_held_qty : 0.0;
+            // Explicit fixed quantities use the same two-stage price-scale
+            // admission as default all-in sizing. The actual lot-floored
+            // contracts must fit the rounded placement balance at the
+            // tick-built signal price. Fees remain a separate post-fill
+            // margin concern; the existing signal/fill cost check follows.
+            // Covered ordinary flat-parent controls pin both directions,
+            // percent fees, one-lot perturbations and the rounded-equity
+            // transition. Keep other order lifecycles and financial modes
+            // on their existing admission paths.
+            const bool explicit_price_scope =
+                std::isfinite(order.qty) && order.qty > 0.0
+                && (order.qty_type < 0
+                    || order.qty_type == static_cast<int>(QtyType::FIXED))
+                && position_side_ == PositionSide::FLAT
+                && order.created_position_side == PositionSide::FLAT
+                && !order.created_after_position_close_in_bar
+                && !order.created_by_same_id_replacement
+                // FIXED/no-fee orders carry the transaction marker even
+                // when no sibling exists. Exclude an expanded transaction,
+                // not an otherwise-unused default sizing declaration.
+                && (!order.sbmt_member
+                    || (order.sbmt_tx_qty == order.sbmt_own_qty
+                        && !order.sbmt_kept_over_cap))
+                && order.created_bar == bar_index_ - 1
+                && order.oca_type == 0 && order.oca_name.empty()
+                && pending_orders_.size() == 1
+                && margin_long_ == 100.0 && margin_short_ == 100.0
+                && qty_step_ > 0.0 && qty_step_ < 1.0
+                && syminfo_.pointvalue == 1.0
+                && account_currency_fx_ == 1.0 && account_currency_fx_timestamps_.empty()
+                && slippage_ == 0 && commission_type_ == CommissionType::PERCENT
+                && !process_orders_on_close_ && !calc_on_order_fills_
+                && !coof_scheduler_active_ && !bar_magnifier_enabled_
+                && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
+                && order.affordability_placement_equity > 0.0
+                && std::isfinite(own_qty) && own_qty > 0.0
+                && tv_money_scope(order.affordability_signal_price);
+            if (explicit_price_scope) {
+                const double affordable_price = tv_money_round(
+                    tv_money_round(order.affordability_placement_equity) / own_qty);
+                if (std::isfinite(affordable_price)
+                    && affordable_price < order.affordability_signal_price) {
+                    decline_and_cancel();
+                    return;
+                }
+            }
             const double admit_price =
                 std::max(order.affordability_signal_price, tick_fill);
             const double required_margin =

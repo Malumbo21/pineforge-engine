@@ -1,5 +1,6 @@
 set(TEST_SOURCES
     test_placement_rejection_bracket_ownership
+    test_explicit_market_price_admission
     test_integer_short_margin_state
     test_intraday_order_session_day
     test_open_money_before_priced_exit
