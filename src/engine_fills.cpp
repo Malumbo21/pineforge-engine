@@ -5717,17 +5717,18 @@ void BacktestEngine::apply_filled_order_to_state(
     // Check max_intraday_filled_orders limit.
     //
     // TV's broker emulator (LATCH-TILL-DAY-ROLLOVER semantics):
-    //   1. Track fills on the current chart-day. When the Nth fill
+    //   1. Track fills on the current broker day. When the Nth fill
     //      (== max_intraday_filled_orders) lands and the resulting
     //      position is non-flat, TV synthesises a full close at the
     //      SAME BAR / SAME FILL PRICE tagged
     //      "Close Position (Max number of filled orders in one day)".
     //   2. After the synthetic close fires, a LATCH (intraday_cap_hit_)
-    //      is set. ALL subsequent fills on that chart-day are silently
-    //      rejected — TV emits at most one cap-close per chart-day.
-    //   3. The latch (and the counter) reset only at chart-day rollover.
+    //      is set. ALL subsequent fills on that broker day are silently
+    //      rejected — TV emits at most one cap-close per broker day.
+    //   3. The latch/counter reset on the unmerged symbol session clock,
+    //      or the existing chart-date fallback for continuous sessions.
     //
-    // Verified empirically against validation probe 97b's tv_trades.csv:
+    // Verified on continuous-session probe97b's chart-day tv_trades.csv:
     //   - 382 cap-close exits across 13 months of data (~one per
     //     chart-day where the cap fires). NOT multiple per day.
     //   - cap-trigger entry + synthetic close share the same timestamp

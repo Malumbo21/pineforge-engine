@@ -113,11 +113,73 @@ void test_continuous_and_unconfigured_sessions_keep_chart_clock() {
         CHECK(!shifted.latched_at(1744243200000LL+16*hour));
     }
 }
+
+// Covered ES holiday oracle: the May26 17:00 Chicago reopen accepts a fresh
+// six-fill budget although time("D") still returns the May25 daily stamp.
+// A broker counter must not inherit the optional merged indicator calendar.
+void test_native_holiday_merge_does_not_hold_broker_limit() {
+    constexpr int64_t sunday_open = 1748210400000LL;
+    constexpr int64_t monday_open = sunday_open + 24*hour;
+    constexpr int64_t tuesday_open = sunday_open + 48*hour;
+    constexpr int64_t wednesday_open = sunday_open + 72*hour;
+    NativeDayPartition partition;
+    partition.tz = "America/Chicago";
+    partition.session = "1700-1600";
+    partition.stamps = {sunday_open, tuesday_open};
+    partition.trade_day = {
+        session_day_index(tuesday_open-hour, partition.tz, partition.session),
+        session_day_index(wednesday_open-hour, partition.tz, partition.session),
+    };
+    partition.last_bound = wednesday_open-hour;
+    NativeDayPartitionScope scope(&partition);
+    const auto indicator_day = session_day_index(sunday_open, partition.tz, partition.session);
+    CHECK(session_day_index(monday_open, partition.tz, partition.session) == indicator_day);
+    for (const char* display_zone : {"UTC", "Asia/Taipei"}) {
+        LegacyClock engine;
+        engine.set_syminfo_timezone(partition.tz);
+        engine.set_syminfo_session(partition.session);
+        engine.set_chart_timezone(display_zone);
+        engine.exhaust_at(sunday_open+hour);
+        CHECK(engine.latched_at(monday_open-minute));
+        CHECK(!engine.latched_at(monday_open));
+        engine.exhaust_at(monday_open+hour);
+        CHECK(engine.latched_at(tuesday_open-minute));
+        CHECK(!engine.latched_at(tuesday_open));
+    }
+    CHECK(active_native_day_partition() == &partition);
+    CHECK(session_day_index(monday_open, partition.tz, partition.session) == indicator_day);
+}
+
+void test_other_timed_sessions_resume_on_the_next_open() {
+    struct Market {
+        const char* timezone;
+        const char* session;
+        int64_t open;
+        int64_t before_reopen;
+    };
+    constexpr int64_t day = 1748304000000LL; // May27 UTC
+    for (const Market market : {
+            Market{"America/New_York", "0930-1600", day+13*hour+30*minute, minute},
+            Market{"America/Chicago", "1700-1600", day+22*hour, minute},
+            // The metal market's daily stamp is17:00, in its closed hour;
+            // inspect its last trading hour and its actual18:00 reopen.
+            Market{"America/New_York", "1800-1700", day+22*hour, 2*hour}}) {
+        LegacyClock engine;
+        engine.set_syminfo_timezone(market.timezone);
+        engine.set_syminfo_session(market.session);
+        engine.set_chart_timezone("Asia/Taipei");
+        engine.exhaust_at(market.open+hour);
+        CHECK(engine.latched_at(market.open+24*hour-market.before_reopen));
+        CHECK(!engine.latched_at(market.open+24*hour));
+    }
+}
 }
 
 int main() {
     test_session_boundary_uses_exchange_clock_and_dst();
     test_continuous_and_unconfigured_sessions_keep_chart_clock();
+    test_native_holiday_merge_does_not_hold_broker_limit();
+    test_other_timed_sessions_resume_on_the_next_open();
     std::printf("%d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;
 }

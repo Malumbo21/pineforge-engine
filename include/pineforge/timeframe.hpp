@@ -141,6 +141,12 @@ bool tf_change(int64_t prev_ms, int64_t curr_ms, const std::string& tf,
 int64_t session_day_index(int64_t ms, const std::string& tz,
                           const std::string& session);
 
+/// Broker trading-day ordinal on the unmerged symbol session clock. A native
+/// daily bar may combine holiday sessions, but each session still renews the
+/// intraday order budget. This function never reads the native D partition.
+int64_t session_trading_day_index(int64_t ms, const std::string& tz,
+                                  const std::string& session);
+
 /// Open (Unix ms) of the symbol's D/W/M bar that contains `ms`: the day
 /// stamp of the period's first session-day (17:00 ET on OANDA 1800-1700,
 /// the session open elsewhere). CalendarPeriod::NONE returns `ms` unchanged.

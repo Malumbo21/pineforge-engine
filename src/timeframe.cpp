@@ -467,6 +467,11 @@ const NativeDayPartition* active_native_day_partition() {
     return g_active_day_partition;
 }
 
+int64_t session_trading_day_index(int64_t ms, const std::string& tz,
+                                  const std::string& session) {
+    return session_day_index_nominal(ms, tz, session);
+}
+
 int64_t session_day_index(int64_t ms, const std::string& tz,
                           const std::string& session) {
     // Under the chart's native daily partition the ordinal is the period's

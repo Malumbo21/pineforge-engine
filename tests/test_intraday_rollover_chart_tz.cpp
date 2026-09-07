@@ -1,12 +1,10 @@
 // test_intraday_rollover_chart_tz.cpp — pin down the chart-timezone
 // rollover semantics of ``BacktestEngine::_decompose_bar_time_chart_tz()``.
 //
-// This is the helper consumed by the three intraday-day rollover gates
-// (``max_intraday_filled_orders`` in engine_fills.cpp, the loss-day
-// counter in engine_orders.cpp, and ``max_intraday_loss`` in
-// engine_risk.cpp). Pre-fix the gates rolled at UTC 00:00; post-fix
-// they roll at chart 00:00 — which is what TradingView's broker
-// emulator does, keyed off the chart's display TZ.
+// The loss-day rules and the continuous/unconfigured-session order counter
+// consume this helper. They retain the validated chart-midnight boundary.
+// A timed-session order counter instead uses the unmerged symbol session
+// clock, covered separately by test_intraday_order_session_day.cpp.
 //
 // Surfaced by the validation probe
 // ``corpus/validation/97-tp-sl-gap-reversal-oca`` (UTC+8 chart): 234

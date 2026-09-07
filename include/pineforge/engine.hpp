@@ -1711,15 +1711,16 @@ protected:
     uint64_t intraday_cap_pooc_close_inheritor_incarnation_ = 0;
 
     // An explicitly timed symbol session defines the broker's trading day.
-    // Its existing clock includes DST and a supplied native daily calendar.
+    // Use its unmerged clock: a futures holiday D bar may span two sessions,
+    // while TradingView renews the order budget at each session's reopen.
     // Continuous/unconfigured sessions retain the validated chart-date clock.
     int64_t intraday_order_day_key() const {
         const auto& session = syminfo_.session;
         if (session.size() >= 9 && session[4] == '-'
             && hhmm_to_minutes(session.substr(0, 4)) >= 0
             && hhmm_to_minutes(session.substr(5, 4)) >= 0) {
-            return session_day_index(current_bar_.timestamp,
-                                     syminfo_.timezone, session);
+            return session_trading_day_index(current_bar_.timestamp,
+                                             syminfo_.timezone, session);
         }
         const BarTime bt = _decompose_bar_time_chart_tz();
         return bt.dayofmonth * 100 + bt.month;
