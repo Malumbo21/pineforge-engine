@@ -494,7 +494,7 @@ int main() {
 
     // E2. TradingView converts a realized trade's complete net symbol-currency
     // PnL at the EXIT bar's daily rate, including both percent-commission legs
-    // (validation-adhoc/4emarsi.../tv_commission_crack.py: 335/336 exact).
+    // (335/336 exact; archived investigation linked in docs/pages/metrics.md).
     // gross 50*2 - entry fee 400*10%*2 - exit fee 450*10%*2 = -70.
     {
         std::vector<Bar> bars = {mk_bar(1000, 400.0), mk_bar(2000, 450.0)};
