@@ -7,7 +7,7 @@
 **The open-source PineScript v6 backtest engine that reproduces TradingView trade-for-trade.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/pineforge-4pass/pineforge-engine/ci.yml?branch=main&label=ci&logo=github)](https://github.com/pineforge-4pass/pineforge-engine/actions)
-[![Parity](https://img.shields.io/badge/TradingView%20parity-4%2C189%20%2F%204%2C190%20probes-brightgreen)](#validation-scoreboard)
+[![Parity](https://img.shields.io/badge/TradingView%20parity-4%2C190%20%2F%204%2C190%20probes-brightgreen)](#validation-scoreboard)
 [![Trades](https://img.shields.io/badge/trades%20matched-2.8M-brightgreen)](#validation-scoreboard)
 [![Speed](https://img.shields.io/badge/median%20162%C3%97%20vs%20PyneCore-success)](benchmarks/results/speed.md)<br>
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -26,7 +26,7 @@
 
 TradingView's strategy tester is the reference every Pine author trusts, and nothing outside TradingView reproduced it — until now. PineForge is a C++17 runtime with a stable C ABI that runs PineScript v6 strategies exactly the way TradingView's broker emulator does: same fills, same sizing, same margin calls, same trailing stops, same `request.security()` buckets, on any OHLCV you give it, in microseconds per bar.
 
-- **Proven, not promised.** 4,189 of 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists. 2.82 million TradingView trades measured, 2.815 million matched row-for-row.
+- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,166 excellent, 24 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,816,973 matched by the verifier.
 - **Open.** Engine, transpiler, corpus, benchmarks and the validation tooling are all public and Apache-2.0. The only thing you cannot download is the closed test set, because TradingView's Terms of Service forbid redistributing community scripts.
 - **Fast.** In-process, no interpreter: median **162× faster than PyneCore** on 99 timed strategies. Parameter sweeps re-run a loaded `.so` with new inputs — no recompile, no fork.
 - **Deterministic to the bit.** Two runs with the same inputs produce identical trade lists. Same on Linux and macOS.
@@ -76,7 +76,7 @@ Prefer zero install? The hosted server at **[mcp.pineforge.dev/mcp](https://mcp.
 git clone https://github.com/pineforge-4pass/pineforge-engine.git && cd pineforge-engine
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build --output-on-failure     # 198 tests
+ctest --test-dir build --output-on-failure     # 215 tests
 bash tutorial/run.sh                            # MACD on BTC/USDT, end to end
 python3 tutorial/run_stream.py                  # OHLCV warm-up → realtime trades
 ```
@@ -108,33 +108,37 @@ Every PineForge-compiled strategy `.so` exports this same ABI — write the harn
 
 ## Validation scoreboard
 
-| Board | Test set | Result | Trades verified |
-|---|---|---|---|
-| **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** trade-for-trade (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | ~430k |
-| **Closed test** — the parity campaign | 413 community-shared TradingView scripts × 15 market/timeframe lanes = **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,825 excellent + 55 strong + 1 moderate** = 3,880/3,881 (99.97%) excellent-or-strong | ~2.4M |
+**Round 23 · 2026-09-07:** **4,166 excellent / 24 strong / zero moderate** across all **4,190 scored probes**. This round adds two excellent results, with zero regressions on any canonical metric.
 
-**2.82 million TradingView trades** measured, **2.815 million matched row-for-row** (99.8%), as of **2026-09-06**. **18 TradingView-side anomalies** were found on the way (all on the ETH 15m lane), each confirmed with a purpose-built sensor script exported from TradingView and documented before exclusion. The one probe below *strong* is a verifier-harness limitation on a range-start chart trim, not an engine divergence.
+| Board | Test set | Result | TradingView trades evaluated |
+|---|---|---|---|
+| **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | 429,866 |
+| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,857 excellent + 24 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
+
+**2,819,967 TradingView trades** evaluated, **2,816,973 matched by the verifier** (99.89%), from the round 23 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
+
+Round 23 improves the BTC/USDT 15m **Trendline and Horizontal Breakout** and **LL: Momentum and Curl Master** strategies from strong to excellent. Their combined **10,742 trade rows** match TradingView exactly on side, time, price, and quantity. The engine fix uses shared broker state and order ownership; it contains no strategy, symbol, date, or benchmark-ID conditions. Grading rules, verifier, harness, population, and tapes are unchanged.
 
 ### The closed test, lane by lane
 
 | Market · timeframe | Probes | Excellent | Strong | Moderate |
 |---|---:|---:|---:|---:|
-| BINANCE:ETHUSDT.P · 15m *(hard lane: zero regression allowed)* | 395 | 393 | 2 | — |
-| BINANCE:BTCUSDT · 15m | 354 | 341 | 13 | — |
-| BINANCE:BTCUSDT · 1D | 259 | 258 | 1 | — |
+| BINANCE:ETHUSDT.P · 15m *(hard lane: zero regression allowed)* | 395 | 394 | 1 | — |
+| BINANCE:BTCUSDT · 15m | 354 | 350 | 4 | — |
+| BINANCE:BTCUSDT · 1D | 259 | 259 | — | — |
 | CME_MINI:ES1! · 15m | 174 | 173 | 1 | — |
-| CME_MINI:ES1! · 1D | 117 | 116 | 1 | — |
+| CME_MINI:ES1! · 1D | 117 | 117 | — | — |
 | CME_MINI:NQ1! · 15m | 174 | 174 | — | — |
 | CME_MINI:NQ1! · 1D | 116 | 116 | — | — |
-| NASDAQ:AAPL · 15m | 356 | 352 | 4 | — |
+| NASDAQ:AAPL · 15m | 356 | 354 | 2 | — |
 | NSE:NIFTY · 15m | 191 | 190 | 1 | — |
 | NSE:NIFTY · 1D | 145 | 145 | — | — |
-| NYSE:F · 15m | 340 | 331 | 9 | — |
-| NYSE:F · 1D | 263 | 262 | 1 | — |
-| OANDA:EURUSD · 15m | 373 | 356 | 17 | — |
-| OANDA:XAUUSD · 15m | 376 | 370 | 5 | 1 |
+| NYSE:F · 15m | 340 | 335 | 5 | — |
+| NYSE:F · 1D | 263 | 263 | — | — |
+| OANDA:EURUSD · 15m | 373 | 365 | 8 | — |
+| OANDA:XAUUSD · 15m | 376 | 374 | 2 | — |
 | OANDA:XAUUSD · 1D | 248 | 248 | — | — |
-| **Total** | **3,881** | **3,825** | **55** | **1** |
+| **Total** | **3,881** | **3,857** | **24** | **0** |
 
 ### How a probe is graded
 
