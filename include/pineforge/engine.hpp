@@ -1684,14 +1684,14 @@ protected:
 
     // --- Intraday fill counter ---
     // Counts every fill processed by ``apply_filled_order_to_state`` on
-    // the current chart-day. When the count reaches
+    // the current broker day. When the count reaches
     // ``max_intraday_filled_orders_`` the engine emits TV's synthetic
     // "Close Position (Max number of filled orders in one day)" exit at
     // the cap-triggering fill's price and LATCHES (intraday_cap_hit_)
-    // until the chart-day rolls over. Once latched, ALL further fills
-    // on that chart-day are silently rejected — TV's broker emulator
-    // emits at most one cap-close per chart-day (probe 97b: 382
-    // cap-closes across 13 months of data, ~one per chart-day where
+    // until the broker day rolls over. Once latched, ALL further fills
+    // on that broker day are silently rejected — TV's broker emulator
+    // emits at most one cap-close per broker day (probe 97b: 382
+    // cap-closes across 13 months of data, ~one per day where
     // the cap fires). Pre-latch the engine recharged the counter
     // after each cap-cycle, which over-fired cap-closes (3459 engine
     // vs 1957 TV trades on probe 97b). Pre-fix-fix the engine just
@@ -1719,8 +1719,8 @@ protected:
         if (session.size() >= 9 && session[4] == '-'
             && hhmm_to_minutes(session.substr(0, 4)) >= 0
             && hhmm_to_minutes(session.substr(5, 4)) >= 0) {
-            return session_trading_day_index(current_bar_.timestamp,
-                                             syminfo_.timezone, session);
+            return internal::session_trading_day_index(current_bar_.timestamp,
+                                                       syminfo_.timezone, session);
         }
         const BarTime bt = _decompose_bar_time_chart_tz();
         return bt.dayofmonth * 100 + bt.month;

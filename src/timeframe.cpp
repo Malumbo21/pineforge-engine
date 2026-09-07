@@ -467,10 +467,12 @@ const NativeDayPartition* active_native_day_partition() {
     return g_active_day_partition;
 }
 
+namespace internal {
 int64_t session_trading_day_index(int64_t ms, const std::string& tz,
                                   const std::string& session) {
     return session_day_index_nominal(ms, tz, session);
 }
+} // namespace internal
 
 int64_t session_day_index(int64_t ms, const std::string& tz,
                           const std::string& session) {

@@ -5747,7 +5747,7 @@ void BacktestEngine::apply_filled_order_to_state(
         if (cur_day != intraday_day_) {
             intraday_day_ = cur_day;
             intraday_fill_count_ = 0;
-            intraday_cap_hit_ = false;  // RESET LATCH on chart-day rollover
+            intraday_cap_hit_ = false;  // Reset latch on broker-day rollover.
         }
         // A POOC close+opposite-entry reversal is split by the engine into a
         // close operation followed by a MARKET operation. Factor C counted
@@ -6422,10 +6422,10 @@ void BacktestEngine::apply_filled_order_to_state(
     // already need no synthetic close), emit TV's synthetic
     // "Close Position (Max number of filled orders in one day)" exit at
     // the same fill price, then LATCH so all subsequent fills on this
-    // chart-day are silently rejected. TV emits at most one cap-close
-    // per chart-day (probe 97b: 382 cap-closes across 13 months,
-    // ~one per chart-day where the cap fires). The latch is reset
-    // only on chart-day rollover (see top of this function).
+    // broker day are silently rejected. TV emits at most one cap-close
+    // per broker day (probe 97b: 382 cap-closes across 13 months,
+    // ~one per day where the cap fires). The latch is reset
+    // only on broker-day rollover (see top of this function).
     if (will_trigger_cap) {
         if (position_side_ != PositionSide::FLAT) {
             // Opt-in factor B is deliberately narrow: an ordinary historical
