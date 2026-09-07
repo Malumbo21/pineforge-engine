@@ -5742,8 +5742,7 @@ void BacktestEngine::apply_filled_order_to_state(
     //     1957 TV trades on 97b — 43% over-count).
     bool will_trigger_cap = false;
     if (max_intraday_filled_orders_ > 0) {
-        BarTime bt = _decompose_bar_time_chart_tz();
-        int cur_day = bt.dayofmonth * 100 + bt.month;
+        const int64_t cur_day = intraday_order_day_key();
         if (cur_day != intraday_day_) {
             intraday_day_ = cur_day;
             intraday_fill_count_ = 0;

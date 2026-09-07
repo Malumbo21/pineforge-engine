@@ -1732,8 +1732,7 @@ void BacktestEngine::flush_active_same_bar_close(
             intraday_cap_pooc_close_inheritor_incarnation_ =
                 inheritor == nullptr ? 0 : inheritor->incarnation;
 
-            BarTime bt = _decompose_bar_time_chart_tz();
-            const int cur_day = bt.dayofmonth * 100 + bt.month;
+            const int64_t cur_day = intraday_order_day_key();
             if (cur_day != intraday_day_) {
                 intraday_day_ = cur_day;
                 intraday_fill_count_ = 0;

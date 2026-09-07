@@ -1698,8 +1698,8 @@ protected:
     // skipped fills past the cap, leaving the position carried open
     // across day boundaries.
     int intraday_fill_count_ = 0;
-    int intraday_day_ = -1;       // day key (dayofmonth*100+month) for reset
-    bool intraday_cap_hit_ = false;  // latched once per chart-day; reset on day rollover
+    int64_t intraday_day_ = -1;   // session day, or legacy chart-date key
+    bool intraday_cap_hit_ = false;  // latched once per broker day
     // State, not configuration: a POOC MARKET fill reached the cap at the
     // signal close and its risk-generated flatten is due at the next broker
     // boundary (the next ordinary bar open).
@@ -1710,8 +1710,23 @@ protected:
     // may inherit that already-spent slot if it survives every fill-time gate.
     uint64_t intraday_cap_pooc_close_inheritor_incarnation_ = 0;
 
+    // An explicitly timed symbol session defines the broker's trading day.
+    // Its existing clock includes DST and a supplied native daily calendar.
+    // Continuous/unconfigured sessions retain the validated chart-date clock.
+    int64_t intraday_order_day_key() const {
+        const auto& session = syminfo_.session;
+        if (session.size() >= 9 && session[4] == '-'
+            && hhmm_to_minutes(session.substr(0, 4)) >= 0
+            && hhmm_to_minutes(session.substr(5, 4)) >= 0) {
+            return session_day_index(current_bar_.timestamp,
+                                     syminfo_.timezone, session);
+        }
+        const BarTime bt = _decompose_bar_time_chart_tz();
+        return bt.dayofmonth * 100 + bt.month;
+    }
+
     // True iff the intraday cap is currently latched on the CURRENT bar's
-    // chart-day. Performs a lazy day-rollover reset so callers outside the
+    // broker day. Performs a lazy day-rollover reset so callers outside the
     // fill path (notably ``strategy_entry`` / ``strategy_order``) see a
     // consistent view: TV silently drops *order placement* during the
     // latched window in addition to dropping fills (Pine docs: "all
@@ -1726,8 +1741,7 @@ protected:
     // entries followed by mismatched cap-close exit prices below.
     bool _intraday_cap_currently_latched() {
         if (max_intraday_filled_orders_ <= 0) return false;
-        BarTime bt = _decompose_bar_time_chart_tz();
-        int cur_day = bt.dayofmonth * 100 + bt.month;
+        const int64_t cur_day = intraday_order_day_key();
         if (cur_day != intraday_day_) {
             intraday_day_ = cur_day;
             intraday_fill_count_ = 0;
@@ -2973,11 +2987,10 @@ protected:
         return bt;
     }
 
-    // Chart-timezone-aware decomposition. ONLY for intraday-day rollover
-    // gates (max_intraday_filled_orders, max_intraday_loss, consecutive
-    // loss-day tracking) — those must roll over at the chart's wall-clock
-    // 00:00, matching TV's broker emulator (which keys off the chart's
-    // display TZ, not the exchange TZ).
+    // Chart-timezone-aware decomposition for the existing loss-day clocks
+    // and the continuous/unconfigured-session order-counter fallback. The
+    // order counter on an explicitly timed session instead consumes
+    // intraday_order_day_key(), which follows the symbol's trading day.
     //
     // Falls back to plain ``_decompose_bar_time()`` (UTC) when no chart
     // timezone has been set, preserving the legacy fast path for
@@ -4390,15 +4403,10 @@ public:
     // predicates. They default to UTC / 24x7 (crypto); a data feed pushes
     // the real values via these setters before run().
     //
-    // NOTE on intraday-day rollover gates (max_intraday_filled_orders,
-    // max_intraday_loss, consecutive-loss day): these intentionally key off
-    // ``chart_timezone_`` (see ``_decompose_bar_time_chart_tz``), which is
-    // what TV's broker emulator matched on the only validated case (probe-97,
-    // crypto on a UTC+8 chart). For real-session instruments (e.g. US
-    // equities), the serving layer should set ``set_chart_timezone`` to the
-    // exchange timezone so the gate rolls over on the exchange trading day —
-    // we deliberately do NOT switch the gates to ``syminfo_.timezone`` (that
-    // would regress the crypto-on-shifted-chart case).
+    // max_intraday_filled_orders consumes a valid explicit session and this
+    // timezone through intraday_order_day_key(). Other risk-day rules keep
+    // chart_timezone_, as do continuous/unconfigured order-counter clocks;
+    // the existing crypto-on-shifted-chart contract therefore remains intact.
     void set_syminfo_timezone(const std::string& tz) { syminfo_.timezone = tz; }
     void set_syminfo_session(const std::string& s) { syminfo_.session = s; }
     // ``syminfo.type`` ("crypto" default; "forex" / "stock" / "futures" /
