@@ -26,7 +26,7 @@
 
 TradingView's strategy tester is the reference every Pine author trusts, and nothing outside TradingView reproduced it — until now. PineForge is a C++17 runtime with a stable C ABI that runs PineScript v6 strategies exactly the way TradingView's broker emulator does: same fills, same sizing, same margin calls, same trailing stops, same `request.security()` buckets, on any OHLCV you give it, in microseconds per bar.
 
-- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,177 excellent, 13 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,337 matched by the verifier.
+- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,178 excellent, 12 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,448 matched by the verifier.
 - **Open.** Engine, transpiler, corpus, benchmarks and the validation tooling are all public and Apache-2.0. The only thing you cannot download is the closed test set, because TradingView's Terms of Service forbid redistributing community scripts.
 - **Fast.** In-process, no interpreter: median **162× faster than PyneCore** on 99 timed strategies. Parameter sweeps re-run a loaded `.so` with new inputs — no recompile, no fork.
 - **Deterministic to the bit.** Two runs with the same inputs produce identical trade lists. Same on Linux and macOS.
@@ -108,18 +108,18 @@ Every PineForge-compiled strategy `.so` exports this same ABI — write the harn
 
 ## Validation scoreboard
 
-**Round 34 · 2026-09-08:** **4,177 excellent / 13 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
+**Round 35 · 2026-09-08:** **4,178 excellent / 12 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
 
 | Board | Test set | Result | TradingView trades evaluated |
 |---|---|---|---|
 | **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | 429,866 |
-| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,868 excellent + 13 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
+| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,869 excellent + 12 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
 
-**2,819,967 TradingView trades** evaluated, **2,817,337 matched by the verifier** (99.91%), from the round 34 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
+**2,819,967 TradingView trades** evaluated, **2,817,448 matched by the verifier** (99.91%), from the round 35 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
 
-Round 34 corrects admission for ordinary process-on-close long MARKET orders and places the covered money-margin event at the next bar's open, before order-fill recalculation. **Overnight Gap Capture** on **OANDA:EURUSD 15m** moves from strong to excellent: zero count gap, 100% matched, and zero entry-price, exit-price, PnL and quantity error at the 90th percentile. Its **3,669 closed trades** match TradingView on entry/exit time, side, quantity and prices.
+Round 35 corrects ordinary pairs of unlinked stop-entry orders placed while flat. After the first stop opens a position, the later stop consumes its own transaction quantity: it can partially close, flatten, or reverse only the remainder, in either path direction. Default percent-of-equity stops retain their placement quantity consistently through admission and execution. **Decoded Volatility Expansion** on **OANDA:XAUUSD 15m** moves from strong to excellent: zero count gap, 100% canonical match, and zero entry-price, exit-price, PnL and quantity error at the 90th percentile. All **514 closed-trade identities** match TradingView on entry/exit time, side, quantity and prices.
 
-The changes use broker state, physical order/position provenance and instrument tick/lot facts. A four-cell Cloud experiment separates admission from opening-event timing; the combined change is required for the conversion. The other **4,189 trade CSVs are byte-identical** to round 33, and their canonical grades and metrics are unchanged, including all **704 hard-surface probes**. Codegen, verifier, grading rules, profile-selection code, reference tapes, feeds, input files and scored population are unchanged.
+The rule uses order-book and position provenance, with no strategy, symbol or date lookup. Sixteen independent TradingView controls and an unchanged-output Cloud trace pin the cause. Seven hard-surface corpus probes gain **72 exact trade matches**, with no previously exact match lost; their canonical grades and metrics remain unchanged. The other **4,182 trade CSVs are byte-identical** to round 34, and all **4,189 other probes** retain their canonical grades and quantity metrics. Verifier code, grading rules, profile-selection code, reference tapes, feeds, input files and scored population are unchanged.
 
 ### The closed test, lane by lane
 
@@ -138,9 +138,9 @@ The changes use broker state, physical order/position provenance and instrument 
 | NYSE:F · 15m | 340 | 336 | 4 | — |
 | NYSE:F · 1D | 263 | 263 | — | — |
 | OANDA:EURUSD · 15m | 373 | 371 | 2 | — |
-| OANDA:XAUUSD · 15m | 376 | 374 | 2 | — |
+| OANDA:XAUUSD · 15m | 376 | 375 | 1 | — |
 | OANDA:XAUUSD · 1D | 248 | 248 | — | — |
-| **Total** | **3,881** | **3,868** | **13** | **0** |
+| **Total** | **3,881** | **3,869** | **12** | **0** |
 
 ### How a probe is graded
 
