@@ -135,6 +135,10 @@ void BacktestEngine::dispatch_bar() {
             // check (pre-exit hook / end-of-bar process_margin_call) is
             // unchanged and may book TV's second same-bar slice.
             margin_call_slice_at_bar_open(script_bar);
+            if (process_orders_on_close_ && slippage_ > 0) {
+                tv_money_long_margin_call(script_bar,
+                    /*carried_pooc_pre_close=*/true, /*opening_only=*/true);
+            }
         } catch (...) {
             current_bar_ = script_bar;
             throw;
@@ -284,7 +288,8 @@ uint64_t BacktestEngine::execute_coof_script_body(
         bool is_fill_recalc,
         bool cursor_is_bar_close,
         bool recalc_at_bar_open,
-        uint64_t direct_fill_event_budget) {
+        uint64_t direct_fill_event_budget,
+        bool opening_money_prefix) {
     restore_coof_script_state();
     current_bar_ = script_bar;
     // TradingView historical fill recalculations are both new and confirmed.
@@ -297,7 +302,16 @@ uint64_t BacktestEngine::execute_coof_script_body(
     pending_close_qty_in_bar_ = 0.0;
     pos_view_freeze_bar_ = -1;   // KI-64: recompute re-arms the freeze fresh
     _push_source_series();
-    update_per_trade_extremes();
+    if (opening_money_prefix) {
+        // The new broker event and its direct-close callbacks are still at O.
+        // Pine sees the complete historical bar; these physical exits cannot
+        // inherit that bar's future extremes before its path has advanced.
+        current_bar_.high = current_bar_.low = current_bar_.close = script_bar.open;
+        update_per_trade_extremes();
+        current_bar_ = script_bar;
+    } else {
+        update_per_trade_extremes();
+    }
 
     coof_scheduler_active_ = true;
     coof_fill_recalc_active_ = is_fill_recalc;
@@ -336,7 +350,8 @@ uint64_t BacktestEngine::run_coof_recalc_chain(
         uint64_t max_events,
         uint64_t events_already,
         bool grouped_stop_recalc,
-        uint64_t market_entry_incarnation) {
+        uint64_t market_entry_incarnation,
+        bool opening_money_prefix) {
     uint64_t total_events = triggering_events;
     uint64_t pending_recalcs = grouped_stop_recalc ? 1 : triggering_events;
     uint64_t handled = 0;
@@ -360,7 +375,7 @@ uint64_t BacktestEngine::run_coof_recalc_chain(
             script_bar, broker_cursor_price, cursor_is_bar_point,
             /*is_fill_recalc=*/true,
             cursor_is_bar_close, first_open_fill_recalc,
-            direct_budget);
+            direct_budget, opening_money_prefix);
         total_events += direct;
         pending_recalcs += direct;
     }
@@ -436,6 +451,29 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
     bool cursor_is_bar_point = true;
     int next_waypoint = 1;
     bool evaluate_current_point = true;
+
+    // A carried positive-slip POOC market lot checks rounded money at O,
+    // before any pending fill. The helper owns the one broker event and its
+    // consumed-bar stamp. Recalc valuation stays at raw O: each actual exit
+    // pays its own slippage, and later orders advance on the unchanged path.
+    if (process_orders_on_close_ && slippage_ > 0) {
+        current_bar_ = coof_point_bar(script_bar, cursor);
+        coof_hist_path_index_ = 0;
+        const uint64_t before = broker_fill_event_seq_;
+        if (tv_money_long_margin_call(script_bar,
+                /*carried_pooc_pre_close=*/true, /*opening_only=*/true)) {
+            coof_cascade_recalc_leg_ = 0;
+            fill_events += run_coof_recalc_chain(
+                script_bar, cursor, /*cursor_is_bar_point=*/true,
+                /*cursor_is_bar_close=*/false, /*recalc_at_bar_open=*/true,
+                broker_fill_event_seq_ - before, kNoFillEventBudget, 0,
+                /*grouped_stop_recalc=*/false, /*market_entry_incarnation=*/0,
+                /*opening_money_prefix=*/true);
+            // The ordinary O exception permits just the first follow-up
+            // fill at O. A direct survivor close already consumed that slot.
+            evaluate_current_point = fill_events == 1;
+        }
+    }
 
     auto consume_fill = [&](const CoofFillResult& fill,
                             bool cursor_is_close,

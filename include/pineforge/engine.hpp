@@ -215,6 +215,9 @@ struct PyramidEntry {
     // Exact ordinary MARKET fill at the next bar open. Priced/RAW entries
     // cannot infer this provenance from an equal numeric entry price.
     bool ordinary_market_open = false;
+    // Actual flat-born MARKET fill at the ordinary POOC terminal close.
+    // Priced/RAW entries and orders born in fill callbacks do not acquire it.
+    bool pooc_terminal_market_entry = false;
     // A flat-born pure STOP strategy.entry actually filled at the bar open.
     // Keep this separate from MARKET provenance: equal fill prices do not
     // make the two order classes interchangeable for affordability rules.
@@ -3946,14 +3949,18 @@ private:
     // round 8 family R / round 10 family AB: the 10-significant-digit
     // margin-call trigger on a margin-100 LONG (process_margin_call; rule
     // and pins on tv_money_long_margin_call in engine_fills.cpp).
-    // The POOC extension is called only before the close-time script, with
-    // no pending broker orders. End-of-bar callers keep it disabled so a
+    // The POOC extension is called only before the close-time script or at
+    // the specifically scoped positive-slip opening point, with no pending
+    // broker orders. End-of-bar callers keep it disabled so a
     // close/add cannot make earlier prices act on the post-close position.
     // Opening-only callers retain the actual chart bar for all eligibility
     // checks while restricting valuation to its first path point.
     bool tv_money_long_margin_call(const Bar& bar,
                                   bool carried_pooc_pre_close = false,
                                   bool opening_only = false);
+    // Positive-slip, single terminal-C MARKET lot covered by the opening
+    // money-event controls. Shared by post-entry deferral and next-O dispatch.
+    bool pooc_opening_money_scope(const Bar& bar) const;
     // finding-311: mark the live position's standing strategy.exit brackets
     // dormant when an in-position reversal entry is declined at fill.
     void mark_position_brackets_dormant_on_declined_reversal(const Bar& bar);
@@ -4285,7 +4292,8 @@ private:
                                       bool is_fill_recalc,
                                       bool cursor_is_bar_close,
                                       bool recalc_at_bar_open,
-                                      uint64_t direct_fill_event_budget);
+                                      uint64_t direct_fill_event_budget,
+                                      bool opening_money_prefix = false);
     uint64_t run_coof_recalc_chain(const Bar& script_bar,
                                    double broker_cursor_price,
                                    bool cursor_is_bar_point,
@@ -4295,7 +4303,8 @@ private:
                                    uint64_t max_events,
                                    uint64_t events_already,
                                    bool grouped_stop_recalc = false,
-                                   uint64_t market_entry_incarnation = 0);
+                                   uint64_t market_entry_incarnation = 0,
+                                   bool opening_money_prefix = false);
     void run_simple_bar_loop(const Bar* input_bars, int n_input);
     void run_aggregation_bar_loop(const Bar* input_bars, int n_input,
                                   bool bar_magnifier, int expected_script_bars);

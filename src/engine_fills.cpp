@@ -1433,6 +1433,17 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
         // same-currency / sub-account-unit lot scope.
         const double required_margin =
             tv_money_required_margin(exact_required_margin, opening_mark);
+        // A terminal POOC fill has no later price point on this bar. Covered
+        // positive-slip controls keep an exact-funded entry when only the
+        // ten-digit valuation is short, then check the carried lot at next O.
+        // This is post-admission event placement; genuine entry-budget
+        // shortfalls and every other opening shape retain the existing trim.
+        if (long_full_margin && opened_this_bar
+            && opening_equity >= exact_required_margin
+            && opening_equity < required_margin
+            && pooc_opening_money_scope(bar)) {
+            return;
+        }
         // TV's converted account-currency broker ledger is cent-rounded, so a
         // post-fee deficit below half a cent is not a real deficit there: an
         // exported converted-USD tape does not act on a ~$0.0025 conversion
@@ -1786,6 +1797,31 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
 // fill must not revisit the entry bar's earlier high. Fresh full/30% closes
 // on the trigger bar read PS 878944.99 before sizing their close orders
 // (log-20260906t091207z-83d4bea0), so dispatch_bar calls this BEFORE on_bar.
+bool BacktestEngine::pooc_opening_money_scope(const Bar& bar) const {
+    if (!process_orders_on_close_ || slippage_ <= 0
+        || position_side_ != PositionSide::LONG || margin_long_ != 100.0
+        || !(position_qty_ > 1.0) || position_entry_count_ != 1
+        // Explicit zero and the engine's omitted-setting default one both
+        // forbid an add to this one-entry book. The physical lot/provenance
+        // checks remain authoritative; larger pyramiding budgets stay out.
+        || pyramid_entries_.size() != 1 || pyramiding_ < 0 || pyramiding_ > 1
+        || !pending_orders_.empty() || commission_value_ != 0.0
+        || syminfo_.pointvalue != 1.0 || account_currency_fx_ != 1.0
+        || active_account_currency_fx() != 1.0
+        || !account_currency_fx_timestamps_.empty()
+        || !(qty_step_ > 0.0 && qty_step_ < 1.0)
+        || !tv_money_scope(bar.close)
+        || bar_magnifier_enabled_ || stream_warmup_mode_
+        || stream_phase_ != StreamPhase::IDLE
+        || max_intraday_filled_orders_ > 0 || risk_max_intraday_loss_ != 0.0
+        || risk_max_drawdown_ != 0.0 || risk_max_cons_loss_days_ > 0) {
+        return false;
+    }
+    const auto& entry = pyramid_entries_.front();
+    return entry.pooc_terminal_market_entry && entry.entry_incarnation != 0
+        && entry.entry_bar_index == position_open_bar_;
+}
+
 bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
                                               bool carried_pooc_pre_close,
                                               bool opening_only) {
@@ -1795,26 +1831,35 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
         || std::abs(margin_long_ / 100.0 - 1.0) >= 1e-12) return false;
     if (last_margin_call_event_bar_ == bar_index_) return false;
     if (intrabar_exit_margin_call_bar_ == bar_index_) return false;
+    const bool slipped_pooc_open = carried_pooc_pre_close && opening_only
+        && pooc_opening_money_scope(bar)
+        && (!calc_on_order_fills_
+            || (coof_scheduler_active_ && !coof_fill_recalc_active_
+                && !coof_evaluating_path_segment_
+                && !coof_cursor_is_bar_close_ && coof_hist_path_index_ == 0));
     if (process_orders_on_close_) {
-        // This extension has no oracle for a pending order racing the money
+        // Apart from the separately proven positive-slip opening-only route,
+        // this extension has no oracle for pending orders racing the money
         // trigger, adds, fees/slippage, currency conversion or risk-forced
         // exits. Keep their prior POOC behavior. End-of-bar calls stay out
         // even when the script merely reduced an older position: its current
         // quantity did not exist over this bar's already-traversed path.
         if (!carried_pooc_pre_close || position_open_bar_ < 0
             || position_open_bar_ >= bar_index_ || !pending_orders_.empty()
-            || opening_affordability_pending_ || pyramiding_ != 0
+            || opening_affordability_pending_
+            || (pyramiding_ != 0 && !slipped_pooc_open)
             || position_entry_count_ != 1 || pyramid_entries_.size() != 1
             || pyramid_entries_.front().entry_bar_index >= bar_index_
-            || commission_value_ != 0.0 || slippage_ != 0
+            || commission_value_ != 0.0
+            || (slippage_ != 0 && !slipped_pooc_open)
             || account_currency_fx_ != 1.0 || max_intraday_filled_orders_ > 0
             || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
             || risk_max_cons_loss_days_ > 0) {
             return false;
         }
     }
-    if (calc_on_order_fills_
-        || bar_magnifier_enabled_ || coof_scheduler_active_
+    if (((calc_on_order_fills_ || coof_scheduler_active_) && !slipped_pooc_open)
+        || bar_magnifier_enabled_
         || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE) {
         return false;
     }
@@ -6084,6 +6129,21 @@ void BacktestEngine::apply_filled_order_to_state(
     }
 
     if (primary_fill_applied) {
+        if (order.type == OrderType::MARKET && process_orders_on_close_
+            && order.created_bar == bar_index_
+            && order.created_position_side == PositionSide::FLAT
+            && !order.created_after_position_close_in_bar
+            && !order.created_during_coof_recalc
+            && !order.created_by_same_id_replacement
+            && order.oca_name.empty() && order.oca_type == 0
+            && position_side_before_fill == PositionSide::FLAT
+            && order.incarnation != 0 && pyramid_entries_.size() == 1
+            && pyramid_entries_.front().entry_incarnation == order.incarnation
+            && pyramid_entries_.front().entry_bar_index == bar_index_
+            && (!calc_on_order_fills_
+                || (coof_scheduler_active_ && coof_cursor_is_bar_close_))) {
+            pyramid_entries_.front().pooc_terminal_market_entry = true;
+        }
         if (order.type == OrderType::MARKET
             && !process_orders_on_close_ && !calc_on_order_fills_
             && !bar_magnifier_enabled_ && !coof_scheduler_active_
