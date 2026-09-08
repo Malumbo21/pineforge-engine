@@ -1331,6 +1331,17 @@ void BacktestEngine::process_carried_pooc_short_margin_before_script(const Bar& 
         if (!std::isfinite(trigger_bar.low) || !(trigger_bar.low > activation)) {
             return;
         }
+        // This newly earlier checkpoint precedes the normal full-bar
+        // excursion sample. Preserve the price path actually visited before
+        // the short's adverse high, including a favorable low on low-first
+        // bars; never give the liquidated slice a later high-first bar's low.
+        double prefix_low = std::min(bar.open, bar.high);
+        if (!internal::bar_path_uses_high_first(bar)) {
+            prefix_low = std::min(prefix_low, bar.low);
+        }
+        auto& entry = pyramid_entries_.front();
+        const double runup = (entry.price - prefix_low) * entry.qty;
+        if (runup > entry.max_runup) entry.max_runup = runup;
     }
     const std::size_t trades_before = trades_.size();
     process_margin_call(bar);

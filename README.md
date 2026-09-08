@@ -26,7 +26,7 @@
 
 TradingView's strategy tester is the reference every Pine author trusts, and nothing outside TradingView reproduced it — until now. PineForge is a C++17 runtime with a stable C ABI that runs PineScript v6 strategies exactly the way TradingView's broker emulator does: same fills, same sizing, same margin calls, same trailing stops, same `request.security()` buckets, on any OHLCV you give it, in microseconds per bar.
 
-- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,178 excellent, 12 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,448 matched by the verifier.
+- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,179 excellent, 11 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,468 matched by the verifier.
 - **Open.** Engine, transpiler, corpus, benchmarks and the validation tooling are all public and Apache-2.0. The only thing you cannot download is the closed test set, because TradingView's Terms of Service forbid redistributing community scripts.
 - **Fast.** In-process, no interpreter: median **162× faster than PyneCore** on 99 timed strategies. Parameter sweeps re-run a loaded `.so` with new inputs — no recompile, no fork.
 - **Deterministic to the bit.** Two runs with the same inputs produce identical trade lists. Same on Linux and macOS.
@@ -76,7 +76,7 @@ Prefer zero install? The hosted server at **[mcp.pineforge.dev/mcp](https://mcp.
 git clone https://github.com/pineforge-4pass/pineforge-engine.git && cd pineforge-engine
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build --output-on-failure     # 225 tests
+ctest --test-dir build --output-on-failure     # all enabled unit, replay and ABI checks
 bash tutorial/run.sh                            # MACD on BTC/USDT, end to end
 python3 tutorial/run_stream.py                  # OHLCV warm-up → realtime trades
 ```
@@ -108,18 +108,20 @@ Every PineForge-compiled strategy `.so` exports this same ABI — write the harn
 
 ## Validation scoreboard
 
-**Round 35 · 2026-09-08:** **4,178 excellent / 12 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
+**Round 36 · 2026-09-09:** **4,179 excellent / 11 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
 
 | Board | Test set | Result | TradingView trades evaluated |
 |---|---|---|---|
 | **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | 429,866 |
-| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,869 excellent + 12 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
+| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,870 excellent + 11 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
 
-**2,819,967 TradingView trades** evaluated, **2,817,448 matched by the verifier** (99.91%), from the round 35 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
+**2,819,967 TradingView trades** evaluated, **2,817,468 matched by the verifier** (99.91%), from the round 36 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
 
-Round 35 corrects ordinary pairs of unlinked stop-entry orders placed while flat. After the first stop opens a position, the later stop consumes its own transaction quantity: it can partially close, flatten, or reverse only the remainder, in either path direction. Default percent-of-equity stops retain their placement quantity consistently through admission and execution. **Decoded Volatility Expansion** on **OANDA:XAUUSD 15m** moves from strong to excellent: zero count gap, 100% canonical match, and zero entry-price, exit-price, PnL and quantity error at the 90th percentile. All **514 closed-trade identities** match TradingView on entry/exit time, side, quantity and prices.
+Round 36 corrects the timing of margin events around owned trailing exits under `process_orders_on_close`. A carried short's liquidation precedes the script's position/equity reads and default sizing. A carried long's money-rounding check uses only price-path waypoints before its resolved trailing exit. Short margin excursions include the favorable prices reached before liquidation, without borrowing a later low.
 
-The rule uses order-book and position provenance, with no strategy, symbol or date lookup. Sixteen independent TradingView controls and an unchanged-output Cloud trace pin the cause. Seven hard-surface corpus probes gain **72 exact trade matches**, with no previously exact match lost; their canonical grades and metrics remain unchanged. The other **4,182 trade CSVs are byte-identical** to round 34, and all **4,189 other probes** retain their canonical grades and quantity metrics. Verifier code, grading rules, profile-selection code, reference tapes, feeds, input files and scored population are unchanged.
+**EMA 9 + VWAP Strategy with ATR Trailing Stop (WinTheTrade)** on **OANDA:EURUSD 15m** moves from strong to excellent: 100% canonical match, zero count gap, and zero entry-price, exit-price, PnL and quantity error at the 90th percentile. On **BINANCE:BTCUSDT 15m**, the same strategy remains excellent and its quantity error falls to zero; all **2,158 raw closed-trade identities** match TradingView. EURUSD has **1,757 of 1,759 raw identities exact**: one remaining closing group is split into two TradingView allocations but combined by the engine at the same times and prices, with the same total quantity. This is not a claim of complete raw allocation or PnL display-byte equality.
+
+The rules use physical order and position provenance, with no strategy, symbol or date lookup. Independent TradingView controls and Cloud diagnostics pin the event order and the price-path boundary. All **704 hard-surface probes** retain their canonical grades and metrics. Verifier code, grading rules, profile-selection code, reference tapes, feeds, input files and scored population are unchanged.
 
 ### The closed test, lane by lane
 
@@ -137,10 +139,10 @@ The rule uses order-book and position provenance, with no strategy, symbol or da
 | NSE:NIFTY · 1D | 145 | 145 | — | — |
 | NYSE:F · 15m | 340 | 336 | 4 | — |
 | NYSE:F · 1D | 263 | 263 | — | — |
-| OANDA:EURUSD · 15m | 373 | 371 | 2 | — |
+| OANDA:EURUSD · 15m | 373 | 372 | 1 | — |
 | OANDA:XAUUSD · 15m | 376 | 375 | 1 | — |
 | OANDA:XAUUSD · 1D | 248 | 248 | — | — |
-| **Total** | **3,881** | **3,869** | **12** | **0** |
+| **Total** | **3,881** | **3,870** | **11** | **0** |
 
 ### How a probe is graded
 
@@ -192,7 +194,7 @@ PyneCore's 15 non-excellent strategies involve `strategy.exit(stop=…, limit=�
 - `libpineforge.a` — the static runtime: order matching and fills, sizing and margin, the bar magnifier, 66 indicator classes, `request.security()`, time and session math.
 - `<pineforge/pineforge.h>` — the public C ABI, the stability-pinned consumer surface.
 - `<pineforge/*.hpp>` — internal C++ headers the transpiler emits against (not part of the stability guarantee).
-- 223 ctest cases, most of them replays of recorded TradingView bars; CI on Linux + macOS × Release + Debug, sanitizers, and a `find_package` smoke consumer.
+- C++ unit and recorded TradingView replay tests; CI on Linux + macOS × Release + Debug, sanitizers, and a `find_package` smoke consumer.
 - `corpus/` — the 312-strategy public validation corpus (submodule).
 - `benchmarks/` — the three-way comparison harness and the throughput package.
 - `scripts/` — `run_corpus.sh`, `verify_corpus.py`, `run_strategy.py` (load any `.so` via ctypes), `regen_corpus_cpp.sh`, `coverage.sh`.
@@ -258,7 +260,7 @@ src/                    26 .cpp files split by concern
   ├── ta_*.cpp                        66 indicator classes (moving averages, oscillators,
   │                                   volatility/trend, extremes/volume, misc)
   └── magnifier / matrix / session_time / timeframe / timezone / math / str_utils
-tests/                  223 ctest cases (C++ unit + TradingView replay tests, 1 pure-C ABI check)
+tests/                  C++ unit, TradingView replay and pure-C ABI tests
 corpus/                 public submodule: 312 strategies + the 1-minute feed and derived 15m bars
 benchmarks/             three-way comparison harness, throughput package, results/
 scripts/                run_corpus.sh, verify_corpus.py, run_strategy.py, regen_corpus_cpp.sh, coverage.sh
