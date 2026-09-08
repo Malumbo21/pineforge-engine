@@ -311,6 +311,41 @@ void BacktestEngine::process_pending_orders(const Bar& bar) {
             pending_orders_, dual_entry_path_, process_orders_on_close_,
             calc_on_order_fills_, bar_magnifier_enabled_);
 
+    // A true-flat, same-signal pair owns two independent transactions.
+    // The later stop may reduce, flatten, or reverse the first position.
+    // Snapshot the book before the first fill is compacted; this is local
+    // to the ordinary no-callback scan, never stored in broker/ABI state.
+    bool flat_dual_stop_pair = continue_after_stop_margin_decline_scope
+        && pending_orders_.size() == 2
+        && !coof_scheduler_active_ && !stream_warmup_mode_
+        && stream_phase_ == StreamPhase::IDLE
+        && slippage_ == 0 && commission_value_ == 0.0
+        && account_currency_fx_ == 1.0 && account_currency_fx_timestamps_.empty()
+        && max_intraday_filled_orders_ == 0 && risk_max_position_size_ == 0.0
+        && risk_direction_ == RiskDirection::BOTH
+        && risk_max_intraday_loss_ == 0.0 && risk_max_drawdown_ == 0.0
+        && risk_max_cons_loss_days_ == 0;
+    if (flat_dual_stop_pair) {
+        for (const PendingOrder& member : pending_orders_) {
+            const bool explicit_fixed = std::isfinite(member.qty)
+                && member.qty > kQtyEpsilon
+                && (member.qty_type < 0
+                    || member.qty_type == static_cast<int>(QtyType::FIXED));
+            const bool default_fixed = std::isnan(member.qty)
+                && default_qty_type_ == QtyType::FIXED
+                && default_qty_value_ > 0.0;
+            const bool default_percent = std::isnan(member.qty)
+                && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
+                && default_qty_value_ > 0.0 && default_qty_value_ <= 100.0
+                && std::isfinite(member.default_stop_placement_qty)
+                && member.default_stop_placement_qty > kQtyEpsilon;
+            if (!explicit_fixed && !default_fixed && !default_percent) {
+                flat_dual_stop_pair = false;
+                break;
+            }
+        }
+    }
+
     for (int opposing_pass = 0; opposing_pass < 2; ++opposing_pass) {
         // Pass 1 only re-evaluates orders pass 0 deferred into the skip set;
         // with an empty set every order classifies Skip and the pass is a
@@ -334,7 +369,7 @@ void BacktestEngine::process_pending_orders(const Bar& bar) {
         auto eligibility = classify_order_eligibility(
             order, opposing_pass, dual_entry_path_, pass0_opposing_skip_ids,
             exit_closed_from_bar, exit_closed_from_incarnation,
-            exit_closed_was_long, bar);
+            exit_closed_was_long, bar, flat_dual_stop_pair);
         if (eligibility == OrderEligibility::Remove) {
             invalidate_pending_flat_market_pair(order.created_seq);
             filled_indices.push_back(i);
@@ -379,7 +414,7 @@ void BacktestEngine::process_pending_orders(const Bar& bar) {
             trail_best_path_state,
             exit_closed_from_bar, exit_closed_from_incarnation,
             exit_closed_was_long,
-            filled_indices);
+            filled_indices, flat_dual_stop_pair);
         if (risk_max_intraday_loss_ > 0.0) {
             // The closing fill's own realized P&L is not yet part of the
             // equity TradingView checks at this tick (pinned t1).
@@ -4707,12 +4742,28 @@ void BacktestEngine::compact_filled_pending_orders(
 // close) filling from FLAT — the shape every tape and the ahtisham decode
 // pin. A stop placed while a position is held (a same-direction add, a
 // reversal, a deferred-flip carry) keeps the established fill-time sizing
-// of its kernel, and a fill against a live opposite position keeps the
-// reversal kernel's own sizing; both still passed the family-E placement
-// check at the call. A non-positive fill print (a zero open) falls back too,
+// of its kernel. The ordinary same-signal flat dual-stop transaction keeps
+// its original snapshot for the later opposite fill as well; other live
+// opposite fills retain the reversal kernel's own sizing. Every stop still
+// passed the family-E placement check at the call. A non-positive fill print (a zero open) falls back too,
 // so the zero-lot decline stays byte-identical.
+bool BacktestEngine::flat_dual_stop_opposite_is_live(
+        const PendingOrder& order, bool flat_dual_stop_pair) const {
+    return flat_dual_stop_pair
+        && order.type == OrderType::ENTRY
+        && std::isfinite(order.stop_price) && std::isnan(order.limit_price)
+        && order.created_position_side == PositionSide::FLAT
+        && !order.created_after_position_close_in_bar
+        && position_side_ != PositionSide::FLAT
+        && order.is_long != (position_side_ == PositionSide::LONG)
+        && position_open_bar_ == bar_index_
+        && position_entry_count_ == 1 && pyramid_entries_.size() == 1
+        && position_qty_ > kQtyEpsilon;
+}
+
 bool BacktestEngine::use_default_stop_placement_qty(
-        const PendingOrder& order, double fill_price) const {
+        const PendingOrder& order, double fill_price,
+        bool flat_dual_stop_pair) const {
     if (order.type != OrderType::ENTRY
         || std::isnan(order.stop_price)
         || !std::isnan(order.limit_price)
@@ -4727,7 +4778,8 @@ bool BacktestEngine::use_default_stop_placement_qty(
         && std::isfinite(fill_price) && fill_price > 0.0
         && order.created_position_side == PositionSide::FLAT
         && !order.created_after_position_close_in_bar
-        && position_side_ == PositionSide::FLAT;
+        && (position_side_ == PositionSide::FLAT
+            || flat_dual_stop_opposite_is_live(order, flat_dual_stop_pair));
 }
 
 
@@ -5121,7 +5173,8 @@ void BacktestEngine::apply_filled_order_to_state(
         int& exit_closed_from_bar,
         uint64_t& exit_closed_from_incarnation,
         bool& exit_closed_was_long,
-        std::vector<size_t>& filled_indices) {
+        std::vector<size_t>& filled_indices,
+        bool flat_dual_stop_pair) {
     const bool inherits_pooc_close_fill =
         intraday_cap_count_pooc_full_close_fills_
         && order.incarnation != 0
@@ -6334,7 +6387,8 @@ void BacktestEngine::apply_filled_order_to_state(
         apply_market_order_fill(order, fill_price, bar, trail_best_path_state,
                                 later_same_tick_entry);
     } else if (order.type == OrderType::ENTRY) {
-        apply_entry_order_fill(order, fill_price, bar, trail_best_path_state);
+        apply_entry_order_fill(order, fill_price, bar, trail_best_path_state,
+                               flat_dual_stop_pair);
     } else if (order.type == OrderType::EXIT) {
         apply_exit_order_fill(
             order, fill_price, exit_closed_from_bar,
@@ -7309,7 +7363,8 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
 
 void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_price,
                                             const Bar& bar,
-                                            double& trail_best_path_state) {
+                                            double& trail_best_path_state,
+                                            bool flat_dual_stop_pair) {
     PositionSide side_before = position_side_;
     double qty_before = position_qty_;
     int count_before = position_entry_count_;
@@ -7415,7 +7470,7 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
     // quantity it was sized with at placement (see
     // use_default_stop_placement_qty); every other stop sizes at the fill.
     const bool use_placement_qty =
-        use_default_stop_placement_qty(order, fill_price);
+        use_default_stop_placement_qty(order, fill_price, flat_dual_stop_pair);
     const double dispatch_qty = use_placement_qty
         ? order.default_stop_placement_qty
         : order.qty;
@@ -8201,7 +8256,8 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         internal::DualEntryStopPathWinner dual_entry_path,
         const std::unordered_set<std::string>& pass0_opposing_skip_ids,
         int exit_closed_from_bar, uint64_t exit_closed_from_incarnation,
-        bool exit_closed_was_long, const Bar& bar) {
+        bool exit_closed_was_long, const Bar& bar,
+        bool flat_dual_stop_pair) {
     using internal::DualEntryStopPathWinner;
     if (order.declined_by_replaced_short_market) {
         return OrderEligibility::Remove;
@@ -8238,16 +8294,18 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         if (!pass0_opposing_skip_ids.count(order.id)) {
             return OrderEligibility::Skip;
         }
-        // Pass 0 deferred this leg as the path loser. TradingView only applies
-        // a same-bar second touch as a bracket exit when the buy-stop leads on
-        // the path; if the sell-stop leads, the later buy touch is discarded.
-        if (dual_entry_path == DualEntryStopPathWinner::ShortFirst && order.is_long) {
-            return OrderEligibility::Remove;
-        }
-        if (!(dual_entry_path == DualEntryStopPathWinner::LongFirst && !order.is_long)) {
-            if (dual_entry_path != DualEntryStopPathWinner::None
-                && dual_entry_path != DualEntryStopPathWinner::Tie) {
+        // The literal two-stop controls are symmetric in path and source
+        // order. Keep the legacy orientation rule outside that proven book;
+        // inside it the later transaction must reach normal fill handling.
+        if (!flat_dual_stop_opposite_is_live(order, flat_dual_stop_pair)) {
+            if (dual_entry_path == DualEntryStopPathWinner::ShortFirst && order.is_long) {
                 return OrderEligibility::Remove;
+            }
+            if (!(dual_entry_path == DualEntryStopPathWinner::LongFirst && !order.is_long)) {
+                if (dual_entry_path != DualEntryStopPathWinner::None
+                    && dual_entry_path != DualEntryStopPathWinner::Tie) {
+                    return OrderEligibility::Remove;
+                }
             }
         }
     }
@@ -8322,22 +8380,19 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         bool flat_armed_opposite_same_bar = flat_armed
             && position_side_ != requested
             && position_open_bar_ == bar_index_;
-        // TV only lets this same-bar opposite leg fire as a bracket exit
-        // when it nets the just-opened position to exactly flat (or a
-        // partial close with no remainder) — probe 80's near-stop pair
-        // (both FIXED qty=1) closes to flat on the very bar the position
-        // opened. When the opposite leg's tx_qty EXCEEDS the just-opened
-        // position's qty (equity/price-based sizing, where the two legs'
-        // divisors differ, guarantees a nonzero remainder), TV does NOT
-        // let the loser fire same-bar at all — it defers the whole order
-        // to a later bar instead of flash-reversing into a small leftover
-        // opposite position (waranyutrkm-inside-day-breakout-strategy).
+        // Preserve the legacy quantity throttle outside the independently
+        // pinned ordinary two-stop book. The covered pair below can consume
+        // a reducing, equal, or excess transaction (the last opens only its
+        // remainder). Other books retain the established no-extra-leg
+        // behavior, including the older inside-day/deferred-order cases.
+        // Probe 80's fixed-one near-stop pair closes exactly flat.
         // Approximate the fill price with the order's own trigger level:
         // exact for FIXED qty (price-independent) and precise enough for
         // equity/cash sizing, whose legs differ by construction, not by
         // slippage-scale noise.
         bool flat_armed_opposite_close = flat_armed_opposite_same_bar;
-        if (flat_armed_opposite_same_bar) {
+        if (flat_armed_opposite_same_bar
+            && !flat_dual_stop_opposite_is_live(order, flat_dual_stop_pair)) {
             // No frozen-qty lookup here: this branch is reached only for
             // OrderType::ENTRY (priced entries), and frozen_default_qty is set
             // solely on MARKET / RAW_ORDER placements, so it is always NaN.

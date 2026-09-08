@@ -217,6 +217,7 @@ set(TEST_SOURCES
     test_trail_activation_tick_bar
     test_session_predicates_daily_chart
     test_pooc_money_admission
+    test_dual_stop_transactions
     test_live_run_status
     test_live_realtime_tail
     test_live_probe_suppress_tail

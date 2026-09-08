@@ -708,11 +708,10 @@ static void test_blocked_entry_does_not_consume_intraday_fill_quota() {
 // This is the exact-zero-remainder case (both legs FIXED qty=1): confirmed by
 // real corpus probe 80 (order-dual-stop-both-touch-priority-01, Trade 1 —
 // entry long + exit long at the identical timestamp). When the opposite leg's
-// qty is NOT equal (equity/price-based sizing, e.g. equity/priceA vs
-// equity/priceB), TV instead defers the whole order to a later bar rather
-// than flattening-with-remainder — see
-// waranyutrkm-inside-day-breakout-strategy and classify_order_eligibility's
-// flat_armed_opposite_close remainder check.
+// qty differs, the 2026-09-08 ordinary unlinked-pair controls additionally
+// pin partial closes and excess-quantity reversals in both directions;
+// test_dual_stop_transactions covers those transaction quantities. Other
+// order-book classes retain their separately tested legacy rules.
 static void test_flat_bracket_dual_stop_closes_on_opposite_touch() {
     std::printf("test_flat_bracket_dual_stop_closes_on_opposite_touch\n");
 
@@ -4945,9 +4944,21 @@ static void test_opposite_stop_entries_follow_path_order() {
 
     strat.run(bars, 2);
 
-    CHECK(strat.trade_count() == 0);  // no exit yet
-    CHECK(strat.get_signed_position_size() < 0.0);
-    CHECK(near(strat.get_entry_price(), 95.0, 0.5));
+    // 2026-09-08 independent default-FIXED TV controls (pyramiding
+    // omitted/0/1) confirm that the later unlinked stop closes the first
+    // one-unit position. Keep the first-fill path proof and assert its
+    // subsequent close instead of the old unsupported no-exit expectation.
+    CHECK(strat.trade_count() == 1);
+    CHECK(near(strat.get_signed_position_size(), 0.0, 1e-9));
+    if (strat.trade_count() == 1) {
+        const auto& trade = strat.get_trade(0);
+        CHECK(!trade.is_long);
+        CHECK(near(trade.entry_price, 95.0, 1e-9));
+        CHECK(near(trade.exit_price, 105.0, 1e-9));
+        CHECK(near(trade.qty, 1.0, 1e-9));
+        CHECK(trade.entry_time == bars[1].timestamp);
+        CHECK(trade.exit_time == bars[1].timestamp);
+    }
 }
 
 // The opposing-stop arbitration helper also has to follow the open-proximity
@@ -4986,9 +4997,21 @@ static void test_opposite_stop_entries_use_open_proximity_path_priority() {
 
     strat.run(bars, 2);
 
-    CHECK(strat.trade_count() == 0);
-    CHECK(strat.get_signed_position_size() < 0.0);
-    CHECK(near(strat.get_entry_price(), 97.0, 0.5));
+    // 2026-09-08 independent default-FIXED TV controls (pyramiding
+    // omitted/0/1) confirm that the later unlinked stop closes the first
+    // one-unit position. Keep the first-fill path proof and assert its
+    // subsequent close instead of the old unsupported no-exit expectation.
+    CHECK(strat.trade_count() == 1);
+    CHECK(near(strat.get_signed_position_size(), 0.0, 1e-9));
+    if (strat.trade_count() == 1) {
+        const auto& trade = strat.get_trade(0);
+        CHECK(!trade.is_long);
+        CHECK(near(trade.entry_price, 97.0, 1e-9));
+        CHECK(near(trade.exit_price, 105.0, 1e-9));
+        CHECK(near(trade.qty, 1.0, 1e-9));
+        CHECK(trade.entry_time == bars[1].timestamp);
+        CHECK(trade.exit_time == bars[1].timestamp);
+    }
 }
 
 // strategy.close(id) must only close entries matching that id.

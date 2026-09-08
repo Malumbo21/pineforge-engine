@@ -4076,7 +4076,8 @@ private:
                                      int& exit_closed_from_bar,
                                      uint64_t& exit_closed_from_incarnation,
                                      bool& exit_closed_was_long,
-                                     std::vector<size_t>& filled_indices);
+                                     std::vector<size_t>& filled_indices,
+                                     bool flat_dual_stop_pair = false);
     bool stop_entry_margin_admission_declines(
         const PendingOrder& order, double fill_price, const Bar& bar) const;
     // True iff `order` is a default percent_of_equity <= 100 pure STOP that
@@ -4084,8 +4085,13 @@ private:
     // and the fill price is a usable positive print: the fill-time admission
     // and dispatch then consume the placement quantity instead of re-sizing
     // at the fill.
+    // The pair context exists only inside the ordinary atomic two-stop scan.
+    // No callback or stable-frame ABI read occurs between its two fills.
+    bool flat_dual_stop_opposite_is_live(
+        const PendingOrder& order, bool flat_dual_stop_pair) const;
     bool use_default_stop_placement_qty(
-        const PendingOrder& order, double fill_price) const;
+        const PendingOrder& order, double fill_price,
+        bool flat_dual_stop_pair = false) const;
     // design-declined-reversal-close-leg: called at the KI-54 reversal-decline
     // site with the just-declined MARKET reversal entry. Flags every pending
     // FULL close that was co-queued after it on the same bar against the held
@@ -4137,7 +4143,8 @@ private:
                                  bool later_same_tick_entry);
     void apply_entry_order_fill(PendingOrder& order, double fill_price,
                                 const Bar& bar,
-                                double& trail_best_path_state);
+                                double& trail_best_path_state,
+                                bool flat_dual_stop_pair = false);
     void apply_exit_order_fill(PendingOrder& order, double fill_price,
                                int& exit_closed_from_bar,
                                uint64_t& exit_closed_from_incarnation,
@@ -4175,7 +4182,8 @@ private:
         internal::DualEntryStopPathWinner dual_entry_path,
         const std::unordered_set<std::string>& pass0_opposing_skip_ids,
         int exit_closed_from_bar, uint64_t exit_closed_from_incarnation,
-        bool exit_closed_was_long, const Bar& bar);
+        bool exit_closed_was_long, const Bar& bar,
+        bool flat_dual_stop_pair = false);
     struct FillEvaluation {
         enum class Kind { Fill, NoFill, DeferredToOpposingPass };
         Kind kind;
