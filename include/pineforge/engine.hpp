@@ -2143,7 +2143,7 @@ protected:
             : mark + slippage_ * syminfo_mintick_;
         if (!std::isfinite(mark) || !(mark > 0.0) || !std::isfinite(price)
             || !(price > 0.0) || !tv_money_scope(price)
-            || round_to_mintick(fill_price) != mark) return false;
+            || fill_price != mark) return false;
         const double booked = apply_fill_slippage(fill_price, true);
         return slippage_ == 0 ? booked == price
             : round_to_mintick(booked) == round_to_mintick(price);
