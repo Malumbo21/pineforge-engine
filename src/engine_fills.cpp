@@ -1280,12 +1280,12 @@ void BacktestEngine::process_carried_pooc_short_margin_before_script(const Bar& 
         || last_margin_call_event_bar_ == bar_index_) {
         return;
     }
-    // These controls cover exact required-margin valuation. A sub-account-unit
-    // lot uses the separately rounded-money cascade; its carried POOC state
-    // still has unresolved ownership/budget evidence and retains its existing
-    // scheduling. Use the broker's established financial class at this same
-    // adverse mark, rather than inferring the class from a symbol or strategy.
-    if (tv_money_scope(round_to_mintick(bar.high))) return;
+    // Rounded-money positions have their own admission arithmetic. Extend
+    // this checkpoint only when a full owned trailing exit remains inactive
+    // throughout the completed old-order pass. Its resting instruction cannot
+    // postpone the carried position's margin event until after close sizing.
+    const bool rounded_money = tv_money_scope(round_to_mintick(bar.high));
+    if (rounded_money && pending_orders_.size() != 1) return;
     for (const auto& order : pending_orders_) {
         // The completed old-order pass proved this bracket unfilled. Reject
         // competing entries/closes, foreign/global owners and deferred order
@@ -1300,6 +1300,30 @@ void BacktestEngine::process_carried_pooc_short_margin_before_script(const Bar& 
             || order.dormant_bracket || order.dormant_reissue_pending
             || !std::isnan(order.profit_ticks) || !std::isnan(order.loss_ticks)
             || (!priced && !trailing)) {
+            return;
+        }
+    }
+    if (rounded_money) {
+        const auto& order = pending_orders_.front();
+        const bool full_position = std::isfinite(order.qty)
+            ? order.qty >= position_qty_
+            : std::isnan(order.qty) && std::isfinite(order.qty_percent)
+                && order.qty_percent >= 100.0;
+        if (!full_position || !std::isfinite(order.trail_offset)
+            || !(order.trail_offset > 0.0)
+            || !std::isnan(order.stop_price) || !std::isnan(order.limit_price)) {
+            return;
+        }
+        double stop = 0.0, limit = 0.0, activation = 0.0;
+        if (pending_order_effective_levels(0, &stop, &limit, &activation) != 0
+            || !std::isnan(stop) || !std::isnan(limit)
+            || !std::isfinite(activation)
+            || !std::isfinite(trail_best_price_)
+            || !(trail_best_price_ > activation)) {
+            return;
+        }
+        const Bar trigger_bar = broker_trigger_bar(bar);
+        if (!std::isfinite(trigger_bar.low) || !(trigger_bar.low > activation)) {
             return;
         }
     }
