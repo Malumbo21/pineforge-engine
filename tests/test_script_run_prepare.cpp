@@ -53,7 +53,21 @@ public:
     }
     int64_t next_cycle() const { return next_position_cycle_seq_; }
     int64_t next_order_sequence() const { return next_order_seq_; }
+    uint64_t next_incarnation() const { return next_order_incarnation_; }
     const std::vector<uint64_t>& hashes() const { return broker_state_hashes_; }
+    void seed_prior_run_snapshots() {
+        pos_view_freeze_bar_ = 7;
+        pos_view_frozen_side_ = PositionSide::LONG;
+        pos_view_frozen_qty_ = 2.0;
+        pos_view_frozen_entry_qty_["previous"] = 2.0;
+        trail_best_before_bar_ = 99.0;
+        trail_best_before_bar_index_ = 7;
+        trail_best_before_bar_position_cycle_ = 3;
+        trail_best_before_bar_fill_seq_ = 9;
+        priced_entry_activity_bar_ = 7;
+        priced_entry_filled_this_bar_ = true;
+        open_margin_slice_bar_ = 7;
+    }
 };
 
 int main() {
@@ -89,7 +103,18 @@ int main() {
     assert(reused_cycles.next_cycle() == fresh_cycles.next_cycle());
     assert(fresh_cycles.next_order_sequence() == 5);
     assert(reused_cycles.next_order_sequence() == fresh_cycles.next_order_sequence());
+    assert(fresh_cycles.next_incarnation() == 5);
+    assert(reused_cycles.next_incarnation() == fresh_cycles.next_incarnation());
+    assert(fresh_cycles.hashes().size() == 6);
+    assert(reused_cycles.hashes().size() == 6);
     assert(reused_cycles.hashes() == fresh_cycles.hashes());
+
+    CycleProbe fresh_empty, previous_snapshots;
+    fresh_empty.run(nullptr, 0);
+    previous_snapshots.seed_prior_run_snapshots();
+    assert(previous_snapshots.broker_state_hash() != fresh_empty.broker_state_hash());
+    previous_snapshots.run(nullptr, 0);
+    assert(previous_snapshots.broker_state_hash() == fresh_empty.broker_state_hash());
 
     p.prepared = false;
     base.run(bars, 3, "1", "1");

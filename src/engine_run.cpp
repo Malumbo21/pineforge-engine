@@ -754,6 +754,9 @@ void BacktestEngine::reset_run_state() {
     named_entry_cancelled_incarnation_in_current_eval_.clear();
     pending_close_qty_in_bar_ = 0.0;
     pos_view_freeze_bar_ = -1;   // KI-64: fresh run starts with no frozen view
+    pos_view_frozen_side_ = PositionSide::FLAT;
+    pos_view_frozen_qty_ = 0.0;
+    pos_view_frozen_entry_qty_.clear();
     sb_close_active_ = false;
     sb_close_bar_ = -1;
     sb_close_calls_ = 0;
@@ -774,6 +777,13 @@ void BacktestEngine::reset_run_state() {
     fold_exit_path_extremes_ = false;
     fold_exit_trail_peak_ = std::numeric_limits<double>::quiet_NaN();
     last_exit_fill_was_trail_ = false;
+    trail_best_before_bar_ = std::numeric_limits<double>::quiet_NaN();
+    trail_best_before_bar_index_ = -1;
+    trail_best_before_bar_position_cycle_ = 0;
+    trail_best_before_bar_fill_seq_ = 0;
+    priced_entry_activity_bar_ = -1;
+    priced_entry_filled_this_bar_ = false;
+    open_margin_slice_bar_ = -1;
 
     // Equity + position-size extremes.
     max_equity_ = initial_capital_;
