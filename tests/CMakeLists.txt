@@ -237,6 +237,28 @@ set(TEST_SOURCES
 find_package(Threads REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+set(_pf_script_cpp_abi_flags)
+if(PINEFORGE_ENABLE_SANITIZERS)
+    list(APPEND _pf_script_cpp_abi_flags --extra-flag=-fsanitize=address,undefined)
+endif()
+if(PINEFORGE_ENABLE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        list(APPEND _pf_script_cpp_abi_flags
+            --extra-flag=-fprofile-instr-generate --extra-flag=-fcoverage-mapping)
+    else()
+        list(APPEND _pf_script_cpp_abi_flags --extra-flag=--coverage)
+    endif()
+endif()
+add_test(
+    NAME test_script_cpp_abi
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/check_script_cpp_abi.py
+            --compiler ${CMAKE_CXX_COMPILER}
+            --library $<TARGET_FILE:pineforge>
+            --include ${PROJECT_SOURCE_DIR}/include
+            --generated-include ${PROJECT_BINARY_DIR}/include
+            ${_pf_script_cpp_abi_flags}
+)
+
 add_test(
     NAME test_derive_corpus_feeds
     COMMAND ${Python3_EXECUTABLE}

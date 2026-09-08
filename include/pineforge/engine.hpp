@@ -1076,6 +1076,11 @@ struct StrategyOverrides {
     int close_entries_rule = -1;
 };
 
+// The C++ subclass contract is internal, unlike pineforge.h's stable C ABI.
+// Changing its vtable requires all generated/native C++ objects to be rebuilt.
+// Version the mangled class name so an object using the old vtable cannot
+// silently link to the new run loop and dispatch the wrong virtual slot.
+inline namespace engine_script_run_v1 {
 class BacktestEngine {
 protected:
     // --- Position state ---
@@ -5158,4 +5163,5 @@ public:
     void trace(const std::string& name, int value)   { trace(name, static_cast<double>(value)); }
 };
 
+} // inline namespace engine_script_run_v1
 } // namespace pineforge

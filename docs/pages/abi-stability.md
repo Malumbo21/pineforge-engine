@@ -111,6 +111,15 @@ notice:
 - Internal symbol names (anything not tagged `PF_API`).
 - The shape of internal log lines (use them for humans, not parsers).
 
+Rebuild generated C++ objects against matching engine headers and the runtime
+archive. The script-run preparation hook uses the internal
+`engine_script_run_v1` inline namespace, so an object compiled against the old
+`BacktestEngine` vtable cannot silently bind the new run loop. Newly generated
+lifecycle-aware modules also require `PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1` at
+compile time. Regenerate and rebuild a strategy module to obtain complete
+script-state reset; replacing an archive does not retrofit an old module.
+These checks do not change the public C function signatures or POD layouts.
+
 If you find yourself reaching for any of these from outside the closed
 PineForge transpiler, you're holding it wrong — file an issue and we'll
 lift the missing surface into the public ABI.
