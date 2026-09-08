@@ -26,7 +26,7 @@
 
 TradingView's strategy tester is the reference every Pine author trusts, and nothing outside TradingView reproduced it — until now. PineForge is a C++17 runtime with a stable C ABI that runs PineScript v6 strategies exactly the way TradingView's broker emulator does: same fills, same sizing, same margin calls, same trailing stops, same `request.security()` buckets, on any OHLCV you give it, in microseconds per bar.
 
-- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,175 excellent, 15 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,305 matched by the verifier.
+- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,176 excellent, 14 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,306 matched by the verifier.
 - **Open.** Engine, transpiler, corpus, benchmarks and the validation tooling are all public and Apache-2.0. The only thing you cannot download is the closed test set, because TradingView's Terms of Service forbid redistributing community scripts.
 - **Fast.** In-process, no interpreter: median **162× faster than PyneCore** on 99 timed strategies. Parameter sweeps re-run a loaded `.so` with new inputs — no recompile, no fork.
 - **Deterministic to the bit.** Two runs with the same inputs produce identical trade lists. Same on Linux and macOS.
@@ -108,16 +108,18 @@ Every PineForge-compiled strategy `.so` exports this same ABI — write the harn
 
 ## Validation scoreboard
 
-**Round 32 · 2026-09-08:** **4,175 excellent / 15 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
+**Round 33 · 2026-09-08:** **4,176 excellent / 14 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
 
 | Board | Test set | Result | TradingView trades evaluated |
 |---|---|---|---|
 | **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | 429,866 |
-| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,866 excellent + 15 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
+| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,867 excellent + 14 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
 
-**2,819,967 TradingView trades** evaluated, **2,817,305 matched by the verifier** (99.91%), from the round 32 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
+**2,819,967 TradingView trades** evaluated, **2,817,306 matched by the verifier** (99.91%), from the round 33 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
 
-Round 32 improves the EUR/USD 15m **82 TRADE Strategy v8.4 (Pine v6 Ready)** from strong to excellent, with **100% trade matching and zero count gap**. Market entries with an explicit quantity now receive the existing rounded-cost and price-scale affordability checks in the ordinary flat-entry path. The change covers fractional lots worth less than one account-currency unit at 100% margin; fee calculations, opening-gap checks, and other execution modes retain their existing behavior. The fix uses broker state and actual lot-rounded quantities, with no strategy, symbol, date, or benchmark-ID conditions. Grading rules, verifier, harness, population, inputs, and tapes are unchanged.
+Round 33 supplies the declared April 1, 2025 start for `request.security()` history through the existing `inputs.json` metadata channel on every **NSE:NIFTY 15m** probe. **Turtle Traders Strategy** moves from strong to excellent, with zero count gap and zero exit-price and PnL error at the 90th percentile. **Execution Signals Strategy**, already excellent, also corrects three trade quantities and its cumulative PnL. All **191 NIFTY 15m probes now grade excellent**.
+
+This is an input configuration correction across the symbol's probe set. The C++ engine, codegen, verifier, grading rules, profile-selection code, reference tapes, feeds, and scored population are unchanged. Original explicit profile settings retain precedence over the supplied default. The campaign verified the registered input hash in every NIFTY report and then measured the full population; the other **4,188 trade CSVs are byte-identical** to round 32.
 
 ### The closed test, lane by lane
 
@@ -131,14 +133,14 @@ Round 32 improves the EUR/USD 15m **82 TRADE Strategy v8.4 (Pine v6 Ready)** fro
 | CME_MINI:NQ1! · 15m | 174 | 174 | — | — |
 | CME_MINI:NQ1! · 1D | 116 | 116 | — | — |
 | NASDAQ:AAPL · 15m | 356 | 354 | 2 | — |
-| NSE:NIFTY · 15m | 191 | 190 | 1 | — |
+| NSE:NIFTY · 15m | 191 | 191 | — | — |
 | NSE:NIFTY · 1D | 145 | 145 | — | — |
 | NYSE:F · 15m | 340 | 336 | 4 | — |
 | NYSE:F · 1D | 263 | 263 | — | — |
 | OANDA:EURUSD · 15m | 373 | 370 | 3 | — |
 | OANDA:XAUUSD · 15m | 376 | 374 | 2 | — |
 | OANDA:XAUUSD · 1D | 248 | 248 | — | — |
-| **Total** | **3,881** | **3,866** | **15** | **0** |
+| **Total** | **3,881** | **3,867** | **14** | **0** |
 
 ### How a probe is graded
 
