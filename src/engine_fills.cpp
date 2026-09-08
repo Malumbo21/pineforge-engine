@@ -407,7 +407,7 @@ void BacktestEngine::process_pending_orders(const Bar& bar) {
                     && !order.is_long))
             && check_risk_allow_entry(order.is_long)
             && stop_entry_margin_admission_declines(
-                order, fill.fill_price, bar);
+                order, fill.fill_price, bar, flat_dual_stop_pair);
         const double realized_before_fill = net_profit_sum_;
         apply_filled_order_to_state(
             order, i, fill.fill_price, fill.is_limit_fill, bar,
@@ -5115,7 +5115,8 @@ int BacktestEngine::pending_order_effective_levels(int index, double* stop,
 // price. Admission therefore never approves one quantity and executes
 // another.
 bool BacktestEngine::stop_entry_margin_admission_declines(
-        const PendingOrder& order, double fill_price, const Bar& /*bar*/) const {
+        const PendingOrder& order, double fill_price, const Bar& /*bar*/,
+        bool flat_dual_stop_pair) const {
     if (order.type != OrderType::ENTRY
         || std::isnan(order.stop_price)
         || !std::isnan(order.limit_price)
@@ -5131,7 +5132,8 @@ bool BacktestEngine::stop_entry_margin_admission_declines(
         || cost_basis <= 0.0) {
         return false;
     }
-    const double fill_qty = use_default_stop_placement_qty(order, fill_price)
+    const double fill_qty = use_default_stop_placement_qty(
+        order, fill_price, flat_dual_stop_pair)
         ? std::abs(order.default_stop_placement_qty)
         : std::abs(calc_qty_for_type(fill_price, order.qty, order.qty_type));
     const double required = fill_qty * cost_basis * syminfo_.pointvalue
@@ -5242,7 +5244,8 @@ void BacktestEngine::apply_filled_order_to_state(
     // CANCELLED (consumed here, removed by compaction). Does NOT touch the
     // :443 created_bar eligibility, the signal-time MARKET gate, or any
     // margin=0 path (all byte-identical when margin_pct==0).
-    if (stop_entry_margin_admission_declines(order, fill_price, bar)) {
+    if (stop_entry_margin_admission_declines(
+            order, fill_price, bar, flat_dual_stop_pair)) {
         decline_and_cancel();
         return;
     }

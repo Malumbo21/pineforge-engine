@@ -31,6 +31,7 @@ struct Control {
     bool oca = false;
     bool default_percent = false;
     int forced_path = 0;
+    double injected_long_snapshot = NaN;
 };
 
 class Pair : public BacktestEngine {
@@ -61,7 +62,13 @@ public:
             // Derived ABI values at the stable flat signal boundary remain
             // the same quantities the covered transactions later consume.
             for (size_t i = 0; i < pending_orders_.size(); ++i) {
-                const auto& order = pending_orders_[i];
+                auto& order = pending_orders_[i];
+                // Test-only mutation canary, never a TradingView oracle.
+                // Make the actual admission path face an existing snapshot
+                // that is larger than its live-equity re-size.
+                if (order.is_long && std::isfinite(c.injected_long_snapshot)) {
+                    order.default_stop_placement_qty = c.injected_long_snapshot;
+                }
                 double q = NaN;
                 int close_only = -1, partition = -1;
                 CHECK(probe_fill_qty(static_cast<int>(i),
@@ -72,6 +79,8 @@ public:
             }
         }
         if (bar_index_ == 1) {
+            after_fills_signed_qty = signed_position_size();
+            after_fills_live_buy_qty = calc_qty_for_type(long_stop(), NaN, -1);
             strategy_cancel_all();
             strategy_close_all();
         }
@@ -82,6 +91,8 @@ public:
     bool flat_and_empty() const { return position_side_ == PositionSide::FLAT && pending_orders_.empty(); }
     double abi_long_qty = NaN;
     double abi_short_qty = NaN;
+    double after_fills_signed_qty = NaN;
+    double after_fills_live_buy_qty = NaN;
 private:
     Control c;
 };
@@ -135,6 +146,26 @@ void run(const Control& control, std::vector<Expected> expected) {
         CHECK(std::abs(pair.abi_long_qty - (control.capital == 10548 ? 3.16 : 3.15)) < 1e-10);
     }
 }
+// Unlike the literal TV controls, this is a mutation-sensitive component
+// test. A 3.17 snapshot cannot fit capital10548 at the later3337.762 fill,
+// while live re-sizing would approve3.15. Run the real scanner: if either
+// admission caller loses the pair context it approves3.15 but dispatches3.17,
+// incorrectly reversing long0.01. The preserved short proves rejection.
+void admission_snapshot_canary() {
+    Control control{"admission uses dispatched snapshot",false,3.16,3.16,
+                    10548,100,false,false,true,0,3.17};
+    Pair pair(control);
+    const Bar bars[] = {
+        {3332.84,3332.87,3330.565,3330.965,1497,1755560700000LL},
+        {3330.915,3337.985,3326.285,3336.315,5952,1755561600000LL},
+        {3336.29,3339.355,3335.65,3337.485,2256,1755562500000LL},
+    };
+    pair.run(bars,3);
+    CHECK(std::abs(pair.abi_long_qty - 3.17) < 1e-10);
+    CHECK(std::abs(pair.after_fills_live_buy_qty - 3.15) < 1e-10);
+    CHECK(std::abs(pair.after_fills_signed_qty + 3.16) < 1e-10);
+    CHECK(pair.flat_and_empty());
+}
 } // namespace
 
 int main() {
@@ -154,6 +185,7 @@ int main() {
     // Forcing the already-natural order changes no transaction policy.
     run({"same low-first path forced",false,3.15,3.16,20000,100,false,false,false,2}, less);
     run({"same high-first path forced",true,3.16,3.15,20000,100,false,false,false,1}, {{true,3.15,3333,3331.5,1}, {true,0.01,3333,3332.84,2}});
+    admission_snapshot_canary();
     std::printf("%d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;
 }

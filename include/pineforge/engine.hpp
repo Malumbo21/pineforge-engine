@@ -4079,7 +4079,8 @@ private:
                                      std::vector<size_t>& filled_indices,
                                      bool flat_dual_stop_pair = false);
     bool stop_entry_margin_admission_declines(
-        const PendingOrder& order, double fill_price, const Bar& bar) const;
+        const PendingOrder& order, double fill_price, const Bar& bar,
+        bool flat_dual_stop_pair = false) const;
     // True iff `order` is a default percent_of_equity <= 100 pure STOP that
     // carries its placement snapshot (PendingOrder::default_stop_placement_qty)
     // and the fill price is a usable positive print: the fill-time admission
