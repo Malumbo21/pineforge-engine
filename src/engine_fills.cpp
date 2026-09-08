@@ -246,7 +246,8 @@ void BacktestEngine::process_carried_long_money_before_priced_orders(
                               /*opening_only=*/true);
 }
 
-void BacktestEngine::process_pending_orders(const Bar& bar) {
+void BacktestEngine::process_pending_orders(const Bar& bar, bool before_pooc_script) {
+    const uint64_t fills_at_pass_start = broker_fill_event_seq_;
     // Update risk state
     update_risk_state();
     process_carried_long_money_before_priced_orders(bar);
@@ -394,8 +395,12 @@ void BacktestEngine::process_pending_orders(const Bar& bar) {
         // pre-on_bar equity, so re-freeze default-sized market orders
         // exactly like the end-of-bar call sites do.
         if (fill.exit_path_fill
-            && margin_call_slice_before_priced_exit(
-                   bar, fill.fill_price, fill.exit_path_position)) {
+            && ((before_pooc_script && broker_fill_event_seq_ == fills_at_pass_start
+                 && pooc_trail_money_pre_exit_scope(bar, order, fill.exit_path_position)
+                 && tv_money_long_margin_call(bar, /*carried_pooc_pre_close=*/true,
+                                              /*opening_only=*/false, fill.exit_path_position))
+                || margin_call_slice_before_priced_exit(
+                       bar, fill.fill_price, fill.exit_path_position))) {
             refresh_frozen_default_sizing_after_margin_call();
         }
 
@@ -1905,9 +1910,58 @@ bool BacktestEngine::pooc_opening_money_scope(const Bar& bar) const {
         && entry.entry_bar_index == position_open_bar_;
 }
 
+// The resolved trail fill owns a path position, so only earlier waypoints
+// can value this still-carried lot. An unresolved foreign EXIT is not a
+// competing reservation on that lot; other live orders keep their old path.
+bool BacktestEngine::pooc_trail_money_pre_exit_scope(
+        const Bar& bar, const PendingOrder& order, double exit_path_position) const {
+    if (!process_orders_on_close_ || position_side_ != PositionSide::LONG
+        || calc_on_order_fills_ || coof_scheduler_active_ || bar_magnifier_enabled_
+        || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
+        || position_open_bar_ < 0 || position_open_bar_ >= bar_index_
+        || bar.timestamp != current_bar_.timestamp
+        || !(position_qty_ > 1.0 + kQtyEpsilon) || !std::isfinite(position_qty_)
+        || position_entry_count_ != 1 || pyramid_entries_.size() != 1
+        || pyramiding_ < 0 || pyramiding_ > 1
+        || pyramid_entries_.front().entry_bar_index != position_open_bar_
+        || pyramid_entries_.front().entry_incarnation == 0
+        || commission_value_ != 0.0 || slippage_ != 0
+        || margin_long_ != 100.0 || syminfo_.pointvalue != 1.0
+        || active_account_currency_fx() != 1.0
+        || !account_currency_fx_timestamps_.empty()
+        || !(qty_step_ > 0.0 && qty_step_ < 1.0) || !tv_money_scope(bar.close)
+        || !std::isfinite(exit_path_position)
+        || !(exit_path_position > kPathPosEps) || exit_path_position > 3.0 + kPathPosEps
+        || order.type != OrderType::EXIT
+        || order.from_entry != pyramid_entries_.front().entry_id
+        || order.created_bar >= bar_index_ || order.dormant_bracket
+        || order.dormant_reissue_pending || order.suppress_as_declined_reversal_close
+        || !order.oca_name.empty() || order.oca_type != 0
+        || !std::isnan(order.stop_price) || !std::isnan(order.limit_price)
+        || !std::isnan(order.profit_ticks) || !std::isnan(order.loss_ticks)
+        || !std::isfinite(order.trail_offset) || !(order.trail_offset > 0.0)
+        || (!std::isfinite(order.trail_points) && !std::isfinite(order.trail_price))) {
+        return false;
+    }
+    const bool full_position = std::isfinite(order.qty)
+        ? order.qty >= position_qty_
+        : std::isnan(order.qty) && std::isfinite(order.qty_percent)
+            && order.qty_percent >= 100.0;
+    if (!full_position) return false;
+    for (const auto& other : pending_orders_) {
+        if (&other == &order) continue;
+        if (other.type != OrderType::EXIT || other.from_entry.empty()
+            || cycle_filled_entry_ids_.count(other.from_entry) != 0
+            || other.created_bar >= bar_index_ || other.dormant_bracket
+            || other.dormant_reissue_pending) return false;
+    }
+    return true;
+}
+
 bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
                                               bool carried_pooc_pre_close,
-                                              bool opening_only) {
+                                              bool opening_only,
+                                              double before_exit_path_position) {
     if (!margin_call_enabled_) return false;
     if (position_side_ != PositionSide::LONG) return false;
     if (!std::isfinite(margin_long_)
@@ -1920,17 +1974,22 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
             || (coof_scheduler_active_ && !coof_fill_recalc_active_
                 && !coof_evaluating_path_segment_
                 && !coof_cursor_is_bar_close_ && coof_hist_path_index_ == 0));
+    const bool before_trail_exit = carried_pooc_pre_close && !opening_only
+        && std::isfinite(before_exit_path_position)
+        && before_exit_path_position > kPathPosEps
+        && before_exit_path_position <= 3.0 + kPathPosEps;
     if (process_orders_on_close_) {
-        // Apart from the separately proven positive-slip opening-only route,
-        // this extension has no oracle for pending orders racing the money
-        // trigger, adds, fees/slippage, currency conversion or risk-forced
-        // exits. Keep their prior POOC behavior. End-of-bar calls stay out
+        // Apart from the positive-slip opening-only route and the validated
+        // old trailing exit's bounded path, pending-order races, adds,
+        // fees/slippage, conversion and risk-forced exits keep their prior
+        // POOC behavior. End-of-bar calls stay out
         // even when the script merely reduced an older position: its current
         // quantity did not exist over this bar's already-traversed path.
         if (!carried_pooc_pre_close || position_open_bar_ < 0
-            || position_open_bar_ >= bar_index_ || !pending_orders_.empty()
+            || position_open_bar_ >= bar_index_
+            || (!pending_orders_.empty() && !before_trail_exit)
             || opening_affordability_pending_
-            || (pyramiding_ != 0 && !slipped_pooc_open)
+            || (pyramiding_ != 0 && !slipped_pooc_open && !before_trail_exit)
             || position_entry_count_ != 1 || pyramid_entries_.size() != 1
             || pyramid_entries_.front().entry_bar_index >= bar_index_
             || commission_value_ != 0.0
@@ -1995,6 +2054,8 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
     int fire_path_point = -1;
     const int path_end = opening_only ? 1 : 4;
     for (int i = start; i < path_end; ++i) {
+        if (before_trail_exit
+            && !(static_cast<double>(i) < before_exit_path_position - kPathPosEps)) break;
         const double p = path[i];
         if (!std::isfinite(p) || !(p > 0.0)) continue;
         const double value = qty * p * pv * fx;

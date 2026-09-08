@@ -1995,7 +1995,7 @@ protected:
                         const std::string& oca_name = "",
                         int oca_type = 0);
 
-    void process_pending_orders(const Bar& bar);
+    void process_pending_orders(const Bar& bar, bool before_pooc_script = false);
     struct CoofFillResult {
         bool filled = false;
         double fill_price = std::numeric_limits<double>::quiet_NaN();
@@ -4103,14 +4103,20 @@ private:
     // margin-call trigger on a margin-100 LONG (process_margin_call; rule
     // and pins on tv_money_long_margin_call in engine_fills.cpp).
     // The POOC extension is called only before the close-time script or at
-    // the specifically scoped positive-slip opening point, with no pending
-    // broker orders. End-of-bar callers keep it disabled so a
+    // the specifically scoped positive-slip opening point, normally with no
+    // pending broker orders. End-of-bar callers keep it disabled so a
     // close/add cannot make earlier prices act on the post-close position.
     // Opening-only callers retain the actual chart bar for all eligibility
-    // checks while restricting valuation to its first path point.
+    // checks while restricting valuation to its first path point. A scoped
+    // old trailing exit can instead bound valuation strictly before its fill.
     bool tv_money_long_margin_call(const Bar& bar,
                                   bool carried_pooc_pre_close = false,
-                                  bool opening_only = false);
+                                  bool opening_only = false,
+                                  double before_exit_path_position =
+                                      std::numeric_limits<double>::quiet_NaN());
+    bool pooc_trail_money_pre_exit_scope(const Bar& bar,
+                                        const PendingOrder& order,
+                                        double exit_path_position) const;
     // Positive-slip, single terminal-C MARKET lot covered by the opening
     // money-event controls. Shared by post-entry deferral and next-O dispatch.
     bool pooc_opening_money_scope(const Bar& bar) const;

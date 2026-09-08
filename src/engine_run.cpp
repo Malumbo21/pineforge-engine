@@ -223,7 +223,7 @@ void BacktestEngine::dispatch_bar() {
     if (process_orders_on_close_) {
         const bool no_pending_broker_orders = pending_orders_.empty();
         const uint64_t fills_before_pending = broker_fill_event_seq_;
-        process_pending_orders(current_bar_);   // step 1: old stop/limit
+        process_pending_orders(current_bar_, /*before_pooc_script=*/true); // step 1: old stop/limit
         evaluate_max_intraday_loss_over_path(current_bar_);
         // Round 13 D: the carried 1x-long rounded-money event belongs before
         // the close-time script. TV's full/30% close pins read the already

@@ -9,6 +9,7 @@ set(TEST_SOURCES
     test_stop_open_margin_script_state
     test_carried_pooc_short_margin_state
     test_rounded_carried_short_trail
+    test_pooc_long_money_before_trail
     test_pooc_flat_signal_cost
     test_small_money_margin_residual
     test_high_value_signal_cost
