@@ -909,6 +909,7 @@ void BacktestEngine::run(const Bar* bars, int n) {
             "timestamped account-currency FX does not support calc_on_order_fills");
     }
     reset_run_state();
+    prepare_script_run(bars, n, !stream_warmup_mode_);
     equity_curve_.reserve((size_t)std::max(n, 0));
 
     std::string detected_tf = "";
@@ -1520,8 +1521,6 @@ void BacktestEngine::run_tf_impl(const Bar* input_bars, int n_input,
     magnifier_samples_ = magnifier_samples;
     magnifier_dist_ = magnifier_dist;
 
-    configure_security_evaluators();
-
     // Runtime diagnostics baseline
     diag_input_bars_processed_ = n_input;
     diag_script_bars_processed_ = 0;
@@ -1529,6 +1528,14 @@ void BacktestEngine::run_tf_impl(const Bar* input_bars, int n_input,
     diag_magnifier_sample_ticks_processed_ = 0;
 
     reset_run_state();
+    // Match the generated wrapper's original static/dynamic eligibility from
+    // the caller's arguments, before auto-detection filled effective TFs.
+    // A new stream always computes its warmup dynamically so later ticks do
+    // not inherit a finite historical precalculation cache.
+    prepare_script_run(input_bars, n_input,
+        !stream_warmup_mode_ && !bar_magnifier
+        && input_tf.empty() && script_tf.empty());
+    configure_security_evaluators();
 
     // Determine aggregation ratio for script TF
     int ratio = tf_ratio(effective_input_tf, effective_script_tf);

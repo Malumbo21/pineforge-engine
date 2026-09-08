@@ -26,6 +26,11 @@
 // Angle-bracket form is the installed public path (deliberate).
 #include <pineforge/pineforge.h>
 
+// Generated modules using the full script lifecycle reset must be rebuilt
+// against a runtime providing this hook. This is an internal C++ capability;
+// it does not change any public C POD or exported C function signature.
+#define PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1 1
+
 namespace pineforge {
 
 enum class PositionSide { FLAT, LONG, SHORT };
@@ -3752,6 +3757,14 @@ protected:
         bool calling_bar_complete = false);
     void publish_security_eval_state_at_calling_boundary(
         SecurityEvalState& state);
+
+    // A new batch run (including stream_begin's historical warmup) starts a
+    // fresh script lifecycle. Called once after broker reset, before any
+    // requested/chart computation or per-bar checkpoint. Generated subclasses
+    // reset their own persistent state here, then optionally prepare the
+    // current run's static TA cache. Config/inputs/feeds belong to the engine
+    // and survive. Streaming ticks and fill recalculations never call this.
+    virtual void prepare_script_run(const Bar*, int, bool) {}
 
     virtual void configure_security_evaluators() {}
     virtual void evaluate_security(int sec_id, const Bar& bar, bool is_complete) {}
