@@ -2090,6 +2090,65 @@ protected:
         }
         return true;
     }
+    // Same-bar POOC money admission for one true-flat long MARKET parent.
+    // Quantity sizing keeps its existing slipped divisor. The money checks
+    // use the recorded signal mark and a tick-built slipped price instead.
+    bool pooc_flat_money_admission_scope(const PendingOrder& order,
+                                         double fill_price) const {
+        if (!process_orders_on_close_ || order.type != OrderType::MARKET
+            || !order.is_long || order.incarnation == 0
+            || order.created_bar != bar_index_
+            || order.created_position_side != PositionSide::FLAT
+            || order.created_after_position_close_in_bar
+            || order.created_during_coof_recalc || order.created_by_same_id_replacement
+            || !order.oca_name.empty() || order.oca_type != 0
+            || position_side_ != PositionSide::FLAT || position_entry_count_ != 0
+            || !pyramid_entries_.empty() || pyramiding_ < 0 || pyramiding_ > 1
+            || margin_long_ != 100.0 || commission_value_ != 0.0
+            || slippage_ < 0 || !(syminfo_mintick_ > 0.0)
+            || !(qty_step_ > 0.0 && qty_step_ < 1.0)
+            || syminfo_.pointvalue != 1.0 || account_currency_fx_ != 1.0
+            || active_account_currency_fx() != 1.0
+            || !account_currency_fx_timestamps_.empty()
+            || bar_magnifier_enabled_ || stream_warmup_mode_
+            || stream_phase_ != StreamPhase::IDLE
+            || max_intraday_filled_orders_ > 0 || risk_max_intraday_loss_ != 0.0
+            || risk_max_drawdown_ != 0.0 || risk_max_cons_loss_days_ > 0
+            || !std::isfinite(fill_price) || !(fill_price > 0.0)) return false;
+        if (calc_on_order_fills_) {
+            if (!coof_scheduler_active_ || !coof_cursor_is_bar_close_
+                || coof_fill_recalc_active_ || coof_evaluating_path_segment_) return false;
+        } else if (coof_scheduler_active_) return false;
+        for (const auto& other : pending_orders_)
+            if (other.incarnation != order.incarnation) return false;
+
+        const bool default_all_in = std::isnan(order.qty)
+            && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
+            && default_qty_value_ == 100.0
+            && order.opening_affordability_exemption_candidate
+            && std::isfinite(order.frozen_default_qty) && order.frozen_default_qty > 0.0
+            && std::isfinite(order.sizing_equity) && order.sizing_equity > 0.0
+            && order.sizing_fx == 1.0;
+        const bool explicit_fixed = std::isfinite(order.qty) && order.qty > 0.0
+            && (order.qty_type < 0 || order.qty_type == static_cast<int>(QtyType::FIXED))
+            && std::isfinite(order.affordability_placement_equity)
+            && order.affordability_placement_equity > 0.0
+            && order.affordability_held_qty == 0.0
+            && (!order.sbmt_member || (order.sbmt_tx_qty == order.sbmt_own_qty
+                                      && !order.sbmt_kept_over_cap));
+        if (!default_all_in && !explicit_fixed) return false;
+        const double mark = default_all_in ? order.sizing_mark
+                                          : order.affordability_signal_price;
+        const double price = default_all_in ? order.sizing_price
+            : mark + slippage_ * syminfo_mintick_;
+        if (!std::isfinite(mark) || !(mark > 0.0) || !std::isfinite(price)
+            || !(price > 0.0) || !tv_money_scope(price)
+            || round_to_mintick(fill_price) != mark) return false;
+        const double booked = apply_fill_slippage(fill_price, true);
+        return slippage_ == 0 ? booked == price
+            : round_to_mintick(booked) == round_to_mintick(price);
+    }
+
     // R24 signal-cost controls: a fractional lot worth >=1 account unit can
     // still cross the rounded-money admission boundary. BTC Q9.36259 at
     // 112380.33 costs 1052170.9538547, rounded to 1052170.954; exact signal

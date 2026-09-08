@@ -5183,6 +5183,7 @@ void BacktestEngine::apply_filled_order_to_state(
     // Round14's narrow closing-carry residue is consumed only after rule 2
     // fails, with an actual same-signal close-point MC receipt. A difference
     // between the requested quantity and live position is not sufficient.
+    const bool pooc_money_admission = pooc_flat_money_admission_scope(order, fill_price);
     if (order.type == OrderType::MARKET
         && !order.affordability_close_only
         && !std::isnan(order.sizing_equity) && !std::isnan(order.sizing_mark)
@@ -5224,11 +5225,13 @@ void BacktestEngine::apply_filled_order_to_state(
             const double fx_s =
                 std::isfinite(order.sizing_fx) && order.sizing_fx > 0.0
                     ? order.sizing_fx : active_account_currency_fx();
-            // The cost at the price the quantity was floored against (the
-            // slipped sizing price; == tick(close_S) at slippage 0, every
-            // pinned tape): by the floor invariant the EXACT cost never
-            // exceeds the equity there, so only the rounding can fail it.
-            const double cost_s = order.frozen_default_qty * order.sizing_price
+            // Covered same-bar POOC admission prices this cost at the
+            // signal mark. Execution slippage belongs to its separate
+            // price-scale check. Other books keep the frozen sizing basis;
+            // the quantity divisor itself is unchanged in every case.
+            const double cost_price = pooc_money_admission
+                ? order.sizing_mark : order.sizing_price;
+            const double cost_s = order.frozen_default_qty * cost_price
                                   * syminfo_.pointvalue * fx_s;
             // Both checks read the frozen signal-close equity E_s: 4782/4782
             // taro + every-bar reversal decisions fit E_s (the fill-marked
@@ -5250,8 +5253,10 @@ void BacktestEngine::apply_filled_order_to_state(
                     order.frozen_default_qty * syminfo_.pointvalue * fx_s;
                 const double affordable_price = tv_money_round(
                     tv_money_round(judged_equity) / notional_per_price);
+                const double admission_price = pooc_money_admission && slippage_ > 0
+                    ? round_to_mintick(order.sizing_price) : order.sizing_price;
                 if (std::isfinite(affordable_price)
-                    && affordable_price < order.sizing_price) {
+                    && affordable_price < admission_price) {
                     // Round 11 family AG (campaign notes
                     // log-20260905t232805z-41661c90 and
                     // log-20260905t233556z-7f5ce2ed; 19 lab tv tapes
@@ -5463,29 +5468,12 @@ void BacktestEngine::apply_filled_order_to_state(
         //     the asymmetry is intentional. It never reaches here — the
         //     candidate flag is only set for high-level strategy.entry, and the
         //     type==MARKET guard excludes RAW regardless.
-        //   - process_orders_on_close: the signal bar IS the fill bar, so
-        //     slipped_fill == sizing_price and the frozen qty was floored to
-        //     fit sizing_equity — the shortfall is structurally 0 (no-op).
-        //     That equality holds because the sizing basis is the mintick-
-        //     ROUNDED close (frozen_sizing_price / calc_qty, engine.hpp),
-        //     the same tick bar_fill_price books. It was FALSE while sizing
-        //     divided by the raw close: on a sub-tick x.xx5 print the fill
-        //     rounded up, the quantity had been floored against the lower
-        //     raw price, and this arm declined a zero-gap fill by
-        //     ~qty * mintick/2 — the mechanism behind 463/463 missing
-        //     taro-F entries (0 counterexamples) and every one of the
-        //     26 drgunjan-F / 6 mazi-F missing entries, all on sub-penny
-        //     signal closes. With the basis on-tick, a fill AT the signal
-        //     close yields a shortfall that is identically zero at
-        //     slippage 0 (sizing_price and the fill are the same
-        //     round_to_mintick double) and within the float guard
-        //     otherwise: with slippage ticks the sizing price is
-        //     round(c) + s*tick while the slipped fill is
-        //     ceil((round(c) + s*tick)/tick - 1e-9)*tick, which differ by
-        //     one ulp on 42,656 of 149,700 (price, slippage 1..3) 2dp
-        //     combos, a qty*ulp (~1e-11) shortfall the max(1e-9, E*1e-12)
-        //     guard below absorbs. Either way this gate only ever sees a
-        //     genuine close->open gap.
+        //   - same-bar POOC has no time gap, but a quantity floored from
+        //     ten-digit equity can still exceed the raw cash slightly.
+        //     Covered parents passed the signal-cost and price-scale
+        //     checks above and skip this gap-only decline. The old blanket
+        //     claim that a POOC shortfall must be zero was too strong.
+        //     Other classes keep the established on-tick gap checks.
         if (order.opening_affordability_exemption_candidate
             && position_side_ == PositionSide::FLAT
             && !same_dir && !reversal
@@ -5498,7 +5486,12 @@ void BacktestEngine::apply_filled_order_to_state(
                                         * (margin_pct / 100.0);
             const double float_guard =
                 std::max(1e-9, std::abs(order.sizing_equity) * 1e-12);
-            if (gap_notional > order.sizing_equity + float_guard) {
+            // A same-bar POOC parent already passed its signal-cost and
+            // price-scale admission. Its small slipped-money residual is
+            // not a close-to-open gap and must retain the ordinary C
+            // exemption; do not set admitted_flat_on_price_gap_band here.
+            if (gap_notional > order.sizing_equity + float_guard
+                && !pooc_money_admission) {
                 if (price_gap_scope && price_gap_affordable()) {
                     admitted_flat_on_price_gap_band = true;
                 } else {
@@ -5742,7 +5735,7 @@ void BacktestEngine::apply_filled_order_to_state(
                 && order.affordability_placement_equity > 0.0
                 && std::isfinite(own_qty) && own_qty > 0.0
                 && tv_money_scope(order.affordability_signal_price);
-            if (explicit_money_scope) {
+            if (explicit_money_scope || pooc_money_admission) {
                 const double signal_cost =
                     own_qty * order.affordability_signal_price;
                 if (order.affordability_placement_equity + 1e-9
@@ -5752,8 +5745,12 @@ void BacktestEngine::apply_filled_order_to_state(
                 }
                 const double affordable_price = tv_money_round(
                     tv_money_round(order.affordability_placement_equity) / own_qty);
+                const double admission_price = pooc_money_admission && slippage_ > 0
+                    ? round_to_mintick(order.affordability_signal_price
+                                       + slippage_ * syminfo_mintick_)
+                    : order.affordability_signal_price;
                 if (std::isfinite(affordable_price)
-                    && affordable_price < order.affordability_signal_price) {
+                    && affordable_price < admission_price) {
                     decline_and_cancel();
                     return;
                 }
