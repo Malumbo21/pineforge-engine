@@ -738,11 +738,16 @@ void BacktestEngine::reset_run_state() {
     // Open position + pending orders.
     reset_position_state_to_flat();   // position_side_/qty/price/time/count,
                                       // pyramid_entries_, trail, partial ids
+    // Cycle ownership is scoped to this run, like order incarnations below.
+    // A flat transition within a run must keep advancing it; only a new run
+    // returns the allocator to its constructor value.
+    next_position_cycle_seq_ = 1;
     pending_orders_.clear();
     // PendingOrder incarnations are report provenance scoped to one run.
     // Resetting keeps a reused handle byte/identity-equivalent to a fresh
     // handle while preserving the invariant that zero means unavailable.
     next_order_incarnation_ = 1;
+    next_order_seq_ = 1;
     last_rejected_strategy_entry_call_bar_ = -1;
     pending_flat_market_pair_disqualified_bars_.clear();
     default_flat_market_gross_disqualified_bars_.clear();

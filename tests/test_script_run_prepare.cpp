@@ -44,6 +44,18 @@ public:
     }
 };
 
+class CycleProbe final : public BacktestEngine {
+public:
+    void on_bar(const Bar&) override {
+        if (bar_index_ % 3 == 0)
+            strategy_entry("L", true, na<double>(), na<double>(), 1.0);
+        if (bar_index_ % 3 == 1) strategy_close_all();
+    }
+    int64_t next_cycle() const { return next_position_cycle_seq_; }
+    int64_t next_order_sequence() const { return next_order_seq_; }
+    const std::vector<uint64_t>& hashes() const { return broker_state_hashes_; }
+};
+
 int main() {
     const Bar bars[] = {
         {10, 11, 9, 10, 1, 60000},
@@ -60,6 +72,24 @@ int main() {
     base.run(bars, 3);
     assert(p.preparations == 2 && p.allow_precalc);
     assert((p.observed == std::vector<int>{8, 9, 10}));
+
+    const Bar cycle_bars[] = {
+        {10, 10, 10, 10, 1, 60000}, {11, 11, 11, 11, 1, 120000},
+        {12, 12, 12, 12, 1, 180000}, {13, 13, 13, 13, 1, 240000},
+        {14, 14, 14, 14, 1, 300000}, {15, 15, 15, 15, 1, 360000},
+    };
+    CycleProbe fresh_cycles, reused_cycles;
+    fresh_cycles.set_broker_state_hash_recording(true);
+    reused_cycles.set_broker_state_hash_recording(true);
+    fresh_cycles.run(cycle_bars, 6);
+    reused_cycles.run(cycle_bars, 6);
+    reused_cycles.run(cycle_bars, 6);
+    // Two separate opens within each run consume two distinct cycle IDs.
+    assert(fresh_cycles.next_cycle() == 3);
+    assert(reused_cycles.next_cycle() == fresh_cycles.next_cycle());
+    assert(fresh_cycles.next_order_sequence() == 5);
+    assert(reused_cycles.next_order_sequence() == fresh_cycles.next_order_sequence());
+    assert(reused_cycles.hashes() == fresh_cycles.hashes());
 
     p.prepared = false;
     base.run(bars, 3, "1", "1");
