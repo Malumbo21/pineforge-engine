@@ -15,6 +15,27 @@
 namespace pineforge {
 using namespace internal;
 
+namespace {
+// ABI v4 live-runtime surface (task 4): installs this run's forced path
+// order as the thread-local internal::bar_path_uses_high_first override for
+// exactly the duration of the scope, restoring whatever override value was
+// in effect before it (not unconditionally AUTO) on every exit path --
+// normal return or an exception unwinding through a `try`. Restoring the
+// PRIOR value rather than hardcoding 0 is future-proofed against a caller
+// ever nesting two overridden runs on the same thread; today there is no
+// such nesting (each public run() entrypoint reaches exactly one of the two
+// installation sites below, see the single-TF run() and run_tf_impl), so in
+// practice the prior value is always AUTO (0). One file-scope definition
+// shared by both installation sites instead of a duplicated local struct.
+struct PathOrderScope {
+    int prev;
+    explicit PathOrderScope(int mode) : prev(internal::path_order_override()) {
+        internal::set_path_order_override(mode);
+    }
+    ~PathOrderScope() { internal::set_path_order_override(prev); }
+};
+}  // namespace
+
 bool BacktestEngine::set_account_currency_fx_series(
         const int64_t* timestamps_ms, const double* rates, int n) {
     // Timestamped FX is not route-complete for the realtime scheduler. Reject
@@ -110,6 +131,13 @@ void BacktestEngine::invoke_chart_on_bar(const Bar& bar) {
 //   4. New market orders fill at bar.close; new stop/limit wait for next bar
 // When process_orders_on_close_ is false, only steps 1-3 run.
 void BacktestEngine::dispatch_bar() {
+    // ABI v4 live-runtime surface (task 4): reset the per-bar dual-entry-stop
+    // arbitration snapshot once per bar, before anything else -- including
+    // the COOF early return below, so a calc_on_order_fills_ bar (which never
+    // writes this snapshot) correctly reads None instead of a stale value
+    // left by an earlier standard-path bar. See last_bar_dual_entry_decision_
+    // (engine.hpp) and its write site (engine_fills.cpp).
+    last_bar_dual_entry_decision_ = internal::DualEntryStopPathWinner::None;
     if (calc_on_order_fills_) {
         dispatch_bar_calc_on_order_fills();
         return;
@@ -173,6 +201,17 @@ void BacktestEngine::dispatch_bar() {
                 trades_[ti].exit_id = "";
             }
         }
+    }
+
+    if (probe_suppress_tail_logic_ && is_tail_bar_) {
+        // Live probe (spec §3.2): the forming bar runs only the pre-on_bar
+        // steps, so the run's last-bar fills are the settled book's fills
+        // against the forming bar and the post-run book is the in-force book.
+        _push_source_series();
+        process_pending_orders(current_bar_);
+        evaluate_max_intraday_loss_over_path(current_bar_);
+        update_per_trade_extremes();
+        return;
     }
 
     // Advance native source-series history before strategy logic so
@@ -742,6 +781,7 @@ void BacktestEngine::reset_run_state() {
     equity_curve_.clear();           // retain capacity (handle-reuse sweep pattern)
     bars_in_market_ = 0;
     first_bar_open_ = std::numeric_limits<double>::quiet_NaN();
+    broker_state_hashes_.clear();    // ABI v4 task 6: retain capacity like equity_curve_
 
     // Risk halt latch + day trackers (one-way halt must not survive a rerun).
     risk_halted_ = false;
@@ -782,6 +822,12 @@ void BacktestEngine::reset_run_state() {
 
     // Per-bar cursor + session-predicate state.
     bar_index_ = 0;
+    // ABI v4 task 4 fix (final review F6): a run that dispatches zero
+    // script bars never reaches dispatch_bar()'s own per-bar reset (top of
+    // dispatch_bar(), engine_run.cpp), which would otherwise leave a reused
+    // handle's last_bar_dual_entry_decision_ (also hashed by
+    // engine_state_hash.cpp) reading the PREVIOUS run's value.
+    last_bar_dual_entry_decision_ = internal::DualEntryStopPathWinner::None;
     trail_close_restart_bar_ = -1;
     prev_bar_timestamp_ = 0;
     // The chart's native daily partition is rebuilt per run by the
@@ -844,6 +890,8 @@ void BacktestEngine::reset_run_state() {
 
 void BacktestEngine::run(const Bar* bars, int n) {
     last_error_.clear();
+    last_run_status_ = 0;
+    abort_requested_.store(false, std::memory_order_relaxed);
     if (n > 0 && bars != nullptr) {
         last_bar_time_ = bars[n - 1].timestamp;
         last_bar_index_ = n - 1;
@@ -851,6 +899,10 @@ void BacktestEngine::run(const Bar* bars, int n) {
         last_bar_time_ = 0;
         last_bar_index_ = 0;
     }
+    // ABI v4 live-runtime surface (task 4): install this run's forced path
+    // order for exactly the duration of this call (see the file-scope
+    // PathOrderScope above).
+    PathOrderScope path_order_scope(path_order_mode_);
     try {
     if (!account_currency_fx_timestamps_.empty() && calc_on_order_fills_) {
         throw std::runtime_error(
@@ -866,6 +918,10 @@ void BacktestEngine::run(const Bar* bars, int n) {
     input_tf_ = detected_tf;
     script_tf_ = detected_tf;
     script_tf_seconds_ = tf_to_seconds(script_tf_);
+    // Single-TF path: bars IS the script-bar array (input_tf == script_tf
+    // trivially, no aggregation), so the exact/extrapolate-from-last rule
+    // applies.
+    apply_realtime_tail_horizon(bars, n, /*script_bar_geometry=*/true);
 
     // Runtime diagnostics (single-timeframe path)
     diag_input_bars_processed_ = n;
@@ -885,11 +941,13 @@ void BacktestEngine::run(const Bar* bars, int n) {
     }
 
     for (int i = 0; i < n; i++) {
+        check_abort();
         current_bar_ = bars[i];
         bar_index_ = i;
+        is_tail_bar_ = (i == n - 1);
         is_first_tick_ = true;
         is_last_tick_ = true;
-        barstate_islast_ = !stream_warmup_mode_ && (i == n - 1);
+        barstate_islast_ = !stream_warmup_mode_ && !realtime_tail_ && (i == n - 1);
         diag_script_bars_processed_++;
         // Reset per-bar pending-close accumulator. Each on_bar call
         // captures fresh ``strategy.close*`` qty for the same-bar
@@ -898,17 +956,65 @@ void BacktestEngine::run(const Bar* bars, int n) {
         dispatch_bar();
         update_equity_extremes();
         record_equity_point(current_bar_.timestamp);  // ts not mutated on this path
+        if (broker_state_hash_recording_) broker_state_hashes_.push_back(broker_state_hash());
         prev_bar_timestamp_ = current_bar_.timestamp;
     }
     // TradingView's range-end accounting: a position still open after the
     // last bar is reported as a closed trade at that bar's close
     // (record_range_end_close_trades, engine_orders.cpp). Report-only:
-    // the live position is untouched.
-    record_range_end_close_trades();
+    // the live position is untouched. Skipped under the live-runtime tail
+    // (spec §3.1): the last bar is still forming, so it never gets a
+    // synthetic range-end close row.
+    if (!realtime_tail_) record_range_end_close_trades();
+    } catch (const AbortRequested&) {
+        last_run_status_ = 1;
     } catch (const std::exception& e) {
         last_error_ = e.what();
     } catch (...) {
         last_error_ = "unknown error during BacktestEngine::run";
+    }
+}
+
+
+// Live-runtime tail (spec §3.1): once script_tf_seconds_ is known for this
+// run, freeze pine_last_bar_index()/last_bar_time_ at the horizon bar
+// instead of the fed array's actual last index/timestamp. No-op unless
+// realtime_tail_ is on and a positive horizon was configured.
+//
+// The `bars` array passed in is script-bar geometry only when the caller
+// says so (script_bar_geometry == true): the single-TF run(bars, n) path,
+// and run_tf_impl's !needs_aggregation call where input_tf == script_tf
+// makes input bars the same as script bars. There, last_bar_time_ is the
+// EXACT timestamp of bars[horizon_bars - 1] when that bar exists in the fed
+// array (horizon_bars <= n); otherwise it is extrapolated from the array's
+// actual final bar (bars[n - 1]), not the first one -- a feed with any gap
+// (session/weekend boundary, a missing bar, a calendar TF) makes an
+// extrapolation from bars[0] wrong even when the exact timestamp was
+// available.
+//
+// Under aggregation (input_tf < script_tf, script_bar_geometry == false)
+// `bars` is the *input* array, so a script-bar horizon does not index it
+// correctly (final-rereview.md N1): last_bar_time_ is instead extrapolated
+// from the first input bar's timestamp, one script-TF step per horizon bar
+// -- the formula this function used unconditionally before the exact/
+// extrapolate-from-last-bar fix, restored here for this path only.
+void BacktestEngine::apply_realtime_tail_horizon(const Bar* bars, int n,
+                                                  bool script_bar_geometry) {
+    if (!realtime_tail_ || realtime_tail_horizon_bars_ <= 0 || n <= 0 || bars == nullptr) return;
+    const int horizon = realtime_tail_horizon_bars_;
+    last_bar_index_ = horizon - 1;
+    const int64_t script_tf_ms =
+        static_cast<int64_t>(script_tf_seconds_ > 0 ? script_tf_seconds_ : 0) * 1000;
+    if (script_bar_geometry) {
+        if (horizon <= n) {
+            last_bar_time_ = bars[horizon - 1].timestamp;
+        } else {
+            last_bar_time_ = bars[n - 1].timestamp
+                + static_cast<int64_t>(horizon - n) * script_tf_ms;
+        }
+    } else {
+        last_bar_time_ = bars[0].timestamp
+            + static_cast<int64_t>(horizon - 1) * script_tf_ms;
     }
 }
 
@@ -1336,6 +1442,11 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
 
 
 // --- New run() overload with full parameter set ---
+// Public entry: clears last_error_/last_run_status_/abort_requested_ exactly
+// once, then hands off to run_tf_impl, which owns the actual work and must
+// not clear any of those itself (see run_tf_impl's doc comment in
+// engine.hpp -- the SymInfo/overrides overload below calls run_tf_impl
+// directly for the same reason).
 void BacktestEngine::run(const Bar* input_bars, int n_input,
                           const std::string& input_tf,
                           const std::string& script_tf,
@@ -1343,11 +1454,30 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
                           int magnifier_samples,
                           MagnifierDistribution magnifier_dist) {
     last_error_.clear();
+    last_run_status_ = 0;
+    abort_requested_.store(false, std::memory_order_relaxed);
+    run_tf_impl(input_bars, n_input, input_tf, script_tf, bar_magnifier,
+                magnifier_samples, magnifier_dist);
+}
+
+void BacktestEngine::run_tf_impl(const Bar* input_bars, int n_input,
+                          const std::string& input_tf,
+                          const std::string& script_tf,
+                          bool bar_magnifier,
+                          int magnifier_samples,
+                          MagnifierDistribution magnifier_dist) {
     if (n_input > 0 && input_bars != nullptr) {
         last_bar_time_ = input_bars[n_input - 1].timestamp;
     } else {
         last_bar_time_ = 0;
     }
+    // ABI v4 live-runtime surface (task 4): this is the TF-aware path's own
+    // installation of the same file-scope PathOrderScope guard, so every
+    // run's actual work (this function) installs and clears the override
+    // exactly once, however it was reached (the thin TF-aware run()
+    // wrapper, the syminfo/overrides overload, or stream_begin's warmup,
+    // which all delegate here).
+    PathOrderScope path_order_scope(path_order_mode_);
     try {
     if (!account_currency_fx_timestamps_.empty()
         && (calc_on_order_fills_ || bar_magnifier)) {
@@ -1425,6 +1555,15 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
     int expected_script_bars =
         count_expected_script_bars(input_bars, n_input, needs_aggregation);
     last_bar_index_ = expected_script_bars - 1;
+    // Live-runtime tail (spec §3.1): freeze last_bar_index_/last_bar_time_ at
+    // the horizon bar. Must run AFTER the expected_script_bars assignment
+    // above, which would otherwise clobber it. `input_bars` is the
+    // script-bar array only when !needs_aggregation (input_tf ==
+    // script_tf); under aggregation it is the finer *input* array, so
+    // last_bar_time_ must fall back to the pre-fix first-bar extrapolation
+    // instead of indexing input bars by a script-bar horizon (N1).
+    apply_realtime_tail_horizon(input_bars, n_input,
+                                 /*script_bar_geometry=*/!needs_aggregation);
     // reset_run_state() already ran above — reserve AFTER it so the capacity
     // hint isn't wiped (clear() retains capacity but order still matters for
     // any future reset that releases).
@@ -1477,11 +1616,18 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
     // last script bar is reported as a closed trade at that bar's close
     // (record_range_end_close_trades, engine_orders.cpp). Report-only: the
     // live position is untouched, and the stream warmup replay, whose bars
-    // are not a range end, is skipped.
-    record_range_end_close_trades();
+    // are not a range end, is skipped. Also skipped under the live-runtime
+    // tail (spec §3.1): the last bar is still forming.
+    if (!realtime_tail_) record_range_end_close_trades();
     clear_historical_security_lookahead_projections();
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
     clear_aux_security_chart_ranges();
+#endif
+    } catch (const AbortRequested&) {
+        last_run_status_ = 1;
+        clear_historical_security_lookahead_projections();
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+        clear_aux_security_chart_ranges();
 #endif
     } catch (const std::exception& e) {
         clear_historical_security_lookahead_projections();
@@ -1769,11 +1915,13 @@ void BacktestEngine::set_session_bar_state(bool in_session,
 // (with the process_orders_on_close TV variant when configured).
 void BacktestEngine::run_simple_bar_loop(const Bar* input_bars, int n_input) {
     for (int i = 0; i < n_input; ++i) {
+        check_abort();
         current_bar_ = input_bars[i];
         bar_index_ = i;
+        is_tail_bar_ = (i == n_input - 1);
         is_first_tick_ = true;
         is_last_tick_ = true;
-        barstate_islast_ = !stream_warmup_mode_ && (i == n_input - 1);
+        barstate_islast_ = !stream_warmup_mode_ && !realtime_tail_ && (i == n_input - 1);
         diag_script_bars_processed_++;
         // Reset per-bar pending-close accumulator. Each on_bar call captures
         // fresh ``strategy.close*`` qty for the same-bar close-then-entry
@@ -1811,6 +1959,18 @@ void BacktestEngine::run_simple_bar_loop(const Bar* input_bars, int n_input) {
             bool next_in_session = false;
             if (in_session && i + 1 < n_input) {
                 next_in_session = chart_bar_ismarket(input_bars[i + 1].timestamp);
+            } else if (in_session && realtime_tail_ && script_tf_seconds_ > 0) {
+                // Live tail: no i+1 exists; use the bucket calendar (the rule
+                // engine_stream.cpp applies to a forming bar).
+                next_in_session = chart_bar_ismarket(
+                    current_bar_.timestamp
+                    + static_cast<int64_t>(script_tf_seconds_) * 1000);
+            } else if (in_session && realtime_tail_) {
+                // Live tail with an unparseable/degenerate script_tf_seconds_
+                // (no bucket width to advance by): a forming bar is never the
+                // session's last bar, matching engine_stream.cpp's fallback
+                // for the same degenerate case.
+                next_in_session = true;
             }
             set_session_bar_state(in_session, in_session && !next_in_session);
         }
@@ -1829,6 +1989,7 @@ void BacktestEngine::run_simple_bar_loop(const Bar* input_bars, int n_input) {
         prev_in_session_ = session_ismarket_;
         update_equity_extremes();
         record_equity_point(current_bar_.timestamp);  // ts not mutated on this path
+        if (broker_state_hash_recording_) broker_state_hashes_.push_back(broker_state_hash());
         prev_bar_timestamp_ = current_bar_.timestamp;
     }
 }
@@ -1857,6 +2018,7 @@ void BacktestEngine::run_aggregation_bar_loop(const Bar* input_bars, int n_input
     int emitted_script_bars = 0;
 
     for (int i = 0; i < n_input; ++i) {
+        check_abort();
         // The next input bar's timestamp for the security evaluators fed
         // below (directly, by run_magnified_bar's sub-bar walk, or by the
         // boundary re-feed): a calendar bucket completes on the period's
@@ -1904,8 +2066,15 @@ void BacktestEngine::run_aggregation_bar_loop(const Bar* input_bars, int n_input
             // bar and the on/off curves would disagree on that label.
             const int64_t script_bar_ts = ab.bar.timestamp;
             bar_index_ = script_bar_index++;
+            // ABI v4 live-runtime surface (task 4): the bar magnifier's
+            // run_magnified_bar never reaches dispatch_bar() (its own
+            // top-of-function reset), so this emitted-script-bar boundary is
+            // the per-bar reset site for it. Redundant-but-harmless on the
+            // non-magnifier branch below, which also calls dispatch_bar().
+            last_bar_dual_entry_decision_ = internal::DualEntryStopPathWinner::None;
+            is_tail_bar_ = (i == n_input - 1);
             emitted_script_bars++;
-            barstate_islast_ = !stream_warmup_mode_
+            barstate_islast_ = !stream_warmup_mode_ && !realtime_tail_
                 && (emitted_script_bars == expected_script_bars);
             diag_script_bars_processed_++;
             // Reset per-bar pending-close accumulator. See run_simple_bar_loop
@@ -1950,6 +2119,7 @@ void BacktestEngine::run_aggregation_bar_loop(const Bar* input_bars, int n_input
             }
             update_equity_extremes();
             record_equity_point(script_bar_ts);
+            if (broker_state_hash_recording_) broker_state_hashes_.push_back(broker_state_hash());
             prev_bar_timestamp_ = current_bar_.timestamp;
         }
         if (completed_on_boundary) {
@@ -2047,6 +2217,15 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
                           int magnifier_samples,
                           MagnifierDistribution magnifier_dist) {
     last_error_.clear();
+    last_run_status_ = 0;
+    // Clears once, here, at the earliest point of this public entry --
+    // before the syminfo/inputs/overrides setup below runs. Delegating to
+    // run_tf_impl (not the public TF-aware run() overload, which would
+    // clear a second time) means nothing after this line can wipe a
+    // request_abort() that arrives from another thread during that setup:
+    // the flag survives untouched until run_tf_impl's own check_abort()
+    // calls consume it once the bar loop actually starts.
+    abort_requested_.store(false, std::memory_order_relaxed);
     try {
     // Store syminfo and inputs
     syminfo_ = syminfo;
@@ -2082,8 +2261,16 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
             close_entries_rule_any_ = (overrides->close_entries_rule != 0);
     }
 
-    // Delegate to the TF-aware run
-    run(input_bars, n_input, input_tf, script_tf, bar_magnifier, magnifier_samples, magnifier_dist);
+    // Delegate to the TF-aware run's actual work directly (run_tf_impl, not
+    // the public run() overload above) so the flag this overload just
+    // cleared is not cleared a second time.
+    run_tf_impl(input_bars, n_input, input_tf, script_tf, bar_magnifier, magnifier_samples, magnifier_dist);
+    // Defensive: nothing in this overload's own body calls check_abort(), and
+    // run_tf_impl above already converts AbortRequested to last_run_status_
+    // == 1 internally, so this clause cannot fire today. Kept for symmetry
+    // with the other two overloads and as a guard if that ever changes.
+    } catch (const AbortRequested&) {
+        last_run_status_ = 1;
     } catch (const std::exception& e) {
         last_error_ = e.what();
     } catch (...) {

@@ -676,6 +676,8 @@ class ReportC(ctypes.Structure):
         ("metrics",                      MetricsC),
         ("equity_curve",                 ctypes.POINTER(EquityPointC)),
         ("equity_curve_len",             ctypes.c_int64),  # int64, NOT c_int
+        ("broker_state_hash",            ctypes.POINTER(ctypes.c_uint64)),
+        ("broker_state_hash_len",        ctypes.c_int64),
     ]
 
 
@@ -704,7 +706,10 @@ def engine_version(lib: ctypes.CDLL) -> dict:
 
 # pf_report_t is CALLER-allocated: a .so built against a different ABI
 # writes past (or short of) our ReportC buffer. Assert version up front.
-EXPECTED_PF_ABI = 3
+# v4 appended the live-runtime accessors and grew pf_report_t with the
+# broker_state_hash array after equity_curve_len (ReportC above already
+# carries both fields).
+EXPECTED_PF_ABI = 4
 
 
 def check_abi(lib: ctypes.CDLL) -> None:

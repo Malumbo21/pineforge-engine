@@ -51,6 +51,11 @@
  * PINEFORGE_GIT_SHA) live in the generated <pineforge/version.h>. */
 #include <pineforge/version.h>
 
+/* pf_pending_order_v1_t / pf_field_desc_t -- the generated, C-compatible POD
+ * mirror of the engine's resting-order record (ABI v4, task 7). Regenerate
+ * with scripts/gen_pending_order_mirror.py; never edit by hand. */
+#include <pineforge/pending_order_mirror.hpp>
+
 /* ── Visibility ──────────────────────────────────────────────────── */
 
 #if defined(_WIN32) || defined(__CYGWIN__)
@@ -76,8 +81,9 @@
  *  macro have no pf_abi_version symbol — treat dlsym failure as
  *  version 1. Value 3 appends pf_trade_t::open_at_end (the range-end
  *  close flag); a v2 reader iterating trades with the v2 stride would
- *  misindex every row after the first. */
-#define PF_ABI_VERSION 3
+ *  misindex every row after the first. Value 4 appends the live-runtime
+ *  accessors and the per-bar broker-state hash array to pf_report_t. */
+#define PF_ABI_VERSION 4
 
 /** Feature probe for the opt-in split chart/request.security feed boundary.
  *  When defined, #strategy_set_aux_security_feed is available. */
@@ -328,10 +334,10 @@ typedef struct pf_trace_entry_s {
  *  ### Ownership and lifetime
  *  The struct itself is caller-owned (typically stack). The embedded
  *  arrays (`trades`, `security_diag`, `trace`, `trace_names`,
- *  `equity_curve`) are heap-allocated by the runtime; the caller must
- *  invoke #report_free exactly once on each filled report.
- *  `trace_names` string pointers remain owned by the strategy handle
- *  until #strategy_free. */
+ *  `equity_curve`, `broker_state_hash`) are heap-allocated by the
+ *  runtime; the caller must invoke #report_free exactly once on each
+ *  filled report. `trace_names` string pointers remain owned by the
+ *  strategy handle until #strategy_free. */
 
 typedef struct pf_report_s {
     /* Trades */
@@ -387,6 +393,15 @@ typedef struct pf_report_s {
      * (ctypes: c_int64). */
     pf_equity_point_t*  equity_curve;
     int64_t             equity_curve_len;
+    /* Per-script-bar broker-state hash, filled when
+     * #strategy_set_broker_state_hash_recording is on; freed by
+     * #report_free. NULL / 0-length when recording was off (default) or no
+     * script bars were dispatched. When populated, len ==
+     * script_bars_processed and the last element equals
+     * #strategy_broker_state_hash's value at the end of the run.
+     * ABI v4. */
+    uint64_t*           broker_state_hash;
+    int64_t             broker_state_hash_len;
 } pf_report_t;
 
 /** @} */ /* end of pf_types */
@@ -606,6 +621,381 @@ PF_API int strategy_stream_end(pf_strategy_t s, int finalize_partial_input_bar);
 PF_API int strategy_stream_fill_report(pf_strategy_t s, pf_report_t* out);
 
 /** @} */ /* end of pf_streaming */
+
+/** @defgroup pf_live Live-runtime surface (ABI v4)
+ *  Default-off flags and read-only accessors used by pineforge-live. None of
+ *  them changes a historical run unless enabled. @{ */
+/** Request cooperative abort of the run in progress (see c_abi.cpp). */
+PF_API void strategy_request_abort(pf_strategy_t s);
+/** 0 = completed, 1 = NOT_COMPLETED (aborted), -1 = @p s is NULL. */
+PF_API int  strategy_last_run_status(pf_strategy_t s);
+/** Live-runtime tail semantics (spec §3.1): the LAST bar of the array fed to
+ *  every subsequent run() is a still-forming bar, not the chart's rightmost
+ *  historical bar. This is persistent configuration, not a one-shot flag --
+ *  it stays in effect until a caller passes @p on == 0, so a handle reused
+ *  for a later plain historical replay must be explicitly turned back off.
+ *  Effects when @p on is non-zero:
+ *    1. `barstate.islast` is false for that bar.
+ *    2. `session.islastbar` is computed from the bucket calendar (no next
+ *       bar to peek at, so it evaluates whether the next bucket -- this
+ *       bar's timestamp plus one script-TF step -- falls out of session).
+ *    3. `bar_index` stays put; `last_bar_index` is frozen at the horizon
+ *       bar (`horizon_bars - 1`), when @p horizon_bars > 0. `last_bar_time`
+ *       is exact when the horizon bar is in the script-bar array, one
+ *       script-TF step per missing bar past the array's last bar
+ *       otherwise; under aggregation (input_tf < script_tf) it is
+ *       extrapolated from the first bar instead, and the aggregation-path
+ *       caveat below applies.
+ *    4. The range-end synthetic close row/trade is skipped (no
+ *       `open_at_end` row); the final equity point keeps `open_profit`.
+ *    5. Interior bars (every bar before the last) are unaffected.
+ *  Dispatch-path scope: effects 1, 3, and 4 above are honoured on every
+ *  dispatch path. Effect 2 (`session.islastbar` from the bucket calendar)
+ *  is honoured only on `run_simple_bar_loop` (the input_tf == script_tf
+ *  simple bar loop); the single-timeframe `run(bars, n)` overload never
+ *  evaluates session predicates at all (pre-existing -- `session.ismarket`/
+ *  `session.islastbar` stay at their reset-state `false` there regardless
+ *  of this flag). On the non-magnifier aggregation path (input_tf <
+ *  script_tf) effect 2 is UNDEFINED: the tail bar's `session.islastbar`
+ *  reads the ordinary `in_session && barstate.islast` expression instead of
+ *  the calendar lookahead (false there, since this flag also forces
+ *  `barstate.islast` false). Callers must feed an input_tf == script_tf
+ *  array until that gap closes, matching
+ *  #strategy_set_probe_suppress_tail_logic's dispatch-path-scope caveat.
+ *  Default off (@p on == 0): every historical run stays byte-identical to
+ *  before this flag existed. */
+PF_API void strategy_set_realtime_tail(pf_strategy_t s, int on, int horizon_bars);
+/** Live probe tail suppression (spec §3.2): the LAST bar of the array fed to
+ *  every subsequent run() runs only the broker's pre-`on_bar` steps and
+ *  returns, in this order: intraday-cap deferred close, advancing native
+ *  source-series history (`_push_source_series`), settling resting
+ *  stop/limit orders against the bar (`process_pending_orders`), the
+ *  max-intraday-loss path check (`evaluate_max_intraday_loss_over_path`),
+ *  and updating per-trade extremes (`update_per_trade_extremes`).
+ *  `on_bar` is never invoked for that bar, and nothing that ordinarily runs
+ *  after it runs either -- no `invoke_chart_on_bar`, no
+ *  `flush_same_bar_close`, no POOC second pass, no `process_margin_call`
+ *  (and, under process_orders_on_close, the pre-script carried-position
+ *  margin helpers), no `settle_dormant_bracket_reissues`, no
+ *  post-liquidation sizing refresh. A margin call or intraday-cap close that
+ *  would ordinarily fire against the forming bar therefore surfaces only at
+ *  settlement (the next non-suppressed run), never against the
+ *  still-forming probe bar itself.
+ *  The run's last-bar fills are exactly the settled book's fills against
+ *  the forming bar, and the post-run pending-order book is the book in
+ *  force during that bar. This is persistent configuration, like
+ *  #strategy_set_realtime_tail, and independent of it -- do not assume the
+ *  two flags are coupled; set each explicitly.
+ *  Dispatch-path scope (ABI v4 / live v1): this flag is honoured only on the
+ *  standard `dispatch_bar` path -- the single-timeframe run loop and the
+ *  input_tf == script_tf simple bar loop. It is a silent no-op under
+ *  `calc_on_order_fills` (the COOF scheduler dispatches the last bar in full,
+ *  `on_bar` included) and under the bar magnifier (`run_magnified_bar` never
+ *  reaches `dispatch_bar`); both are gated features in v1 and a probe must
+ *  not enable them. On the non-magnifier aggregation path
+ *  (input_tf < script_tf) the semantics are UNDEFINED until the partial-
+ *  bucket forming-bar flag lands: today the bar suppressed is whichever
+ *  script bar is dispatched while walking the array's last input bar (a
+ *  completed bucket, when that input bar opens a new one), and a trailing
+ *  partial bucket is never dispatched at all. Callers must feed an
+ *  input_tf == script_tf array until that flag exists.
+ *  Clear this flag (on = 0) before `strategy_stream_begin`; the warmup
+ *  replay is a run().
+ *  Default off (@p on == 0): every historical run stays byte-identical to
+ *  before this flag existed. */
+PF_API void strategy_set_probe_suppress_tail_logic(pf_strategy_t s, int on);
+/** Force this run's intrabar path order (ABI v4 live-runtime surface): the
+ *  leg order every OHLC-path helper (`bar_path_uses_high_first` and
+ *  everything built on it -- stop/limit fill priority, exit trail walking,
+ *  dual-entry-stop arbitration, and bar-magnifier sub-bar sampling) uses for
+ *  the CURRENT and every subsequent run(), until a caller sets a different
+ *  mode. Values:
+ *    - `0` AUTO (default): the unchanged TV-emulator rule -- the leg nearer
+ *      `open` (by `|high-open|` vs `|open-low|`) goes first.
+ *    - `1` HIGH_FIRST: force `O -> H -> L -> C` regardless of the bar's own
+ *      shape.
+ *    - `2` LOW_FIRST: force `O -> L -> H -> C` regardless of the bar's own
+ *      shape.
+ *  Any other @p mode is clamped to AUTO.
+ *  A live probe runs the SAME forming bar under BOTH forced orders and emits
+ *  only the fills that agree between the two -- a fill that depends on which
+ *  leg TradingView's own (unobservable, still-forming) bar will resolve to
+ *  is path-dependent and must be suppressed rather than guessed.
+ *  This is persistent configuration, like #strategy_set_realtime_tail -- it
+ *  stays in effect until a caller passes @p mode == 0, so a handle reused
+ *  for a later plain historical replay must be explicitly set back to AUTO.
+ *  Applies to run() only: a stream continued via #strategy_stream_begin
+ *  dispatches its realtime ticks outside any run() and always sees AUTO,
+ *  regardless of this setting.
+ *  Default AUTO (@p mode == 0): every historical run stays byte-identical to
+ *  before this flag existed. */
+PF_API void strategy_set_path_order(pf_strategy_t s, int mode);
+/** The dual-entry-stop arbitration decided on the LAST bar the most recent
+ *  run() dispatched: a flat position resting exactly one long stop-only
+ *  ENTRY and one short stop-only ENTRY, both touched on that bar
+ *  (`dual_entry_stop_path_winner`, internal). Values mirror
+ *  `internal::DualEntryStopPathWinner`'s enumerator order:
+ *    - `0` None -- no such pair was arbitrated on that bar (not flat, no
+ *      matching pair, or neither/only one side touched).
+ *    - `1` LongFirst -- the long stop's first-touch position on the intrabar
+ *      path came first (or the two tied, which the engine always resolves
+ *      in the long leg's favour).
+ *    - `2` ShortFirst -- the short stop's first-touch position came first.
+ *    - `-1` -- @p s is NULL.
+ *  This is a per-BAR snapshot, not a live read of the engine's per-pass
+ *  working state: it is written once, at the arbitration itself, and then
+ *  holds for the rest of that bar even though the working state goes back
+ *  to None the moment the winning side fills (position no longer flat) or
+ *  its stop-entry admission is declined -- neither of which undoes the fact
+ *  that TradingView's broker emulator arbitrated a real pair that bar. A
+ *  caller therefore gets the right answer whether it reads this after a
+ *  `strategy_set_probe_suppress_tail_logic` forming-bar probe (a single
+ *  `process_pending_orders` pass) or after an ordinary
+ *  `process_orders_on_close` run with no tail suppression (two passes, the
+ *  winner already filled by the second).
+ *  A live probe reads this after a forming-bar run to see which side the
+ *  engine's own broker-emulator tie-break picked, without having to re-run
+ *  and infer it from which of the two possible fills came back.
+ *  Only the standard (non-`calc_on_order_fills`) dispatch path updates this
+ *  value; it is a silent no-op under the COOF scheduler, mirroring
+ *  #strategy_set_probe_suppress_tail_logic's dispatch-path-scope caveat. */
+PF_API int strategy_last_bar_dual_entry_path(pf_strategy_t s);
+/** Toggle per-script-bar broker-state hash recording (spec §3.4, ABI v4).
+ *
+ *  When @p on is non-zero, every subsequent run() appends
+ *  #strategy_broker_state_hash's value to pf_report_t::broker_state_hash
+ *  immediately after each script bar is dispatched, so the array's length
+ *  matches pf_report_t::script_bars_processed. Cleared (recorded array
+ *  emptied, not the flag itself) at the start of every run(); the flag is
+ *  persistent configuration, like #strategy_set_realtime_tail, and stays
+ *  set until a caller passes @p on == 0.
+ *  Also covers #strategy_stream_begin's warmup run() and every script bar
+ *  dispatched afterward by the realtime tick stream, so
+ *  #strategy_stream_fill_report's cumulative report satisfies the same
+ *  len == script_bars_processed invariant. Set this BEFORE
+ *  #strategy_stream_begin to also record the warmup leg -- reset_run_state()
+ *  (which stream_begin's internal run() invokes) empties the recorded
+ *  array, not the flag, but a flag flipped on only after stream_begin
+ *  returns misses the warmup bars already dispatched.
+ *  Default off (@p on == 0): pf_report_t::broker_state_hash is NULL /
+ *  0-length and every historical run stays byte-identical to before this
+ *  flag existed. */
+PF_API void strategy_set_broker_state_hash_recording(pf_strategy_t s, int on);
+/** Return the broker-state hash of the FINAL state after the most recent
+ *  run() (see #strategy_set_broker_state_hash_recording's doc and
+ *  pf_report_t::broker_state_hash for the per-bar recording; this accessor
+ *  works whether or not recording was enabled). Returns 0 when @p s is
+ *  NULL. */
+PF_API uint64_t strategy_broker_state_hash(pf_strategy_t s);
+/** Number of orders resting in the engine's pending-order book after the
+ *  most recent run() (ABI v4 live-runtime surface, task 7, spec 3.6): the
+ *  book in force for the NEXT bar. 0 when @p s is NULL. Read-only; a
+ *  historical run is byte-identical whether or not a caller reads it. */
+PF_API int strategy_pending_orders_len(pf_strategy_t s);
+/** Copy the @p index-th resting order (0-based, the engine's own book
+ *  order -- insertion order; broker fill priority is decided at fill time
+ *  from `created_seq`, not from this index) into @p out as a
+ *  pf_pending_order_v1_t value snapshot. Copies
+ *  min(@p size_in, sizeof(pf_pending_order_v1_t)) bytes: an older reader
+ *  with a smaller struct receives a prefix (struct_version and size first),
+ *  a newer reader with a larger one receives the whole v1 and must not
+ *  read past pf_pending_order_v1_t::size. Strings are NUL-terminated
+ *  char[64] copies with a `_truncated` flag and a `_hash64` (FNV-1a 64 of
+ *  the full string); enums are int32 values; NaN sentinels are copied
+ *  verbatim. Returns 0 on success, -1 -- with nothing written -- when
+ *  @p s or @p out is NULL, @p index is out of range, or @p size_in < 8
+ *  (too small to hold even the `struct_version` + `size` header; every
+ *  larger @p size_in is honoured as a prefix copy). The layout is
+ *  self-described by #strategy_pending_order_layout. */
+PF_API int strategy_pending_order_get(pf_strategy_t s, int index, void* out, size_t size_in);
+/** The field table of pf_pending_order_v1_t as THIS runtime compiled it --
+ *  one pf_field_desc_t {name, type, offset, size} per field, in struct
+ *  order, starting with `struct_version` and `size`. Static storage: the
+ *  pointer stays valid for the life of the process and needs no handle.
+ *  @p count (may be NULL) receives the row count. An FFI consumer builds
+ *  its struct from this table rather than from a hand-typed copy, so the
+ *  mirror can grow (append-only) without breaking it. */
+PF_API const pf_field_desc_t* strategy_pending_order_layout(int* count);
+/** Engine-computed fill quantity of the @p index-th resting order (ABI v4
+ *  live-runtime surface, task 8, spec 3.6): the contracts the entry kernel
+ *  would OPEN if that order filled at @p fill_price, sized by the engine's
+ *  own rules so a live runtime never re-implements them. @p fill_price is
+ *  slipped the way the kernel slips it (`apply_slippage`; an entry with a
+ *  limit leg takes the unslipped limit-or-better route). @p partition
+ *  receives which sizing rule produced the value:
+ *    - `0` EXPLICIT -- a script-supplied qty: for `strategy.entry` the
+ *      lot-floored contracts (`apply_qty_step`) of a fixed qty, or the
+ *      explicit percent/cash budget sized at the fill for a per-call
+ *      qty_type override; a `strategy.order` explicit qty is dispatched
+ *      verbatim (no lot step).
+ *    - `1` FROZEN_PLACEMENT -- a quantity fixed before the fill, never
+ *      re-derived from the fill price: the default percent_of_equity /
+ *      cash MARKET (or strategy.order) size frozen at the signal close
+ *      (`frozen_default_qty`); a MARKET's frozen broker transaction (a
+ *      finalized flat pair's `paired_flat_market_transaction_qty`; a
+ *      same-bar-market member's `sbmt_tx_qty` from flat or as a kept
+ *      over-cap add); or what one of the two MARKET reversal kernels
+ *      opens -- a same-bar-market member against an opposite live position
+ *      opens the remainder `sbmt_tx_qty - min(sbmt_tx_qty, live qty)`
+ *      (`apply_same_bar_market_tx_reversal`), and the exact SHORT-seed
+ *      collision's final short re-opens the residual
+ *      `pyramid_entries[0].qty - pyramid_entries[1].qty` after closing both
+ *      lots (`short_seed_collision_final_short_is_live`). Both kernels are
+ *      modelled; each reports `close_only` 1 when it opens nothing.
+ *    - `2` DEFAULT_STOP_PLACEMENT -- the DEFAULT percent_of_equity <= 100
+ *      pure STOP entry's placement size (`default_stop_placement_qty`,
+ *      round-7 family K), when `use_default_stop_placement_qty` says the
+ *      fill consumes it: created flat, filling from flat, positive fill.
+ *    - `3` AT_FILL -- default sizing at the slipped fill (`calc_qty`).
+ *  @p close_only receives 1 when the kernel's close-only predicate fires
+ *  -- the fill closes against the live opposite position and that
+ *  predicate opens no leg of its own: the order's
+ *  `affordability_close_only` (entry leg declined at placement), the
+ *  priced-entry `prior_cycle_close_only` rule (opposite live position whose
+ *  cycle the order was not placed in -- `created_position_side !=` the
+ *  live side -- and not a KI-65 `reverses_same_bar_market_from_flat`), the
+ *  same-cycle frozen explicit-FIXED transaction the close consumes exactly,
+ *  a finalized flat MARKET pair against an opposite position, or one of the
+ *  two reversal kernels above opening nothing. Where the order was created
+ *  FLAT the engine's close-only branch is `close_opposite_then_enter`: a
+ *  transaction larger than the live position still opens the remainder, so
+ *  a consumer compares @p qty with the live position. A replaced
+ *  default-percent short (`replaced_percent_short_market_is_live`) is
+ *  dispatched `close_opposite_then_enter` with its `frozen_default_qty`:
+ *  @p qty is that transaction, @p close_only 0. The probe answers for the
+ *  order filling against the CURRENT book and position; fills that an
+ *  earlier order in the same pass would make first are not simulated.
+ *  NOT folded into @p qty: the deferred-flip
+ *  carry (`tv_carry_qty`, added by `enter_market_from_flat` for a priced
+ *  entry firing from FLAT whose placement side is the opposite of the
+ *  requested side) -- read `tv_carry_qty` / `created_position_side` from
+ *  the mirror. Returns 0 on success; 1 -- with @p qty NaN, @p close_only 0,
+ *  @p partition -1 -- when the order is an EXIT (its fill quantity is
+ *  decided against the live position at the fill, not by a partition); -1
+ *  with nothing written when @p s is NULL, @p index is out of range, or any
+ *  out-pointer is NULL. Read-only: no historical run changes because a
+ *  caller probed it. */
+PF_API int strategy_pending_order_fill_qty(pf_strategy_t s, int index, double fill_price,
+                                           double* qty, int* close_only, int* partition);
+/** 1 when the @p index-th resting order's entry-relative offsets
+ *  (`profit_ticks` / `loss_ticks` / `trail_points`) resolve now (ABI v4,
+ *  task 8): entries, plain orders and exits with an empty `from_entry`
+ *  always; an exit bound to a `from_entry` only once that id has filled in
+ *  the CURRENT position cycle -- the gate the engine's own
+ *  `materialize_relative_exit_prices_for_live_position` and eligibility
+ *  pass share. 0 otherwise; -1 when @p s is NULL or @p index is out of
+ *  range. */
+PF_API int strategy_pending_order_level_resolved(pf_strategy_t s, int index);
+/** The price levels the @p index-th resting order would fire at, as the
+ *  engine's fill path resolves them (ABI v4, task 8). A leg the order
+ *  carries as a price (`stop_price`, `limit_price`, `trail_price`) is
+ *  reported verbatim -- it is already on the price grid. A leg carried as
+ *  a tick offset is resolved against the live position's average entry
+ *  price only when #strategy_pending_order_level_resolved is 1 AND a
+ *  position is live, with the POSITION side's sign exactly as the fill
+ *  path: `limit = entry + dir * profit_ticks * mintick`, `stop = entry -
+ *  dir * loss_ticks * mintick` (dir = +1 long, -1 short; both
+ *  `level_on_price_grid`), and `trail_activation = entry +/- ceil(
+ *  trail_points - 5e-5) * mintick` snapped to the tick grid
+ *  (`trail_points` wins over `trail_price` when both are set, as in
+ *  `resolve_exit_path_fill`). NaN for a leg that is unset or not yet
+ *  resolvable. Returns 0; -1 with nothing written when @p s is NULL,
+ *  @p index is out of range, or any out-pointer is NULL. */
+PF_API int strategy_pending_order_effective_levels(pf_strategy_t s, int index, double* stop,
+                                                   double* limit, double* trail_activation);
+/** The trail extreme the exit trail legs ride (`trail_best_price_`: the
+ *  running high of a long / low of a short since the position filled,
+ *  bar extremes folded in as the fill path folds them). NaN when @p s is
+ *  NULL and NaN until a position has filled. */
+PF_API double strategy_trail_best_price(pf_strategy_t s);
+/** The live position's volume-weighted average entry price
+ *  (`position_entry_price_`). NaN when @p s is NULL and NaN when the
+ *  position is flat (the engine keeps 0 there; a live reader must not
+ *  mistake it for a price). */
+PF_API double strategy_position_avg_price(pf_strategy_t s);
+/** The live position's cycle id (`position_cycle_seq_`): 0 when flat, a
+ *  fresh nonzero id per open or reversal, unchanged across same-direction
+ *  adds -- the id `created_position_cycle_seq` on a mirrored order refers
+ *  to. -1 when @p s is NULL. */
+PF_API int64_t strategy_position_cycle_seq(pf_strategy_t s);
+/** Task 9: closed-trade id / exit-comment string accessors, indexing the
+ *  same REPORT row space as #strategy_closed_trade_entry_incarnation
+ *  (`trades_` then the range-end rows, `open_at_end`). The returned pointer
+ *  is valid until the next run() (or stream call) on this handle, like
+ *  #strategy_get_last_error. NULL on a NULL @p s or an out-of-range
+ *  @p trade_index. */
+PF_API const char* strategy_closed_trade_entry_id(pf_strategy_t s, int trade_index);
+/** See #strategy_closed_trade_entry_id for the row-space/lifetime/NULL
+ *  contract. The returned string is the engine's own INTERNAL exit id, not
+ *  always the script's `strategy.exit`/`strategy.close` id verbatim:
+ *    - a real `strategy.exit` bracket leg -- the user's own id, unchanged.
+ *    - a `strategy.close(id, ...)` close -- `"__close__" + id`.
+ *    - `strategy.close_all()` / a bare-id `strategy.close()` -- the literal
+ *      `"__close__"` (empty target id appended).
+ *    - a margin-call forced liquidation -- the sentinel `"__margin_call__"`.
+ *    - an intraday-cap close (`risk.max_intraday_loss`, or the
+ *      max-filled-orders cap) -- empty (`""`).
+ *  A caller matching exit ids back to its own `strategy.close` calls should
+ *  strip the `"__close__"` prefix rather than compare verbatim. */
+PF_API const char* strategy_closed_trade_exit_id(pf_strategy_t s, int trade_index);
+/** See #strategy_closed_trade_entry_id. */
+PF_API const char* strategy_closed_trade_exit_comment(pf_strategy_t s, int trade_index);
+/** Task 9: why the @p trade_index-th REPORT-row closed trade exited.
+ *  Values:
+ *    - `0` UNKNOWN -- reserved for the documented "no cause" value on a
+ *      VALID trade. Every in-range row currently falls through the
+ *      derivation below to at worst `1` SCRIPT, so no live derivation
+ *      today actually returns `0`; it is not used for a bad index (see
+ *      `-1` below, final review F7).
+ *    - `1` SCRIPT -- a `strategy.close` / `strategy.close_all` market close,
+ *      or a reversal-driven close.
+ *    - `2` BRACKET -- a `strategy.exit` stop/limit/trail/profit/loss leg.
+ *    - `3` MARGIN_CALL -- a forced liquidation slice.
+ *    - `4` INTRADAY_LOSS_CAP -- `risk.max_intraday_loss`.
+ *    - `5` INTRADAY_FILL_CAP -- the max-filled-orders intraday cap.
+ *    - `6` RANGE_END -- the still-open position closed at the end of a
+ *      flag-off run (`open_at_end`, ABI v3) -- this always wins over every
+ *      other cause below it.
+ *  Derivation order (see `BacktestEngine::closed_trade_close_cause`,
+ *  engine_trade_accessors.cpp): `open_at_end` -> 6; `exit_id ==
+ *  "__margin_call__"` -> 3; an empty `exit_id` with `exit_comment` starting
+ *  `"Close Position (Max number of filled orders"` -> 5, or `"Close
+ *  Position (Max intraday Loss)"` -> 4; the row's `exit_from_bracket` flag
+ *  -- true only for a REAL `strategy.exit` leg, either an `OrderType::EXIT`
+ *  fill whose id does NOT carry the internal `"__close__"` prefix that a
+ *  deferred `strategy.close`/`close_all` order is also given (that path
+ *  reuses the same `OrderType::EXIT` fill machinery), or a whole-position
+ *  bracket revived and fired at the margin-call event price
+ *  (`revive_position_brackets_after_margin_call_partial`) -- -> 2;
+ *  otherwise 1.
+ *  `-1` when @p s is NULL, or when @p trade_index is out of range (final
+ *  review F7: matches every sibling indexed live accessor's -1-on-bad-index
+ *  convention -- #strategy_pending_order_fill_qty,
+ *  #strategy_pending_order_level_resolved,
+ *  #strategy_pending_order_effective_levels). `0` therefore never
+ *  ambiguously means "bad index"; a caller can tell "row exists but reads
+ *  UNKNOWN" apart from "bad index" without a separate
+ *  #strategy_closed_trade_entry_incarnation `report_trade_count` bounds
+ *  check first, though doing that check is still good practice. */
+PF_API int strategy_closed_trade_close_cause(pf_strategy_t s, int trade_index);
+/** Task 9: the script-facing signed position size (`strategy.position_size`;
+ *  KI-64 freeze-aware -- while a same-bar `process_orders_on_close` close is
+ *  frozen for the current bar, this reads the PRE-close position, matching
+ *  what the script itself observes). NaN when @p s is NULL. */
+PF_API double strategy_position_size(pf_strategy_t s);
+/** Task 9: initial capital plus realized net profit
+ *  (`strategy.initial_capital + strategy.netprofit`). NOT Pine's
+ *  `strategy.equity`, which adds open profit on top of this (unlike the
+ *  last point of `pf_report_t::equity_curve`, which does). NaN when @p s is
+ *  NULL. */
+PF_API double strategy_current_equity(pf_strategy_t s);
+/** Task 9: total SCRIPT bars dispatched by the most recent run() (mirrors
+ *  `pf_report_t::script_bars_processed`, engine_report.cpp) -- includes a
+ *  stream's warmup leg and every realtime tick-driven bar dispatched
+ *  afterward by #strategy_stream_push_tick / #strategy_stream_push_ticks.
+ *  `-1` when @p s is NULL. */
+PF_API int64_t strategy_script_bars_processed(pf_strategy_t s);
+/** @} */
 
 /** @addtogroup pf_config
  *  @{

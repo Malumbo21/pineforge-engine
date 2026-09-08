@@ -1,5 +1,6 @@
 set(TEST_SOURCES
     test_pooc_open_money_event
+    test_live_abort
     test_placement_rejection_bracket_ownership
     test_explicit_market_price_admission
     test_integer_short_margin_state
@@ -216,6 +217,17 @@ set(TEST_SOURCES
     test_trail_activation_tick_bar
     test_session_predicates_daily_chart
     test_pooc_money_admission
+    test_live_run_status
+    test_live_realtime_tail
+    test_live_probe_suppress_tail
+    test_live_path_order
+    test_live_state_hash
+    test_live_state_hash_recording
+    test_live_pending_order_mirror
+    test_live_order_derived
+    test_live_trade_accessors
+    test_live_flags_off_identity
+    test_live_flags_lane_positive
 )
 
 find_package(Threads REQUIRED)
@@ -273,6 +285,42 @@ add_test(
     NAME test_run_strategy_emit_window
     COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/scripts/test_run_strategy_emit_window.py
+)
+
+add_test(
+    NAME test_run_strategy_dump_book
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_run_strategy_dump_book.py
+)
+
+# The live-flags lane's own pure bookkeeping (strip_open_at_end,
+# interior_diff, hash_diff_reason, fold_reasons) against synthetic
+# rows/hash arrays -- complements test_live_flags_lane_positive's engine-
+# level pin by proving the SCRIPT's comparison logic, not just the engine
+# mechanism it measures.
+add_test(
+    NAME live_flags_lane_selftest
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/live_flags_lane.py --self-test
+)
+
+# The committed PendingOrder POD mirror (include/pineforge/pending_order_mirror.hpp,
+# src/pending_order_mirror.cpp) must be exactly what engine.hpp generates:
+# a PendingOrder member nobody mirrored (or waived) fails here and in CI.
+add_test(
+    NAME test_pending_order_mirror_check
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/gen_pending_order_mirror.py --check
+)
+
+# Spec §3.4's reflection gate: every hashed-region struct member must be
+# either hashed by engine_state_hash.cpp or explicitly waived. Previously
+# CI-only (.github/workflows/ci.yml); registering it here means a local
+# `ctest` run (the plan's stated workflow) also catches an unhashed member.
+add_test(
+    NAME test_broker_state_hash_coverage
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/check_broker_state_hash_coverage.py
 )
 
 # When PINEFORGE_ENABLE_COVERAGE is ON we also instrument the test

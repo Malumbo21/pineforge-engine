@@ -274,13 +274,37 @@ void BacktestEngine::process_pending_orders(const Bar& bar) {
     // heap allocation per process_pending_orders call). Must start empty.
     std::unordered_set<std::string>& pass0_opposing_skip_ids = scratch_skip_ids_;
     pass0_opposing_skip_ids.clear();
-    DualEntryStopPathWinner dual_entry_path_ = DualEntryStopPathWinner::None;
+    // dual_entry_path_ is per-PASS working state (member, engine.hpp), not a
+    // scratchpad -- reset at the top of every process_pending_orders call: a
+    // process_orders_on_close_ script bar calls this twice (old-order
+    // settlement, then new-order fills), and each pass re-derives its own
+    // flat-position winner. It is NOT what last_bar_dual_entry_path() reads
+    // (see last_bar_dual_entry_decision_'s doc, engine.hpp) precisely
+    // because it goes back to None the moment the winner fills or the loop
+    // below declines its admission -- neither of which undoes the fact that
+    // an arbitration happened this bar.
+    dual_entry_path_ = DualEntryStopPathWinner::None;
     if (position_side_ == PositionSide::FLAT) {
         // design-stop-tick-rounding: stop touches on the tick-quantized bar,
         // walked in the RAW bar's leg order.
         dual_entry_path_ = dual_entry_stop_path_winner(
             broker_trigger_bar(bar), internal::bar_path_uses_high_first(bar),
             pending_orders_, bar_index_);
+        // The per-bar snapshot ABI v4 exposes via last_bar_dual_entry_path():
+        // written here, at the arbitration site, ONLY on a real (non-None)
+        // decision -- never touched by the declined-admission release below
+        // -- and reset once per BAR (not per pass), at every dispatch site
+        // that owns a bar boundary: dispatch_bar() and
+        // run_aggregation_bar_loop's magnifier branch (engine_run.cpp),
+        // reset_run_state() (engine_run.cpp, so a rerun that dispatches zero
+        // script bars doesn't leak the prior run's decision), and
+        // stream_dispatch_script_bar() (engine_stream.cpp, which calls
+        // process_pending_orders() directly and never goes through
+        // dispatch_bar()). So it survives this pass's own dual_entry_path_
+        // going back to None.
+        if (dual_entry_path_ != DualEntryStopPathWinner::None) {
+            last_bar_dual_entry_decision_ = dual_entry_path_;
+        }
     }
     const bool continue_after_stop_margin_decline_scope =
         dual_stop_margin_decline_can_continue_path(
@@ -2128,6 +2152,7 @@ void BacktestEngine::revive_position_brackets_after_margin_call_partial(
         for (size_t ti = trades_before; ti < trades_.size(); ++ti) {
             trades_[ti].exit_comment = exit_comment;
             trades_[ti].exit_id = exit_id;
+            trades_[ti].exit_from_bracket = true;   // a genuine strategy.exit leg (see :2039-2041)
         }
         // The bracket filled: consume the pending order object.
         pending_orders_.erase(
@@ -4706,6 +4731,254 @@ bool BacktestEngine::use_default_stop_placement_qty(
 }
 
 
+// ABI v4 live-runtime surface (task 8, spec 3.6): engine-computed derived
+// order values. Pure const reads of the engine's own sizing / admission /
+// level-resolution predicates so the live runtime never re-implements them.
+// Every rule below mirrors a fill-path site verbatim (cited inline); when
+// that site changes, this must change with it -- tests/test_live_order_
+// derived.cpp pins each partition and sign against the kernel's numbers.
+int BacktestEngine::probe_fill_qty(int index, double fill_price, double* qty,
+                                   int* close_only, int* partition) const {
+    if (index < 0 || index >= static_cast<int>(pending_orders_.size())
+        || !qty || !close_only || !partition) {
+        return -1;
+    }
+    const PendingOrder& o = pending_orders_[static_cast<size_t>(index)];
+    *qty = std::numeric_limits<double>::quiet_NaN();
+    *close_only = 0;
+    *partition = -1;
+    // An EXIT's fill quantity is decided against the live position at the
+    // fill (apply_exit_order_fill's partial-vs-full classification), not by
+    // an opening-size partition.
+    if (o.type == OrderType::EXIT) return 1;
+
+    // The kernel's sizing price. apply_fill_slippage routes a LIMIT-triggered
+    // fill onto apply_limit_fill and everything else onto apply_slippage
+    // through current_fill_is_limit_, the FillKindGuard transient of
+    // apply_filled_order_to_state (false outside the fill loop). An ENTRY's
+    // fill is a limit fill iff it carries a limit leg (evaluate_order_fill:
+    // the pure limit and the stop-limit's limit leg both set is_limit_fill;
+    // a pure stop and a MARKET never do), so the route is chosen from the
+    // order's own legs here. A RAW_ORDER walks the exit-style path where the
+    // filling leg depends on the bar; with no bar context a limit leg is
+    // assumed to be the filling leg (the ENTRY stop-limit convention) --
+    // this only moves the slippage on a default percent/cash sizing basis.
+    const bool limit_route =
+        (o.type == OrderType::ENTRY || o.type == OrderType::RAW_ORDER)
+        && !std::isnan(o.limit_price);
+    const double sized_price = limit_route
+        ? apply_limit_fill(fill_price, o.is_long)
+        : apply_slippage(fill_price, o.is_long);
+
+    const PositionSide requested_side =
+        o.is_long ? PositionSide::LONG : PositionSide::SHORT;
+    const bool opposite_live_position =
+        position_side_ != PositionSide::FLAT
+        && requested_side != position_side_;
+
+    // Sizing partition. MARKET orders first take the two reversal kernels
+    // apply_market_order_fill dispatches BEFORE its generic chain, in the
+    // kernel's own order:
+    //  (i)  the exact SHORT-seed collision's final short
+    //       (short_seed_collision_final_short_is_live; the kernel right after
+    //       the affordability_close_only branch of apply_market_order_fill):
+    //       execute_market_exit closes both physical LONG lots and re-opens
+    //       SHORT exactly the unconsumed residual pyramid_entries_[0].qty -
+    //       pyramid_entries_[1].qty when it exceeds kQtyEpsilon (finding 272).
+    //  (ii) a round-8 family-S member (sbmt_member, same_bar_market_tx_scope_
+    //       is_live) against an opposite live position ->
+    //       apply_same_bar_market_tx_reversal: close_qty = min(tx, live),
+    //       remainder = tx - close_qty opened when > kQtyEpsilon; a same-side
+    //       kept-over-cap member adds sbmt_tx_qty; from FLAT a transaction
+    //       larger than the own quantity dispatches sbmt_tx_qty
+    //       (sbmt_flat_frozen_tx).
+    // Then the generic chain: a finalized flat MARKET pair's
+    // paired_flat_market_transaction_qty (pending_flat_market_pair_is_live),
+    // and the zero-lot decline gate's "quantity the market / priced-entry
+    // kernel would actually open with" (apply_filled_order_to_state: frozen
+    // default -> stop-placement snapshot -> calc_qty_for_type at the slipped
+    // fill). The RAW_ORDER kernel (apply_raw_order_fill) sizes frozen ->
+    // explicit verbatim -> calc_qty(fill), the same chain. Both reversal
+    // kernels report under partition 1: the quantity is fixed by the frozen
+    // transaction / the two-lot book, never by the fill price.
+    // kernel_close_only: that kernel opens nothing (the residual / remainder
+    // is at or below kQtyEpsilon).
+    bool sized = false;
+    bool kernel_close_only = false;
+    if (o.type == OrderType::MARKET && short_seed_collision_final_short_is_live(o)) {
+        const double residual =
+            pyramid_entries_[0].qty - pyramid_entries_[1].qty;
+        *qty = residual;
+        *partition = 1;
+        kernel_close_only = !(residual > kQtyEpsilon);
+        sized = true;
+    } else if (o.type == OrderType::MARKET && o.sbmt_member
+               && std::isfinite(o.sbmt_tx_qty) && o.sbmt_tx_qty > kQtyEpsilon
+               && same_bar_market_tx_scope_is_live()) {
+        if (opposite_live_position) {
+            const double close_qty = std::min(o.sbmt_tx_qty, position_qty_);
+            const double remainder = o.sbmt_tx_qty - close_qty;
+            *qty = remainder;
+            *partition = 1;
+            kernel_close_only = !(remainder > kQtyEpsilon);
+            sized = true;
+        } else if (position_side_ == requested_side && o.sbmt_kept_over_cap) {
+            *qty = o.sbmt_tx_qty;
+            *partition = 1;
+            sized = true;
+        } else if (position_side_ == PositionSide::FLAT
+                   && std::isfinite(o.sbmt_own_qty)
+                   && o.sbmt_tx_qty > o.sbmt_own_qty + kQtyEpsilon) {
+            *qty = o.sbmt_tx_qty;
+            *partition = 1;
+            sized = true;
+        }
+    }
+    const bool paired_flat_market =
+        o.type == OrderType::MARKET && pending_flat_market_pair_is_live(o);
+    if (sized) {
+        // reversal kernels above
+    } else if (paired_flat_market) {
+        *qty = o.paired_flat_market_transaction_qty;
+        *partition = 1;
+    } else if (!std::isnan(o.frozen_default_qty)) {
+        *qty = o.frozen_default_qty;
+        *partition = 1;
+    } else if (o.type == OrderType::ENTRY
+               && use_default_stop_placement_qty(o, fill_price)) {
+        *qty = o.default_stop_placement_qty;
+        *partition = 2;
+    } else if (o.type == OrderType::RAW_ORDER) {
+        // apply_raw_order_fill: the explicit strategy.order qty verbatim
+        // (no lot step), the default calc_qty at the slipped fill.
+        *qty = std::isnan(o.qty) ? calc_qty(sized_price) : o.qty;
+        *partition = std::isnan(o.qty) ? 3 : 0;
+    } else {
+        *qty = calc_qty_for_type(sized_price, o.qty, o.qty_type);
+        *partition = std::isnan(o.qty) ? 3 : 0;
+    }
+
+    // Close-only: the kernel's close-only predicate fires -- the fill closes
+    // against the live opposite position and its own leg is not opened by
+    // that predicate (where the order was created FLAT the branch is
+    // close_opposite_then_enter, which still opens a remainder above the
+    // live position). Each predicate is spelled as its dispatch site spells
+    // it.
+    //  - affordability_close_only: the entry leg was declined at placement;
+    //    both kernels route it to the close-only branch first.
+    //  - prior_cycle_close_only (apply_entry_order_fill): opposite live
+    //    position, created_position_side != position_side_ (a flat-issued
+    //    bracket stop or a deferred-flip carry from an earlier cycle), and
+    //    not the KI-65 same-bar reversal from flat.
+    //  - same_cycle_frozen_tx_exact_flat (apply_entry_order_fill): a priced
+    //    explicit-FIXED entry placed in the current cycle whose frozen
+    //    broker transaction (tv_carry_qty + own) the live opposite position
+    //    now equals exactly.
+    //  - a finalized flat MARKET pair (apply_market_order_fill passes
+    //    close_only_opposite = paired_flat_market), effective only against
+    //    an opposite live position.
+    //  - the two MARKET reversal kernels above when they open nothing
+    //    (kernel_close_only).
+    bool close_only_opposite = false;
+    if (o.type == OrderType::ENTRY) {
+        const bool prior_cycle_close_only =
+            opposite_live_position
+            && o.created_position_side != position_side_
+            && !o.reverses_same_bar_market_from_flat;
+        const bool explicit_fixed_qty =
+            std::isfinite(o.qty)
+            && o.qty > kQtyEpsilon
+            && (o.qty_type < 0
+                || o.qty_type == static_cast<int>(QtyType::FIXED));
+        const bool priced_entry =
+            !std::isnan(o.stop_price) || !std::isnan(o.limit_price);
+        const double fixed_own_qty = explicit_fixed_qty
+            ? std::abs(apply_qty_step(o.qty))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double frozen_reversal_tx = o.tv_carry_qty + fixed_own_qty;
+        const bool same_cycle_frozen_tx_exact_flat =
+            opposite_live_position
+            && o.created_position_side == position_side_
+            && o.created_position_cycle_seq > 0
+            && o.created_position_cycle_seq == position_cycle_seq_
+            && priced_entry
+            && explicit_fixed_qty
+            && o.tv_carry_qty > kQtyEpsilon
+            && std::isfinite(frozen_reversal_tx)
+            && std::abs(position_qty_ - frozen_reversal_tx) <= kQtyEpsilon;
+        close_only_opposite =
+            prior_cycle_close_only || same_cycle_frozen_tx_exact_flat;
+    } else if (o.type == OrderType::MARKET) {
+        close_only_opposite =
+            (paired_flat_market && opposite_live_position) || kernel_close_only;
+    }
+    *close_only = (o.affordability_close_only || close_only_opposite) ? 1 : 0;
+    return 0;
+}
+
+// Mirrors the gate materialize_relative_exit_prices_for_live_position and
+// the eligibility pass share (finding-347): an exit bound to from_entry
+// resolves its offsets only once that id has filled in the CURRENT position
+// cycle; everything else resolves unconditionally.
+int BacktestEngine::pending_order_level_resolved(int index) const {
+    if (index < 0 || index >= static_cast<int>(pending_orders_.size())) return -1;
+    const PendingOrder& o = pending_orders_[static_cast<size_t>(index)];
+    if (o.type != OrderType::EXIT || o.from_entry.empty()) return 1;
+    return cycle_filled_entry_ids_.count(o.from_entry) ? 1 : 0;
+}
+
+int BacktestEngine::pending_order_effective_levels(int index, double* stop,
+                                                   double* limit,
+                                                   double* trail_activation) const {
+    if (index < 0 || index >= static_cast<int>(pending_orders_.size())
+        || !stop || !limit || !trail_activation) {
+        return -1;
+    }
+    const PendingOrder& o = pending_orders_[static_cast<size_t>(index)];
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    *stop = o.stop_price;
+    *limit = o.limit_price;
+    *trail_activation = nan;
+    // The offsets resolve against the live position exactly where the fill
+    // path resolves them: materialize_relative_exit_prices_for_live_position
+    // (position live, finite entry price, from_entry filled this cycle;
+    // dir = +1 long / -1 short; limit = entry + dir * profit_ticks * mintick,
+    // stop = entry - dir * loss_ticks * mintick, both level_on_price_grid)
+    // and resolve_exit_path_fill's activation (trail_points wins over
+    // trail_price; ticks = trail_points_to_ticks; entry +/- ticks * mintick
+    // snapped by snap_trail_level_to_tick_grid).
+    const bool position_live =
+        position_side_ != PositionSide::FLAT
+        && std::isfinite(position_entry_price_);
+    const bool resolved =
+        position_live && pending_order_level_resolved(index) == 1;
+    const bool is_long = position_side_ == PositionSide::LONG;
+    const double dir = is_long ? 1.0 : -1.0;
+    if (o.type == OrderType::EXIT && resolved) {
+        if (std::isnan(o.limit_price) && !std::isnan(o.profit_ticks)) {
+            *limit = level_on_price_grid(
+                position_entry_price_ + dir * o.profit_ticks * syminfo_mintick_);
+        }
+        if (std::isnan(o.stop_price) && !std::isnan(o.loss_ticks)) {
+            *stop = level_on_price_grid(
+                position_entry_price_ - dir * o.loss_ticks * syminfo_mintick_);
+        }
+    }
+    if (!std::isnan(o.trail_points)) {
+        if (resolved) {
+            const double ticks = internal::trail_points_to_ticks(o.trail_points);
+            *trail_activation = internal::snap_trail_level_to_tick_grid(
+                is_long ? position_entry_price_ + ticks * syminfo_mintick_
+                        : position_entry_price_ - ticks * syminfo_mintick_,
+                syminfo_mintick_);
+        }
+    } else {
+        *trail_activation = o.trail_price;
+    }
+    return 0;
+}
+
+
 // Fill-time margin admission of a pure STOP entry (round 7, design-stop-
 // entry-placement-admission; ledger note log-20260905t053924z-15615295):
 //
@@ -6558,10 +6831,27 @@ void BacktestEngine::apply_filled_order_to_state(
         trail_best_path_state = trail_best_price_;
     }
 
-    // Set exit_comment and exit_id on any trades created by this fill
+    // Set exit_comment and exit_id on any trades created by this fill. This
+    // is the single shared post-fill site for every order type (MARKET,
+    // ENTRY, EXIT, RAW_ORDER). exit_from_bracket (ABI v4 task 9,
+    // closed_trade_close_cause) must be true only for a REAL strategy.exit
+    // stop/limit/trail/profit/loss leg -- but OrderType::EXIT alone is not
+    // enough to tell one from a deferred strategy.close/close_all: queue_
+    // deferred_close_order (engine_strategy_commands.cpp) also materializes
+    // its synthetic close as an OrderType::EXIT PendingOrder (reusing the
+    // exit-fill qty/level machinery), tagged with the kClosePrefix id prefix
+    // it and execute_immediate_close both use -- the same structural marker
+    // revive_position_brackets_after_margin_call_partial's own candidate
+    // loop excludes for exactly this reason (engine_internal.hpp:59-64).
+    // Exclude that prefix so a script close is never misclassified as a
+    // bracket.
     for (size_t ti = trades_before; ti < trades_.size(); ++ti) {
         trades_[ti].exit_comment = order.comment;
         trades_[ti].exit_id = order.id;
+        trades_[ti].exit_from_bracket =
+            order.type == OrderType::EXIT
+            && !(order.id.size() >= kClosePrefix.size()
+                 && order.id.compare(0, kClosePrefix.size(), kClosePrefix) == 0);
     }
 
     // Handle OCA groups: cancel (type 1) cancels all siblings; reduce

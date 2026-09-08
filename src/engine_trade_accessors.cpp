@@ -129,4 +129,42 @@ double BacktestEngine::open_trade_max_runup_percent(int idx) const {
     return (cost > 0.0) ? (pe.max_runup / cost) * 100.0 : 0.0;
 }
 
+// ABI v4 live-runtime surface (task 9): classify why a REPORT-row closed
+// trade exited. Report-row scope (get_report_trade spans trades_ then
+// range_end_trades_). Final review F7: an out-of-range index returns -1,
+// like strategy_pending_order_fill_qty/_level_resolved/_effective_levels
+// and strategy_closed_trade_close_cause's own NULL-handle case
+// (c_abi.cpp) -- every other indexed live accessor uses -1 for "bad
+// index/handle", so 0 stays reserved purely for the documented UNKNOWN
+// "no cause" value on a VALID trade (no live derivation below currently
+// produces it -- every in-range row falls through to at worst SCRIPT).
+// Order matters for the remaining, in-range classification:
+//   1. open_at_end -- the range-end synthetic row always wins, even if the
+//      position happens to also carry a stale exit_id from an earlier
+//      partial close of the same physical lot.
+//   2. exit_id == "__margin_call__" -- the sentinel every process_margin_call
+//      / tv_money_long_margin_call forced-liquidation site writes.
+//   3/4. An intraday-cap close never fills through a PendingOrder (no
+//      exit_id), so it is identified by its synthesized exit_comment
+//      instead (engine_run.cpp / engine_risk.cpp).
+//   5. exit_from_bracket -- set only at the shared exit-fill site
+//      (engine_fills.cpp apply_filled_order_to_state) when the filling
+//      order was OrderType::EXIT, i.e. a real strategy.exit leg.
+//   6. Otherwise: a strategy.close/close_all market close or a
+//      reversal-driven close -- SCRIPT.
+int BacktestEngine::closed_trade_close_cause(int i) const {
+    if (i < 0 || i >= report_trade_count()) return -1;
+    const Trade& t = get_report_trade(i);
+    if (t.open_at_end) return 6;
+    if (t.exit_id == "__margin_call__") return 3;
+    if (t.exit_id.empty()
+        && t.exit_comment.rfind("Close Position (Max number of filled orders", 0) == 0)
+        return 5;
+    if (t.exit_id.empty()
+        && t.exit_comment.rfind("Close Position (Max intraday Loss)", 0) == 0)
+        return 4;
+    if (t.exit_from_bracket) return 2;
+    return 1;
+}
+
 } // namespace pineforge

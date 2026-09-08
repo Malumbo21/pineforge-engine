@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <vector>
 #include <string>
 #include <cstddef>
@@ -239,6 +240,30 @@ struct Trade {
     std::string entry_comment;
     std::string exit_comment;
     std::string exit_id;
+    // True when this trade's exit fill came from a REAL strategy.exit
+    // bracket leg (stop/limit/trail/profit/loss), as opposed to a
+    // strategy.close/close_all market close, a reversal-driven close, a
+    // margin-call slice, or an intraday-cap close. Set at two sites:
+    //   1. The shared exit-fill site (apply_filled_order_to_state,
+    //      engine_fills.cpp) from the filling order: OrderType::EXIT AND
+    //      its id does NOT carry the internal kClosePrefix ("__close__")
+    //      marker (engine_internal.hpp) -- queue_deferred_close_order
+    //      (engine_strategy_commands.cpp) also materializes a deferred
+    //      strategy.close as an OrderType::EXIT PendingOrder (it reuses the
+    //      same exit-fill qty/level machinery), tagged with that prefix
+    //      precisely so this flag can tell the two apart.
+    //   2. revive_position_brackets_after_margin_call_partial
+    //      (engine_fills.cpp) -- a whole-position strategy.exit leg that
+    //      fires at the margin-call event price bypasses the shared site
+    //      (it calls execute_market_exit directly) but is still a genuine
+    //      bracket fill (its own candidate loop already requires
+    //      OrderType::EXIT and excludes kClosePrefix ids), so it sets this
+    //      unconditionally true.
+    // ABI v4 task 9: closed_trade_close_cause() reads this to distinguish
+    // BRACKET (2) from SCRIPT (1); it is never set on a margin-call /
+    // intraday-cap row (those stay false and are classified from exit_id /
+    // exit_comment instead).
+    bool exit_from_bracket = false;
     double max_runup = 0.0;
     double max_drawdown = 0.0;
     double commission = 0.0;
@@ -326,6 +351,9 @@ struct ReportC {
     pf_metrics_t metrics;
     pf_equity_point_t* equity_curve;
     int64_t equity_curve_len;
+    // ABI v4: per-script-bar broker-state hash (empty unless recording enabled).
+    uint64_t* broker_state_hash;
+    int64_t   broker_state_hash_len;
 };
 
 enum class OrderType { MARKET, ENTRY, EXIT, RAW_ORDER };
@@ -1046,6 +1074,7 @@ struct StrategyOverrides {
 class BacktestEngine {
 protected:
     // --- Position state ---
+    // @broker-state begin
     PositionSide position_side_ = PositionSide::FLAT;
     double position_entry_price_ = 0.0;   // volume-weighted average (for strategy calculations)
     // One-shot post-fill affordability event. Every 100%-margin LONG opening /
@@ -1399,6 +1428,36 @@ protected:
     SymInfo syminfo_;
     int64_t last_bar_time_ = 0;
     int last_bar_index_ = 0;
+    // Live-runtime tail semantics (spec §3.1, ABI v4): when true, the LAST
+    // bar of the fed array is a still-forming bar, not the chart's rightmost
+    // historical bar. See set_realtime_tail() and apply_realtime_tail_horizon().
+    bool realtime_tail_ = false;
+    int realtime_tail_horizon_bars_ = 0;
+    // Live probe tail suppression (spec §3.2, ABI v4): when true, the LAST
+    // array bar (is_tail_bar_) runs only dispatch_bar()'s pre-on_bar broker
+    // steps and returns — the run's last-bar fills are the settled book's
+    // fills against the forming bar, and the post-run book is the in-force
+    // book. See set_probe_suppress_tail_logic(). Independent of
+    // realtime_tail_ (do not couple them).
+    bool probe_suppress_tail_logic_ = false;
+    // Forced intrabar path order (ABI v4 live-runtime surface, task 4): 0
+    // AUTO, 1 HIGH_FIRST, 2 LOW_FIRST. Any other value is clamped to AUTO by
+    // set_path_order() -- this member is always one of {0,1,2}. Persistent
+    // configuration, like realtime_tail_ / probe_suppress_tail_logic_ above
+    // -- reset_run_state() does not touch it. See set_path_order() and the
+    // PathOrderScope guard in engine_run.cpp that installs it as
+    // internal::set_path_order_override for exactly the duration of one
+    // run(). Applies to run() only: streaming ticks dispatched after
+    // strategy_stream_begin (engine_stream.cpp) never go through a
+    // PathOrderScope and always see AUTO regardless of this setting.
+    int path_order_mode_ = 0;
+    // True while dispatching the last array bar (the three run loops set
+    // this right after bar_index_ = i). Read by dispatch_bar() to decide
+    // whether to apply probe_suppress_tail_logic_. In
+    // run_aggregation_bar_loop this is keyed off the INPUT index i, not the
+    // emitted script-bar count -- see set_probe_suppress_tail_logic() for
+    // why that is only a placeholder today.
+    bool is_tail_bar_ = false;
     // Chart's display timezone — separate from ``syminfo_.timezone`` (the
     // exchange TZ). Set by ``set_chart_timezone`` / the C ABI's
     // ``strategy_set_chart_timezone``. See the doc on ``set_chart_timezone``
@@ -1660,6 +1719,40 @@ protected:
     // calls, mirroring scratch_skip_ids_). Always cleared before use.
     std::vector<size_t> scratch_filled_indices_;
 
+    // Per-PASS dual-entry-stop arbitration winner (a flat position resting
+    // one long stop-only ENTRY + one short stop-only ENTRY, both touched
+    // this bar -- dual_entry_stop_path_winner, engine_path_resolve.cpp).
+    // Reset to None at the top of every process_pending_orders CALL (a
+    // process_orders_on_close_ script bar calls it twice per bar -- old-
+    // order settlement, then new-order fills -- and each pass re-derives
+    // its own flat-position winner) and written where that arbitration is
+    // decided. This is working state, NOT the public accessor's value --
+    // it goes back to None the moment the winning side fills (position no
+    // longer FLAT) or its admission is declined (the release at the
+    // `path_winner_stop_margin_decline` site below), even though a real
+    // arbitration happened this bar. last_bar_dual_entry_path() reads
+    // last_bar_dual_entry_decision_ (below) instead, precisely to survive
+    // that. Only the standard (non-calc_on_order_fills) dispatch path
+    // updates this; the COOF scheduler's process_next_pending_order keeps
+    // its own unrelated local of the same computation and does not persist
+    // it here.
+    internal::DualEntryStopPathWinner dual_entry_path_{};
+    // Per-BAR snapshot of the above: the last non-None value
+    // dual_entry_path_ took during this bar, surviving whatever
+    // dual_entry_path_ itself does afterward (a fill, a declined admission
+    // release, or the next process_pending_orders call's reset). Reset to
+    // None once per bar -- at the top of dispatch_bar() and, for the bar
+    // magnifier (which never reaches dispatch_bar), where bar_index_
+    // advances for each emitted script bar in run_aggregation_bar_loop --
+    // and written ONLY alongside dual_entry_path_'s own arbitration write
+    // (engine_fills.cpp), never at the declined-admission release. ABI v4
+    // live-runtime surface (task 4): this is what last_bar_dual_entry_path()
+    // returns, so a live probe (or an ordinary POOC run, tail-suppressed or
+    // not) reads the bar's real arbitration even if the winning order later
+    // filled, was declined, or the working state otherwise moved on. Same
+    // calc_on_order_fills_ caveat as dual_entry_path_ above.
+    internal::DualEntryStopPathWinner last_bar_dual_entry_decision_{};
+
     // --- Trailing stop state ---
     // Best favorable price since position entry (for trailing stop computation)
     double trail_best_price_ = std::numeric_limits<double>::quiet_NaN();
@@ -1781,6 +1874,13 @@ protected:
     int64_t bars_in_market_ = 0;     // script bars with an open position at close
     double first_bar_open_ = std::numeric_limits<double>::quiet_NaN();  // buy&hold basis
 
+    // --- Per-script-bar broker-state hash recording (ABI v4 live-runtime
+    // surface, task 6). Default off: empty vector, empty report array,
+    // every historical run byte-identical to before this flag existed. See
+    // set_broker_state_hash_recording() and broker_state_hash(). ---
+    bool broker_state_hash_recording_ = false;
+    std::vector<uint64_t> broker_state_hashes_;
+
     // --- Position-size extremes (strategy.max_contracts_held_*) ---
     double max_contracts_held_all_ = 0.0;
     double max_contracts_held_long_ = 0.0;
@@ -1834,6 +1934,7 @@ protected:
     // loop's safe point (finish_intraday_loss_cancel); the loop itself
     // removes every order it has not yet applied.
     bool intraday_loss_cancel_pending_ = false;
+    // @broker-state end
     int intraday_loss_day_key() const;
     void intraday_loss_begin_bar(const Bar& bar);
     bool intraday_loss_orders_blocked() const;
@@ -3155,7 +3256,13 @@ protected:
     // before every speculative execution so those fills consume the same
     // finite historical/magnifier event budget as every other broker fill.
     uint64_t coof_direct_fill_events_remaining_ = 0;
+    // @broker-state begin
+    // Monotonic cross-bar fill sequence counter; compared against
+    // trail_best_before_bar_fill_seq_ (hashed above) and against
+    // PendingOrder::signal_close_mc_fill_seq (hashed per-order) by fill-time
+    // gates that cross the bar boundary (engine_fills.cpp).
     uint64_t broker_fill_event_seq_ = 0;
+    // @broker-state end
 
     // input.source histories are base-owned script state and must roll back
     // with generated state between historical fill recalculations.
@@ -3534,6 +3641,45 @@ protected:
     // insert + ``string`` push_back; subsequent calls with the same name
     // are a single map lookup.
     bool trace_enabled_ = false;
+
+    // Live-runtime surface (ABI v4). All default off/zero; historical runs are
+    // byte-identical when untouched (tests/test_live_flags_off_identity.cpp).
+    int last_run_status_ = 0;               // 0 completed, 1 NOT_COMPLETED (abort)
+
+    // Cooperative abort (spec §3.5): set from any thread via request_abort();
+    // consumed by the run in progress at the top of each bar-loop iteration
+    // via check_abort(), which unwinds the run with AbortRequested. Cleared
+    // at every run() entry, so a request made while idle is a no-op.
+    //
+    // AbortFlag wraps std::atomic<bool> in a copy/move-constructible shell:
+    // std::atomic itself has its copy/move members deleted, and some tests
+    // (e.g. tests/test_pooc_global_full_exit.cpp's ``run_case``) return a
+    // BacktestEngine subclass by value, which needs the class to stay
+    // implicitly copyable. Copying/moving never carries an in-flight abort
+    // request across — there is no "run in progress" on a copy — so the
+    // copy always starts cleared.
+    struct AbortFlag {
+        std::atomic<bool> value{false};
+        AbortFlag() = default;
+        AbortFlag(const AbortFlag&) noexcept {}
+        AbortFlag(AbortFlag&&) noexcept {}
+        AbortFlag& operator=(const AbortFlag&) noexcept {
+            value.store(false, std::memory_order_relaxed);
+            return *this;
+        }
+        AbortFlag& operator=(AbortFlag&&) noexcept {
+            value.store(false, std::memory_order_relaxed);
+            return *this;
+        }
+        bool load(std::memory_order order) const { return value.load(order); }
+        void store(bool v, std::memory_order order) { value.store(v, order); }
+    };
+    AbortFlag abort_requested_;
+    struct AbortRequested {};               // thrown inside the bar loops only
+    void check_abort() {
+        if (abort_requested_.load(std::memory_order_relaxed)) throw AbortRequested{};
+    }
+
     std::vector<TraceEntryC> trace_buffer_;
     std::vector<std::string> trace_names_;
     std::unordered_map<std::string, int32_t> trace_name_index_;
@@ -4308,6 +4454,41 @@ private:
     void run_simple_bar_loop(const Bar* input_bars, int n_input);
     void run_aggregation_bar_loop(const Bar* input_bars, int n_input,
                                   bool bar_magnifier, int expected_script_bars);
+    // Live-runtime tail (spec §3.1): once script_tf_seconds_ is known for
+    // this run, freeze pine_last_bar_index()/last_bar_time_ at the horizon
+    // bar instead of the fed array's actual last index. No-op unless
+    // realtime_tail_ is on and realtime_tail_horizon_bars_ > 0.
+    //
+    // script_bar_geometry selects which timestamp rule applies to
+    // last_bar_time_ (last_bar_index_ = horizon - 1 either way):
+    //   true  -- `bars` IS the script-bar array (the single-TF run(bars, n)
+    //            path, and run_tf_impl's !needs_aggregation call, where
+    //            input_tf == script_tf so input bars ARE script bars):
+    //            exact bars[horizon - 1].timestamp when horizon <= n, else
+    //            extrapolated from bars[n - 1] one script-TF step per
+    //            missing bar past the array's last bar.
+    //   false -- `bars` is the *input* array under aggregation
+    //            (needs_aggregation, input_tf < script_tf): indexing it by
+    //            a script-bar horizon would land on the wrong input bar
+    //            (final-rereview.md N1), so instead extrapolate from the
+    //            first input bar's timestamp, one script-TF step per
+    //            horizon bar (the pre-fix formula, restored for this path
+    //            only).
+    void apply_realtime_tail_horizon(const Bar* bars, int n,
+                                      bool script_bar_geometry);
+    // The TF-aware run()'s actual work (dispatch loop selection, the
+    // try/catch, both cleanup paths). Does NOT touch last_error_,
+    // last_run_status_, or abort_requested_ -- every public run() overload
+    // clears those exactly once at its own entry before reaching here, so a
+    // request_abort() arriving during a delegating overload's own setup
+    // (e.g. the SymInfo/overrides overload's syminfo/inputs copy) is never
+    // silently wiped by a second, later clear.
+    void run_tf_impl(const Bar* input_bars, int n_input,
+                     const std::string& input_tf,
+                     const std::string& script_tf,
+                     bool bar_magnifier,
+                     int magnifier_samples,
+                     MagnifierDistribution magnifier_dist);
     bool stream_finalize_until(int64_t timestamp_ms);
     void stream_feed_input_bar(const Bar& bar, bool had_tick);
     void stream_dispatch_script_bar(const Bar& bar, bool had_tick);
@@ -4411,6 +4592,17 @@ public:
         return i < n_closed ? trades_[(size_t)i]
                             : range_end_trades_[(size_t)(i - n_closed)];
     }
+
+    // ABI v4 live-runtime surface (task 9): classify why a REPORT-row
+    // closed trade exited -- report-row scope (spans trades_ then
+    // range_end_trades_, like get_report_trade above), so this cannot reuse
+    // the existing protected closed_trade_* names below (strategy.
+    // closedtrades.* scope: trades_ only, std::string returns). 0 UNKNOWN
+    // (bad index), 1 SCRIPT, 2 BRACKET, 3 MARGIN_CALL, 4 INTRADAY_LOSS_CAP,
+    // 5 INTRADAY_FILL_CAP, 6 RANGE_END. Defined in engine_trade_accessors.cpp;
+    // see strategy_closed_trade_close_cause (pineforge.h) for the exact
+    // derivation order.
+    int closed_trade_close_cause(int i) const;
 
     // --- Position-size extremes (strategy.max_contracts_held_*) ---
     double max_contracts_held_all() const { return max_contracts_held_all_; }
@@ -4650,6 +4842,258 @@ public:
     int pine_bar_index() const { return bar_index_ + bar_index_offset_; }
     int pine_last_bar_index() const { return last_bar_index_ + bar_index_offset_; }
 
+    // Live-runtime tail semantics (spec §3.1, ABI v4): the caller's fed array
+    // ends with a still-forming bar rather than the chart's rightmost
+    // historical bar. When `on`, the LAST bar of every subsequent run() (this
+    // is persistent configuration, not a one-shot flag -- it stays set until
+    // a caller passes on=false, and reset_run_state() does not touch it)
+    // gets barstate.islast == false, session.islastbar computed from the
+    // bucket calendar (no i+1 bar to peek at), pine_last_bar_index() /
+    // last_bar_time_ frozen at the horizon bar (`horizon_bars - 1`), and no
+    // range-end close row/trade. Default off: every historical run is
+    // byte-identical to before this flag existed.
+    void set_realtime_tail(bool on, int horizon_bars) {
+        realtime_tail_ = on;
+        realtime_tail_horizon_bars_ = horizon_bars;
+    }
+    bool realtime_tail() const { return realtime_tail_; }
+
+    // Live probe tail suppression (spec §3.2, ABI v4): when `on`, the LAST
+    // bar of every subsequent run() runs only dispatch_bar()'s pre-on_bar
+    // broker steps (intraday-cap deferred close, _push_source_series,
+    // process_pending_orders, evaluate_max_intraday_loss_over_path,
+    // update_per_trade_extremes) and returns — on_bar is never invoked for
+    // that bar, and nothing after it runs (no flush_same_bar_close, no POOC
+    // second pass, no process_margin_call, no settle_dormant_bracket_
+    // reissues, no sizing refresh). Margin-call / intraday-cap closes
+    // therefore surface only at settlement (the next non-suppressed run),
+    // not against the still-forming probe bar. This is persistent
+    // configuration, like set_realtime_tail, and independent of it — do not
+    // couple the two flags.
+    // Honoured only on the standard dispatch_bar path (single-TF run loop,
+    // run_simple_bar_loop). Silent no-op under calc_on_order_fills (COOF
+    // scheduler) and under the bar magnifier (run_magnified_bar) -- both
+    // gated in live v1. Semantics UNDEFINED on the non-magnifier aggregation
+    // path (input_tf < script_tf) until the partial-bucket forming-bar flag
+    // lands; see pineforge.h.
+    // Default off (@p on == 0): every historical run stays byte-identical to
+    // before this flag existed.
+    void set_probe_suppress_tail_logic(bool on) {
+        probe_suppress_tail_logic_ = on;
+    }
+    bool probe_suppress_tail_logic() const { return probe_suppress_tail_logic_; }
+
+    // Force this run's intrabar path order (ABI v4 live-runtime surface,
+    // task 4): 0 AUTO (the unchanged |H-O| vs |O-L| rule), 1 HIGH_FIRST
+    // (O -> H -> L -> C), 2 LOW_FIRST (O -> L -> H -> C). Any other value is
+    // clamped to AUTO. A live probe runs the SAME forming bar under both
+    // forced orders and keeps only the fills that agree between the two --
+    // a fill that depends on which leg TradingView's own still-forming bar
+    // will resolve to is path-dependent and must be suppressed rather than
+    // guessed. See internal::bar_path_uses_high_first's thread-local
+    // override (engine_path_resolve.cpp) and the PathOrderScope guard in
+    // engine_run.cpp that installs/clears it for exactly the duration of
+    // this run's own dispatch.
+    // Persistent configuration, like set_realtime_tail -- stays set until a
+    // caller passes mode=0. Applies to run() only: a stream continued via
+    // strategy_stream_begin dispatches its realtime ticks outside any
+    // PathOrderScope and always sees AUTO, regardless of this setting.
+    // Default AUTO (mode=0): every historical run stays byte-identical to
+    // before this flag existed.
+    void set_path_order(int mode) {
+        path_order_mode_ = (mode == 1 || mode == 2) ? mode : 0;
+    }
+
+    // The dual-entry-stop arbitration decided on the LAST bar this run
+    // dispatched (a flat position resting one long stop-only ENTRY and one
+    // short stop-only ENTRY, both touched that bar --
+    // dual_entry_stop_path_winner, engine_path_resolve.cpp): 0 None (no
+    // such pair was arbitrated on that bar), 1 LongFirst, 2 ShortFirst --
+    // internal::DualEntryStopPathWinner's own enumerator order (its Tie
+    // value never reaches here; dual_entry_stop_path_winner always resolves
+    // a tie to LongFirst). This reads last_bar_dual_entry_decision_, a
+    // per-bar snapshot of the arbitration that survives whatever the
+    // working state (dual_entry_path_) does afterward this same bar -- a
+    // fill, a declined stop-entry admission, or (under
+    // process_orders_on_close) the bar's second process_pending_orders
+    // pass, all of which reset dual_entry_path_ to None without undoing the
+    // fact that an arbitration happened. Only the standard
+    // (non-calc_on_order_fills) dispatch path updates it; this is a silent
+    // no-op (stays at its last standard-path value) under the COOF
+    // scheduler, mirroring set_probe_suppress_tail_logic's
+    // dispatch-path-scope caveat.
+    int last_bar_dual_entry_path() const {
+        return static_cast<int>(last_bar_dual_entry_decision_);
+    }
+
+    // Live runtime G1 (spec §3.4): a deterministic, order-independent
+    // FNV-1a 64 hash over every piece of broker state that decides the next
+    // bar's fills (position, book, pyramid lots, trail scalars, cycle/
+    // intraday/risk latches, frozen sizing, equity sums). Two engines with
+    // equal broker state hash equally regardless of unordered-container
+    // insertion history; any difference in that state changes the hash.
+    // Implemented in engine_state_hash.cpp; coverage of the marked
+    // broker-state region(s) below (grep this file for "broker-state") is
+    // enforced by scripts/check_broker_state_hash_coverage.py.
+    uint64_t broker_state_hash() const;
+
+    // ABI v4 live-runtime surface (task 7, spec 3.6): read-only view of the
+    // resting-order book after the most recent run() -- the book in force
+    // for the next bar, in the vector's own (insertion) order; fill
+    // priority is decided at fill time from created_seq. The C ABI
+    // (strategy_pending_orders_len / strategy_pending_order_get) copies
+    // each order out through the generated POD mirror
+    // (pf_pending_order_v1_t, include/pineforge/pending_order_mirror.hpp),
+    // never by pointer. `i` must be in [0, pending_order_count()).
+    int pending_order_count() const { return static_cast<int>(pending_orders_.size()); }
+    const PendingOrder& pending_order_at(int i) const {
+        return pending_orders_[static_cast<size_t>(i)];
+    }
+
+    // ABI v4 live-runtime surface (task 8, spec 3.6): engine-computed
+    // derived values of a resting order and the position scalars the live
+    // runtime would otherwise have to re-derive. Pure const reads of the
+    // engine's own sizing / admission / level-resolution predicates; none
+    // of them mutates the engine, so a historical run is byte-identical
+    // whether or not a caller reads them. Implemented in engine_fills.cpp
+    // next to use_default_stop_placement_qty, the rules they mirror.
+    //
+    // probe_fill_qty: the quantity the entry kernel would open if the
+    // order at `index` filled at `fill_price`, and which sizing partition
+    // produced it -- exactly the "quantity the market / priced-entry kernel
+    // would actually open with" computation of the zero-lot decline gate in
+    // apply_filled_order_to_state, tagged:
+    //   0 EXPLICIT               a script-supplied qty: for strategy.entry
+    //                            calc_qty_for_type at the slipped fill
+    //                            (apply_qty_step of the contracts for FIXED,
+    //                            the budget sized at the fill for a per-call
+    //                            percent/cash override); a strategy.order
+    //                            explicit qty is dispatched VERBATIM
+    //                            (apply_raw_order_fill, no lot step).
+    //   1 FROZEN_PLACEMENT       a quantity the engine fixed before the fill,
+    //                            never re-derived from the fill price:
+    //                            frozen_default_qty (the default
+    //                            percent_of_equity / cash MARKET or
+    //                            strategy.order size at the signal close), a
+    //                            MARKET's frozen broker transaction
+    //                            (paired_flat_market_transaction_qty; a
+    //                            same-bar-market member's sbmt_tx_qty from
+    //                            FLAT or as a kept over-cap add), or what one
+    //                            of the two MARKET reversal kernels opens:
+    //                            a same-bar-market member against an
+    //                            opposite live position opens the remainder
+    //                            sbmt_tx_qty - min(sbmt_tx_qty, live qty)
+    //                            (apply_same_bar_market_tx_reversal), and the
+    //                            exact SHORT-seed collision's final short
+    //                            re-opens the residual pyramid_entries_[0].qty
+    //                            - pyramid_entries_[1].qty after closing both
+    //                            lots (short_seed_collision_final_short_is_
+    //                            live). Both kernels are modelled; each is
+    //                            reported with close_only = 1 when it opens
+    //                            nothing.
+    //   2 DEFAULT_STOP_PLACEMENT default_stop_placement_qty, when
+    //                            use_default_stop_placement_qty says
+    //                            dispatch consumes it (round 7 family K).
+    //   3 AT_FILL                default sizing at the slipped fill,
+    //                            calc_qty(fill).
+    // `fill_price` is slipped the way the kernel slips it
+    // (apply_slippage; a LIMIT-triggered entry takes apply_limit_fill).
+    // `close_only` is 1 when the kernel's close-only predicate fires -- the
+    // fill closes against the live opposite position and that predicate
+    // opens no leg of its own (where the order was created FLAT the branch
+    // is close_opposite_then_enter: a transaction larger than the live
+    // position still opens the remainder, so a consumer compares `qty` with
+    // the live position): the order's
+    // affordability_close_only (entry leg declined at placement), the
+    // priced-entry prior_cycle_close_only rule (opposite live position,
+    // created_position_side != position_side_, and not a KI-65
+    // reverses_same_bar_market_from_flat), the same-cycle frozen
+    // explicit-FIXED transaction that the close consumes exactly, or a
+    // finalized flat MARKET pair, or one of the two reversal kernels above
+    // opening nothing -- each spelled as apply_entry_order_fill /
+    // apply_market_order_fill spell it. A replaced default-percent short
+    // (replaced_percent_short_market_is_live) is dispatched
+    // close_opposite_then_enter with its frozen_default_qty: `qty` is that
+    // transaction, close_only 0. Not folded into `qty`: the
+    // deferred-flip carry (tv_carry_qty, enter_market_from_flat's
+    // tv_deferred_flip rule adds it on top of this quantity for a priced
+    // entry firing from FLAT whose placement side is the opposite of the
+    // requested side) -- the mirror exposes tv_carry_qty and
+    // created_position_side verbatim. Returns 0 on success; 1 (qty NaN,
+    // close_only 0, partition -1) when the order is an EXIT, whose fill
+    // quantity is decided against the live position at the fill, not by a
+    // sizing partition; -1 on a bad index or a null out-pointer.
+    int probe_fill_qty(int index, double fill_price, double* qty,
+                       int* close_only, int* partition) const;
+    // 1 when the order's entry-relative offsets (profit_ticks / loss_ticks /
+    // trail_points) resolve NOW: entries, plain orders and exits with an
+    // empty from_entry always; an exit bound to from_entry only once that
+    // id has filled in the CURRENT position cycle (cycle_filled_entry_ids_,
+    // the gate materialize_relative_exit_prices_for_live_position and the
+    // eligibility pass share). 0 otherwise, -1 on a bad index.
+    int pending_order_level_resolved(int index) const;
+    // The price levels the order would fire at, as the fill path resolves
+    // them: a set stop_price / limit_price / trail_price verbatim (they are
+    // already on the price grid); an unset leg from its tick offset against
+    // position_entry_price_ when pending_order_level_resolved() == 1 and a
+    // position is live, with the position side's sign exactly as
+    // materialize_relative_exit_prices_for_live_position (limit = entry +
+    // dir * profit_ticks * mintick, stop = entry - dir * loss_ticks *
+    // mintick, dir = +1 long / -1 short, level_on_price_grid) and
+    // resolve_exit_path_fill (activation = snap_trail_level_to_tick_grid(
+    // entry +/- ceil(trail_points - 5e-5) * mintick); trail_points wins
+    // over trail_price when both are set). NaN for a leg that is unset or
+    // unresolvable. Returns 0, or -1 on a bad index / null out-pointer.
+    int pending_order_effective_levels(int index, double* stop, double* limit,
+                                       double* trail_activation) const;
+    // The live position's volume-weighted average entry price
+    // (position_entry_price_; 0 when flat -- the engine keeps 0 there, the
+    // C ABI reports NaN when flat), its cycle id (position_cycle_seq_; 0
+    // when flat, a fresh nonzero id per open/reversal, kept across
+    // same-direction adds) and the trail extreme the exit trail legs ride
+    // (trail_best_price_; NaN until a position fills).
+    double position_avg_price() const { return position_entry_price_; }
+    int64_t position_cycle_seq() const { return position_cycle_seq_; }
+    double trail_best_price() const { return trail_best_price_; }
+    // ABI v4 live-runtime surface (task 9): public forwarders for the C
+    // ABI, which -- being extern "C" free functions -- cannot reach the
+    // protected signed_position_size() / current_equity() above.
+    // signed_position_size() is strategy.position_size (KI-64 freeze-aware:
+    // reads the pre-close position while a same-bar POOC close is frozen).
+    // current_equity() is initial capital plus realized net profit
+    // (strategy.initial_capital + strategy.netprofit). NOT Pine's
+    // strategy.equity, which adds open profit on top of this (see the
+    // sizing_equity formula and the equity-curve remark below, both
+    // current_equity() + open_profit(...)).
+    double live_position_size() const { return signed_position_size(); }
+    double live_current_equity() const { return current_equity(); }
+    // ABI v4 live-runtime surface (task 9): total SCRIPT bars dispatched by
+    // the most recent run() (mirrors pf_report_t::script_bars_processed,
+    // engine_report.cpp), including the stream warmup leg and every
+    // realtime tick-driven bar after strategy_stream_begin.
+    int64_t script_bars_processed() const { return diag_script_bars_processed_; }
+
+    // ABI v4 live-runtime surface (task 6): when on, every script bar's
+    // dispatch (all four script-bar dispatch sites -- the single-TF run()
+    // loop, run_simple_bar_loop, run_aggregation_bar_loop, and
+    // stream_dispatch_script_bar, engine_stream.cpp, the realtime-stream
+    // continuation of a stream_begin warmup) appends broker_state_hash()
+    // to broker_state_hashes_ immediately after that bar's
+    // record_equity_point() call, so the recorded array's length matches
+    // script_bars_processed and pf_report_t::broker_state_hash_len 1:1 --
+    // including on strategy_stream_fill_report, whose report is the
+    // cumulative warmup + realtime run. Default off: broker_state_hashes_
+    // stays empty, fill_report emits a null/zero-length array, and every
+    // historical run stays byte-identical to before this flag existed.
+    // reset_run_state() clears the recorded array on every run() (the
+    // warmup leg of stream_begin included) regardless of this flag's
+    // value; the flag itself is persistent configuration, like
+    // set_realtime_tail, so it must be set BEFORE stream_begin to also
+    // cover the warmup bars.
+    void set_broker_state_hash_recording(bool on) {
+        broker_state_hash_recording_ = on;
+    }
+
     // Toggle volume-weighted per-sub-bar sampling inside run_magnified_bar.
     // Has no effect unless bar magnifier is enabled.
     void set_magnifier_volume_weighted(bool on) {
@@ -4663,6 +5107,15 @@ public:
     // per-bar values it wants to cross-reference against TradingView.
     void set_trace_enabled(bool on) { trace_enabled_ = on; }
     bool trace_enabled() const { return trace_enabled_; }
+
+    // --- Live-runtime status API (ABI v4) ---
+    int last_run_status() const { return last_run_status_; }
+
+    // Request cooperative abort of the run in progress on this handle (a
+    // live runtime supersedes an in-flight probe run). Safe to call from any
+    // thread; consumed by the running loop at its next bar. A request made
+    // while idle is cleared at the next run() entry and is a no-op.
+    void request_abort() { abort_requested_.store(true, std::memory_order_relaxed); }
 
     // Push a typed per-bar value into the trace buffer. Cheap when
     // disabled — a single bool branch and return. When enabled, name

@@ -148,6 +148,12 @@ class pf_report_t(ctypes.Structure):
         ("metrics",                      pf_metrics_t),
         ("equity_curve",                 ctypes.POINTER(pf_equity_point_t)),
         ("equity_curve_len",             ctypes.c_int64),  # int64 in the C header, NOT c_int
+
+        # ABI v4: per-script-bar broker-state hash, filled when
+        # strategy_set_broker_state_hash_recording is on; NULL/0-length
+        # (default) otherwise.
+        ("broker_state_hash",            ctypes.POINTER(ctypes.c_uint64)),
+        ("broker_state_hash_len",        ctypes.c_int64),
     ]
 
 class pf_version_t(ctypes.Structure):
@@ -178,7 +184,7 @@ lib = ctypes.CDLL("./my_strategy.so")
 # ABI guard — pf_report_t is CALLER-allocated, so running an old .so
 # against the v2 mirror above (or vice versa) silently corrupts memory.
 # Verify the .so's layout version before any run:
-EXPECTED_PF_ABI = 3   # PF_ABI_VERSION in <pineforge/pineforge.h>
+EXPECTED_PF_ABI = 4   # PF_ABI_VERSION in <pineforge/pineforge.h>
 try:
     lib.pf_abi_version.restype = ctypes.c_int
     abi = lib.pf_abi_version()

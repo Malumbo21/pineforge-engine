@@ -10,7 +10,22 @@
  *   - The runtime-library-side `extern "C"` symbols (the closed-trade
  *     incarnation accessor, setters, strategy_get_last_error,
  *     the auxiliary-security-feed setter, the strategy_stream_* lifecycle,
- *     pf_version_get/pf_version_string, pf_abi_version — the authoritative list is EXPECTED_RUNTIME in
+ *     the live-runtime surface (strategy_request_abort,
+ *     strategy_last_run_status, strategy_set_realtime_tail,
+ *     strategy_set_probe_suppress_tail_logic, strategy_set_path_order,
+ *     strategy_last_bar_dual_entry_path,
+ *     strategy_set_broker_state_hash_recording, strategy_broker_state_hash,
+ *     strategy_pending_orders_len, strategy_pending_order_get,
+ *     strategy_pending_order_layout, strategy_pending_order_fill_qty,
+ *     strategy_pending_order_level_resolved,
+ *     strategy_pending_order_effective_levels, strategy_trail_best_price,
+ *     strategy_position_avg_price, strategy_position_cycle_seq,
+ *     strategy_closed_trade_entry_id, strategy_closed_trade_exit_id,
+ *     strategy_closed_trade_exit_comment, strategy_closed_trade_close_cause,
+ *     strategy_position_size, strategy_current_equity,
+ *     strategy_script_bars_processed),
+ *     pf_version_get/pf_version_string,
+ *     pf_abi_version — the authoritative list is EXPECTED_RUNTIME in
  *     scripts/check_c_abi_runtime.py, enforced by CI). The other
  *     `extern "C"` symbols listed in pineforge.h (strategy_create,
  *     run_backtest, etc.) are emitted per-compiled-strategy by the
@@ -25,6 +40,14 @@
 #include <pineforge/bar.hpp>
 #include <pineforge/magnifier.hpp>
 #include <cstddef>
+#include <limits>
+#include <cstring>
+
+namespace pineforge {
+// Generated (src/pending_order_mirror.cpp, scripts/gen_pending_order_mirror.py).
+void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* out);
+const pf_field_desc_t* pending_order_layout(int* count);
+}  // namespace pineforge
 
 /* ── Bar layout parity ──────────────────────────────────────────── */
 
@@ -122,6 +145,10 @@ static_assert(offsetof(pf_report_t, equity_curve) == offsetof(pineforge::ReportC
               "pf_report_t::equity_curve offset mismatch");
 static_assert(offsetof(pf_report_t, equity_curve_len) == offsetof(pineforge::ReportC, equity_curve_len),
               "pf_report_t::equity_curve_len offset mismatch");
+static_assert(offsetof(pf_report_t, broker_state_hash) == offsetof(pineforge::ReportC, broker_state_hash),
+              "pf_report_t::broker_state_hash offset mismatch");
+static_assert(offsetof(pf_report_t, broker_state_hash_len) == offsetof(pineforge::ReportC, broker_state_hash_len),
+              "pf_report_t::broker_state_hash_len offset mismatch");
 
 /* ── Magnifier distribution enum parity ─────────────────────────── */
 
@@ -172,6 +199,84 @@ PF_API uint64_t strategy_closed_trade_entry_incarnation(
     return engine->get_report_trade(trade_index).entry_incarnation;
 }
 
+/* ABI v4 live-runtime surface (task 9): closed-trade id / exit-comment
+ * string accessors, indexing the same REPORT row space as
+ * strategy_closed_trade_entry_incarnation above (trades_ then
+ * range_end_trades_). These read Trade::entry_id / exit_id / exit_comment
+ * directly rather than through the protected BacktestEngine::closed_trade_
+ * entry_id / _exit_id / _exit_comment methods -- those are a DIFFERENT,
+ * narrower accessor (strategy.closedtrades.* scope: trades_ only, no
+ * range-end rows) already declared with these exact names, so a same-name
+ * report-row overload is not possible.
+ *
+ * Returned pointers are valid until the next run() (or stream call) on this
+ * handle, like strategy_get_last_error -- the runtime's own std::string
+ * storage backing them is untouched until then. NULL on a NULL handle or an
+ * out-of-range trade_index. */
+PF_API const char* strategy_closed_trade_entry_id(pf_strategy_t s, int trade_index) {
+    if (!s) return nullptr;
+    const auto* engine = static_cast<const pineforge::BacktestEngine*>(s);
+    if (trade_index < 0 || trade_index >= engine->report_trade_count()) return nullptr;
+    return engine->get_report_trade(trade_index).entry_id.c_str();
+}
+
+PF_API const char* strategy_closed_trade_exit_id(pf_strategy_t s, int trade_index) {
+    if (!s) return nullptr;
+    const auto* engine = static_cast<const pineforge::BacktestEngine*>(s);
+    if (trade_index < 0 || trade_index >= engine->report_trade_count()) return nullptr;
+    return engine->get_report_trade(trade_index).exit_id.c_str();
+}
+
+PF_API const char* strategy_closed_trade_exit_comment(pf_strategy_t s, int trade_index) {
+    if (!s) return nullptr;
+    const auto* engine = static_cast<const pineforge::BacktestEngine*>(s);
+    if (trade_index < 0 || trade_index >= engine->report_trade_count()) return nullptr;
+    return engine->get_report_trade(trade_index).exit_comment.c_str();
+}
+
+/* ABI v4 live-runtime surface (task 9): why a REPORT-row closed trade
+ * exited (BacktestEngine::closed_trade_close_cause, engine_trade_
+ * accessors.cpp, has the full derivation order). 0 UNKNOWN (reserved for
+ * the documented "no cause" value on a VALID trade -- no live derivation
+ * currently produces it), 1 SCRIPT (strategy.close/close_all or a
+ * reversal-driven close), 2 BRACKET (a strategy.exit stop/limit/trail/
+ * profit/loss leg), 3 MARGIN_CALL, 4 INTRADAY_LOSS_CAP, 5
+ * INTRADAY_FILL_CAP, 6 RANGE_END (the still-open position closed at the
+ * end of a flag-off run). -1 (final review F7) on a NULL handle OR an
+ * out-of-range trade_index -- delegated to the engine method for the
+ * latter, matching every sibling indexed accessor's -1-on-bad-index
+ * convention (strategy_pending_order_fill_qty/_level_resolved/
+ * _effective_levels). */
+PF_API int strategy_closed_trade_close_cause(pf_strategy_t s, int trade_index) {
+    if (!s) return -1;
+    return static_cast<const pineforge::BacktestEngine*>(s)->closed_trade_close_cause(trade_index);
+}
+
+/* ABI v4 live-runtime surface (task 9): the script-facing position size
+ * (strategy.position_size -- signed, KI-64 freeze-aware) and equity after
+ * the most recent run(). strategy_current_equity is initial capital plus
+ * realized net profit (strategy.initial_capital + strategy.netprofit) --
+ * NOT Pine's strategy.equity, which adds open profit on top of this. NaN
+ * on a NULL handle. */
+PF_API double strategy_position_size(pf_strategy_t s) {
+    if (!s) return std::numeric_limits<double>::quiet_NaN();
+    return static_cast<const pineforge::BacktestEngine*>(s)->live_position_size();
+}
+
+PF_API double strategy_current_equity(pf_strategy_t s) {
+    if (!s) return std::numeric_limits<double>::quiet_NaN();
+    return static_cast<const pineforge::BacktestEngine*>(s)->live_current_equity();
+}
+
+/* ABI v4 live-runtime surface (task 9): total SCRIPT bars dispatched by the
+ * most recent run() (mirrors pf_report_t::script_bars_processed, including
+ * a stream's warmup leg and every realtime tick-driven bar dispatched
+ * afterward). -1 on a NULL handle. */
+PF_API int64_t strategy_script_bars_processed(pf_strategy_t s) {
+    if (!s) return -1;
+    return static_cast<const pineforge::BacktestEngine*>(s)->script_bars_processed();
+}
+
 /* Toggle per-bar trace recording on a live strategy. Default off; the
  * harness flips it on per-strategy via this entry point before running
  * a backtest whose per-bar values it wants to cross-reference against
@@ -200,6 +305,179 @@ PF_API const char* strategy_get_last_error(pf_strategy_t s) {
 PF_API void strategy_set_trade_start_time(pf_strategy_t s, int64_t timestamp_ms) {
     if (!s) return;
     static_cast<pineforge::BacktestEngine*>(s)->set_trade_start_time(timestamp_ms);
+}
+
+/* Cooperative abort of the run in progress on ``s`` (live runtime: a settle
+ * supersedes an in-flight probe). Atomic; consumed by the running loop at its
+ * next bar. Cleared once at every public run() entry so a request made
+ * while idle is a no-op. The aborted run reports strategy_last_run_status()
+ * == 1 and leaves the handle reusable. */
+PF_API void strategy_request_abort(pf_strategy_t s) {
+    if (!s) return;
+    static_cast<pineforge::BacktestEngine*>(s)->request_abort();
+}
+
+/* 0 when the most recent run() completed, 1 when it was aborted
+ * (NOT_COMPLETED), -1 when ``s`` is NULL. Errors are reported by
+ * strategy_get_last_error. */
+PF_API int strategy_last_run_status(pf_strategy_t s) {
+    if (!s) return -1;
+    return static_cast<const pineforge::BacktestEngine*>(s)->last_run_status();
+}
+
+/* Live-runtime tail semantics (spec §3.1): the last bar of the array fed to
+ * the next run() is a still-forming bar, not the chart's rightmost
+ * historical bar. Default off (on=0): every historical run stays
+ * byte-identical to before this flag existed. */
+PF_API void strategy_set_realtime_tail(pf_strategy_t s, int on, int horizon_bars) {
+    if (!s) return;
+    static_cast<pineforge::BacktestEngine*>(s)->set_realtime_tail(on != 0, horizon_bars);
+}
+
+/* Live probe tail suppression (spec §3.2): the last bar of the array fed to
+ * the next run() runs only dispatch_bar()'s pre-on_bar broker steps
+ * (intraday-cap deferred close, source-series push, resting-order fills,
+ * max-intraday-loss path check, per-trade extreme update) and returns —
+ * on_bar is never invoked for that bar, and nothing after it runs (no
+ * flush_same_bar_close, no POOC second pass, no process_margin_call, no
+ * settle_dormant_bracket_reissues, no sizing refresh). Margin-call /
+ * intraday-cap closes therefore surface only at settlement, not against the
+ * still-forming probe bar. Independent of strategy_set_realtime_tail.
+ * Honoured only on the standard dispatch_bar path; no-op under COOF and the
+ * bar magnifier (gated in v1); undefined on input_tf < script_tf until the
+ * partial-bucket flag lands -- see pineforge.h.
+ * Default off (on=0): every historical run stays byte-identical to before
+ * this flag existed. */
+PF_API void strategy_set_probe_suppress_tail_logic(pf_strategy_t s, int on) {
+    if (!s) return;
+    static_cast<pineforge::BacktestEngine*>(s)->set_probe_suppress_tail_logic(on != 0);
+}
+
+/* ABI v4 live-runtime surface (task 4): force the intrabar path order used
+ * by every subsequent run() -- 0 AUTO (the unchanged TV-emulator rule), 1
+ * HIGH_FIRST (O -> H -> L -> C), 2 LOW_FIRST (O -> L -> H -> C); any other
+ * @p mode is clamped to AUTO. A live probe runs the SAME forming bar under
+ * both forced orders and keeps only the fills that agree between the two.
+ * Persistent configuration, like strategy_set_realtime_tail -- applies to
+ * run() only, a stream continued via strategy_stream_begin always sees
+ * AUTO. Default AUTO (mode=0): every historical run stays byte-identical to
+ * before this flag existed. */
+PF_API void strategy_set_path_order(pf_strategy_t s, int mode) {
+    if (!s) return;
+    static_cast<pineforge::BacktestEngine*>(s)->set_path_order(mode);
+}
+
+/* ABI v4 live-runtime surface (task 4): the dual-entry-stop arbitration
+ * decided on the LAST bar the most recent run() dispatched -- a flat
+ * position resting one long stop-only ENTRY and one short stop-only ENTRY,
+ * both touched on that bar. 0 = None (no such pair was arbitrated on that
+ * bar), 1 = LongFirst, 2 = ShortFirst; -1 when @p s is NULL. This is a
+ * per-bar snapshot: it survives a later fill or a declined stop-entry
+ * admission on the same bar (both of which move the engine's own working
+ * arbitration state back to None), so it reports the real decision even for
+ * an ordinary process_orders_on_close run with no tail suppression. Only
+ * the standard (non-calc_on_order_fills) dispatch path updates this. */
+PF_API int strategy_last_bar_dual_entry_path(pf_strategy_t s) {
+    if (!s) return -1;
+    return static_cast<const pineforge::BacktestEngine*>(s)->last_bar_dual_entry_path();
+}
+
+/* ABI v4 live-runtime surface (task 6): toggle per-script-bar broker-state
+ * hash recording. Default off: pf_report_t::broker_state_hash stays
+ * NULL/0-length and every historical run is byte-identical to before this
+ * flag existed. */
+PF_API void strategy_set_broker_state_hash_recording(pf_strategy_t s, int on) {
+    if (!s) return;
+    static_cast<pineforge::BacktestEngine*>(s)->set_broker_state_hash_recording(on != 0);
+}
+
+/* ABI v4 live-runtime surface (task 6): the broker-state hash of the FINAL
+ * state after the most recent run(), regardless of whether per-bar
+ * recording was enabled. Returns 0 when @p s is NULL. */
+PF_API uint64_t strategy_broker_state_hash(pf_strategy_t s) {
+    if (!s) return 0;
+    return static_cast<const pineforge::BacktestEngine*>(s)->broker_state_hash();
+}
+
+/* ABI v4 live-runtime surface (task 7, spec 3.6): the resting-order book
+ * after the most recent run(), read through the generated POD mirror
+ * (pf_pending_order_v1_t, include/pineforge/pending_order_mirror.hpp;
+ * fill_pending_order_mirror / pending_order_layout live in the generated
+ * src/pending_order_mirror.cpp). Read-only accessors: no historical run
+ * changes because a caller read them. */
+PF_API int strategy_pending_orders_len(pf_strategy_t s) {
+    if (!s) return 0;
+    return static_cast<const pineforge::BacktestEngine*>(s)->pending_order_count();
+}
+
+/* Copies min(size_in, sizeof(pf_pending_order_v1_t)) bytes so an older
+ * (smaller) or newer (larger) caller struct both work: the first two
+ * fields are always struct_version and size. -1 (nothing written) on a
+ * NULL handle/out, an out-of-range index, or a size_in too small to hold
+ * even that 8-byte header -- a buffer that cannot receive struct_version
+ * and size cannot be interpreted by any reader, so it is rejected rather
+ * than partially filled. */
+PF_API int strategy_pending_order_get(pf_strategy_t s, int index, void* out, size_t size_in) {
+    if (!s || !out) return -1;
+    if (size_in < offsetof(pf_pending_order_v1_t, size) + sizeof(uint32_t)) return -1;
+    const auto* engine = static_cast<const pineforge::BacktestEngine*>(s);
+    if (index < 0 || index >= engine->pending_order_count()) return -1;
+    pf_pending_order_v1_t tmp;
+    pineforge::fill_pending_order_mirror(engine->pending_order_at(index), &tmp);
+    std::memcpy(out, &tmp, size_in < sizeof(tmp) ? size_in : sizeof(tmp));
+    return 0;
+}
+
+PF_API const pf_field_desc_t* strategy_pending_order_layout(int* count) {
+    return pineforge::pending_order_layout(count);
+}
+
+/* ABI v4 live-runtime surface (task 8, spec 3.6): engine-computed derived
+ * order values and position scalars -- pure const reads of the engine's own
+ * sizing / admission / level-resolution predicates
+ * (BacktestEngine::probe_fill_qty & co., src/engine_fills.cpp). NULL-handle
+ * convention of the pf_live group: -1 for an int return, NaN for a double,
+ * with nothing written through the out-pointers. */
+PF_API int strategy_pending_order_fill_qty(pf_strategy_t s, int index, double fill_price,
+                                           double* qty, int* close_only, int* partition) {
+    if (!s) return -1;
+    return static_cast<const pineforge::BacktestEngine*>(s)->probe_fill_qty(
+        index, fill_price, qty, close_only, partition);
+}
+
+PF_API int strategy_pending_order_level_resolved(pf_strategy_t s, int index) {
+    if (!s) return -1;
+    return static_cast<const pineforge::BacktestEngine*>(s)->pending_order_level_resolved(index);
+}
+
+PF_API int strategy_pending_order_effective_levels(pf_strategy_t s, int index, double* stop,
+                                                   double* limit, double* trail_activation) {
+    if (!s) return -1;
+    return static_cast<const pineforge::BacktestEngine*>(s)->pending_order_effective_levels(
+        index, stop, limit, trail_activation);
+}
+
+/* NaN when @p s is NULL; otherwise the engine's trail extreme (itself NaN
+ * until a position has filled). */
+PF_API double strategy_trail_best_price(pf_strategy_t s) {
+    if (!s) return std::numeric_limits<double>::quiet_NaN();
+    return static_cast<const pineforge::BacktestEngine*>(s)->trail_best_price();
+}
+
+/* NaN when @p s is NULL or the position is flat (the engine keeps
+ * position_entry_price_ at 0 there; a live reader must not mistake that for
+ * a price), otherwise the volume-weighted average entry price. */
+PF_API double strategy_position_avg_price(pf_strategy_t s) {
+    if (!s) return std::numeric_limits<double>::quiet_NaN();
+    const auto* engine = static_cast<const pineforge::BacktestEngine*>(s);
+    if (engine->position_cycle_seq() == 0) return std::numeric_limits<double>::quiet_NaN();
+    return engine->position_avg_price();
+}
+
+/* -1 when @p s is NULL; 0 when flat; otherwise the live position cycle id. */
+PF_API int64_t strategy_position_cycle_seq(pf_strategy_t s) {
+    if (!s) return -1;
+    return static_cast<const pineforge::BacktestEngine*>(s)->position_cycle_seq();
 }
 
 PF_API int strategy_stream_begin(pf_strategy_t s,

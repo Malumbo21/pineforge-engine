@@ -788,6 +788,8 @@ class ReportC(ctypes.Structure):
         ("metrics", MetricsC),
         ("equity_curve", ctypes.POINTER(EquityPointC)),
         ("equity_curve_len", ctypes.c_int64),  # int64 in the C header, NOT c_int
+        ("broker_state_hash", ctypes.POINTER(ctypes.c_uint64)),
+        ("broker_state_hash_len", ctypes.c_int64),
     ]
 
 
@@ -795,12 +797,15 @@ class ReportC(ctypes.Structure):
 # pf_report_t is CALLER-allocated: running an old .so against the v3
 # ReportC mirror (or vice versa) silently corrupts memory, so the .so's
 # pf_abi_version() export is asserted before any run. v3 appended
-# pf_trade_t::open_at_end (TradeC above); test_run_strategy_range_end.py
-# pins this constant to the header's macro, because the campaign's
-# verifier runs every probe through THIS harness and a stale guard here
-# is a run-error on every slug (the f-1d spark pre-check of 2026-09-02
-# found exactly that: ".so reports 3, harness expects 2" x64).
-EXPECTED_PF_ABI = 3
+# pf_trade_t::open_at_end (TradeC above); v4 appended the live-runtime
+# accessors and grew pf_report_t with the broker_state_hash array after
+# equity_curve_len (ReportC above already carries both fields).
+# test_run_strategy_range_end.py pins this constant to the header's
+# macro, because the campaign's verifier runs every probe through THIS
+# harness and a stale guard here is a run-error on every slug (the
+# f-1d spark pre-check of 2026-09-02 found exactly that: ".so reports
+# 3, harness expects 2" x64).
+EXPECTED_PF_ABI = 4
 
 
 def _check_abi(lib: ctypes.CDLL) -> None:
@@ -821,6 +826,112 @@ class PfVersionC(ctypes.Structure):
     """Mirror of pf_version_t (returned by value from pf_version_get)."""
     _fields_ = [("major", ctypes.c_int), ("minor", ctypes.c_int),
                 ("patch", ctypes.c_int), ("commit_sha", ctypes.c_char_p)]
+
+
+class PfFieldDescC(ctypes.Structure):
+    """Mirror of pf_field_desc_t (<pineforge/pending_order_mirror.hpp>): one
+    row of the self-describing pf_pending_order_v1_t field table returned by
+    strategy_pending_order_layout (ABI v4 live-runtime surface, task 7)."""
+    _fields_ = [("name", ctypes.c_char_p), ("type", ctypes.c_char_p),
+                ("offset", ctypes.c_uint32), ("size", ctypes.c_uint32)]
+
+
+# C type spelling in a pf_field_desc_t row -> ctypes scalar. `char[N]` is
+# handled separately (an N-byte c_char array).
+_PF_FIELD_CTYPES = {
+    "uint8_t": ctypes.c_uint8,
+    "uint32_t": ctypes.c_uint32,
+    "int32_t": ctypes.c_int32,
+    "int64_t": ctypes.c_int64,
+    "uint64_t": ctypes.c_uint64,
+    "double": ctypes.c_double,
+}
+_PF_CHAR_ARRAY_RE = re.compile(r"^char\[(\d+)\]$")
+PENDING_ORDER_STRUCT_VERSION = 1
+# strategy_pending_order_fill_qty partition codes (pineforge.h, ABI v4 task 8).
+FILL_QTY_PARTITIONS = {
+    0: "EXPLICIT", 1: "FROZEN_PLACEMENT", 2: "DEFAULT_STOP_PLACEMENT", 3: "AT_FILL"}
+
+
+def _nan_to_none(x: float) -> float | None:
+    """NaN / inf sentinels -> None (JSON null); finite doubles unchanged."""
+    x = float(x)
+    return x if math.isfinite(x) else None
+
+
+def _pending_order_layout(lib: ctypes.CDLL) -> list[tuple[str, str, int, int]]:
+    """Read strategy_pending_order_layout() into [(name, type, offset, size)]."""
+    count = ctypes.c_int(0)
+    descs = lib.strategy_pending_order_layout(ctypes.byref(count))
+    return [(descs[i].name.decode("ascii"), descs[i].type.decode("ascii"),
+             int(descs[i].offset), int(descs[i].size)) for i in range(count.value)]
+
+
+def build_pending_order_struct(layout: list[tuple[str, str, int, int]]) -> type:
+    """Build the ctypes.Structure mirroring pf_pending_order_v1_t FROM THE
+    RUNTIME'S OWN FIELD TABLE (strategy_pending_order_layout), never from a
+    hand-typed field list: the mirror is append-only and generated from
+    engine.hpp (scripts/gen_pending_order_mirror.py), so a reader typed by
+    hand would silently desynchronise the first time PendingOrder grows.
+    Every ctypes offset/size is cross-checked against the table and a
+    mismatch raises rather than mis-reading the book."""
+    if not layout:
+        raise RuntimeError("strategy_pending_order_layout returned no fields")
+    fields = []
+    for name, ctype, offset, size in layout:
+        m = _PF_CHAR_ARRAY_RE.match(ctype)
+        if m:
+            ct = ctypes.c_char * int(m.group(1))
+        elif ctype in _PF_FIELD_CTYPES:
+            ct = _PF_FIELD_CTYPES[ctype]
+        else:
+            raise RuntimeError(
+                f"strategy_pending_order_layout: field {name!r} has unknown C type "
+                f"{ctype!r}; extend _PF_FIELD_CTYPES in run_strategy.py")
+        if ctypes.sizeof(ct) != size:
+            raise RuntimeError(
+                f"strategy_pending_order_layout: field {name!r} ({ctype}) is {size} "
+                f"bytes in the runtime but {ctypes.sizeof(ct)} in ctypes")
+        fields.append((name, ct))
+    if fields[0][0] != "struct_version" or fields[1][0] != "size":
+        raise RuntimeError(
+            "strategy_pending_order_layout: table must start with struct_version, size; "
+            f"got {[f[0] for f in fields[:2]]}")
+    cls = type("PendingOrderV1", (ctypes.Structure,), {"_fields_": fields})
+    for name, _ctype, offset, _size in layout:
+        got = getattr(cls, name).offset
+        if got != offset:
+            raise RuntimeError(
+                f"strategy_pending_order_layout: field {name!r} is at byte {offset} in the "
+                f"runtime but ctypes placed it at {got} (natural alignment differs?)")
+    last_name, _, last_off, last_size = layout[-1]
+    if ctypes.sizeof(cls) < last_off + last_size:
+        raise RuntimeError(
+            f"strategy_pending_order_layout: sizeof(PendingOrderV1) {ctypes.sizeof(cls)} < "
+            f"end of {last_name!r} ({last_off + last_size})")
+    return cls
+
+
+def pending_order_to_dict(rec, layout: list[tuple[str, str, int, int]]) -> dict:
+    """One pf_pending_order_v1_t record -> JSON-ready dict, in field order.
+    char[N] -> str (up to the NUL); NaN/inf doubles -> None (JSON has no
+    NaN; the engine's "not set" sentinel); EVERY uint64_t field (the
+    *_hash64 digests, incarnation / *_incarnation, signal_close_mc_fill_seq,
+    ...) -> 16-hex-digit string, because a uint64 is not a JS-safe number
+    and a consumer must not silently round one; everything else (uint8_t /
+    int32_t / int64_t / uint32_t / double) -> int/float."""
+    out = {}
+    for name, ctype, _offset, _size in layout:
+        v = getattr(rec, name)
+        if ctype.startswith("char["):
+            out[name] = bytes(v).decode("utf-8", "replace")
+        elif ctype == "double":
+            out[name] = float(v) if math.isfinite(v) else None
+        elif ctype == "uint64_t":
+            out[name] = format(int(v), "016x")
+        else:
+            out[name] = int(v)
+    return out
 
 
 def engine_version(lib: ctypes.CDLL) -> dict:
@@ -1221,6 +1332,105 @@ class Strategy:
             L.strategy_set_trace_enabled.argtypes = [ctypes.c_void_p, ctypes.c_int]
         if hasattr(L, "strategy_set_trade_start_time"):
             L.strategy_set_trade_start_time.argtypes = [ctypes.c_void_p, ctypes.c_int64]
+        if hasattr(L, "strategy_request_abort"):
+            L.strategy_request_abort.argtypes = [ctypes.c_void_p]
+            L.strategy_request_abort.restype = None
+            L.strategy_last_run_status.argtypes = [ctypes.c_void_p]
+            L.strategy_last_run_status.restype = ctypes.c_int
+        if hasattr(L, "strategy_set_realtime_tail"):
+            L.strategy_set_realtime_tail.argtypes = [
+                ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+            L.strategy_set_realtime_tail.restype = None
+        if hasattr(L, "strategy_set_probe_suppress_tail_logic"):
+            L.strategy_set_probe_suppress_tail_logic.argtypes = [
+                ctypes.c_void_p, ctypes.c_int]
+            L.strategy_set_probe_suppress_tail_logic.restype = None
+        # ABI v4 live-runtime surface (task 4): force the intrabar path order
+        # / read the last bar's dual-entry-stop arbitration winner. Older
+        # .so builds may predate these exports -- hasattr-guarded like the
+        # other live-runtime setters above.
+        if hasattr(L, "strategy_set_path_order"):
+            L.strategy_set_path_order.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            L.strategy_set_path_order.restype = None
+        if hasattr(L, "strategy_last_bar_dual_entry_path"):
+            L.strategy_last_bar_dual_entry_path.argtypes = [ctypes.c_void_p]
+            L.strategy_last_bar_dual_entry_path.restype = ctypes.c_int
+        # ABI v4 live-runtime surface (task 6): toggle per-script-bar
+        # broker-state hash recording / read the final state's hash. Older
+        # .so builds may predate these exports -- hasattr-guarded like the
+        # other live-runtime setters above.
+        if hasattr(L, "strategy_set_broker_state_hash_recording"):
+            L.strategy_set_broker_state_hash_recording.argtypes = [
+                ctypes.c_void_p, ctypes.c_int]
+            L.strategy_set_broker_state_hash_recording.restype = None
+        if hasattr(L, "strategy_broker_state_hash"):
+            L.strategy_broker_state_hash.argtypes = [ctypes.c_void_p]
+            L.strategy_broker_state_hash.restype = ctypes.c_uint64
+        # ABI v4 live-runtime surface (task 7): the resting-order book through
+        # the generated POD mirror (pf_pending_order_v1_t). The ctypes struct
+        # is built from the runtime's own field table -- see
+        # build_pending_order_struct -- so an appended field cannot
+        # desynchronise this reader. Older .so builds predate the exports:
+        # hasattr-guarded, PendingOrderV1 stays None and --dump-book warns.
+        self.pending_order_layout: list[tuple[str, str, int, int]] | None = None
+        self.PendingOrderV1: type | None = None
+        if hasattr(L, "strategy_pending_order_layout"):
+            L.strategy_pending_orders_len.argtypes = [ctypes.c_void_p]
+            L.strategy_pending_orders_len.restype = ctypes.c_int
+            L.strategy_pending_order_get.argtypes = [
+                ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+            L.strategy_pending_order_get.restype = ctypes.c_int
+            L.strategy_pending_order_layout.argtypes = [ctypes.POINTER(ctypes.c_int)]
+            L.strategy_pending_order_layout.restype = ctypes.POINTER(PfFieldDescC)
+            self.pending_order_layout = _pending_order_layout(L)
+            self.PendingOrderV1 = build_pending_order_struct(self.pending_order_layout)
+        # ABI v4 live-runtime surface (task 8): engine-computed derived order
+        # values (fill qty / partition / close-only, level resolution,
+        # effective levels) and the position scalars. hasattr-guarded like
+        # the rest; has_order_derived gates the --dump-book enrichment.
+        self.has_order_derived = hasattr(L, "strategy_pending_order_fill_qty")
+        if self.has_order_derived:
+            L.strategy_pending_order_fill_qty.argtypes = [
+                ctypes.c_void_p, ctypes.c_int, ctypes.c_double,
+                ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int)]
+            L.strategy_pending_order_fill_qty.restype = ctypes.c_int
+            L.strategy_pending_order_level_resolved.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            L.strategy_pending_order_level_resolved.restype = ctypes.c_int
+            L.strategy_pending_order_effective_levels.argtypes = [
+                ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_double),
+                ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)]
+            L.strategy_pending_order_effective_levels.restype = ctypes.c_int
+            L.strategy_trail_best_price.argtypes = [ctypes.c_void_p]
+            L.strategy_trail_best_price.restype = ctypes.c_double
+            L.strategy_position_avg_price.argtypes = [ctypes.c_void_p]
+            L.strategy_position_avg_price.restype = ctypes.c_double
+            L.strategy_position_cycle_seq.argtypes = [ctypes.c_void_p]
+            L.strategy_position_cycle_seq.restype = ctypes.c_int64
+        # ABI v4 live-runtime surface (task 9): closed-trade id / exit-comment
+        # / close-cause accessors (report-row scope, spans range-end rows
+        # like strategy_closed_trade_entry_incarnation) and the position
+        # size / equity / script-bars-processed scalars. Older .so builds
+        # predate these exports -- hasattr-guarded like the rest.
+        if hasattr(L, "strategy_closed_trade_entry_id"):
+            L.strategy_closed_trade_entry_id.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            L.strategy_closed_trade_entry_id.restype = ctypes.c_char_p
+            L.strategy_closed_trade_exit_id.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            L.strategy_closed_trade_exit_id.restype = ctypes.c_char_p
+            L.strategy_closed_trade_exit_comment.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            L.strategy_closed_trade_exit_comment.restype = ctypes.c_char_p
+        if hasattr(L, "strategy_closed_trade_close_cause"):
+            L.strategy_closed_trade_close_cause.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            L.strategy_closed_trade_close_cause.restype = ctypes.c_int
+        if hasattr(L, "strategy_position_size"):
+            L.strategy_position_size.argtypes = [ctypes.c_void_p]
+            L.strategy_position_size.restype = ctypes.c_double
+        if hasattr(L, "strategy_current_equity"):
+            L.strategy_current_equity.argtypes = [ctypes.c_void_p]
+            L.strategy_current_equity.restype = ctypes.c_double
+        if hasattr(L, "strategy_script_bars_processed"):
+            L.strategy_script_bars_processed.argtypes = [ctypes.c_void_p]
+            L.strategy_script_bars_processed.restype = ctypes.c_int64
         # ``strategy_set_chart_timezone`` lets the harness tell the engine
         # which IANA wall-clock zone Pine's ``hour`` / ``minute`` /
         # ``dayofweek`` (and the 1-arg function overloads) should produce.
@@ -1288,8 +1498,128 @@ class Strategy:
         if hasattr(L, "pf_version_string"):
             L.pf_version_string.restype = ctypes.c_char_p
 
+    def _probe_fill_qty(self, state, index: int, price: float) -> dict | None:
+        """One strategy_pending_order_fill_qty probe -> {price, qty, close_only,
+        partition, partition_name}; None when the order has no opening size
+        (rc 1, an EXIT) or the price is not finite."""
+        if price is None or not math.isfinite(price):
+            return None
+        qty = ctypes.c_double(float("nan"))
+        close_only = ctypes.c_int(-1)
+        partition = ctypes.c_int(-1)
+        rc = self.lib.strategy_pending_order_fill_qty(
+            state, index, float(price), ctypes.byref(qty),
+            ctypes.byref(close_only), ctypes.byref(partition))
+        if rc == 1:
+            return None
+        if rc != 0:
+            raise RuntimeError(
+                f"strategy_pending_order_fill_qty({index}, {price}) returned {rc}")
+        return {
+            "price": float(price),
+            "qty": _nan_to_none(qty.value),
+            "close_only": int(close_only.value),
+            "partition": int(partition.value),
+            "partition_name": FILL_QTY_PARTITIONS.get(int(partition.value), "?"),
+        }
+
+    def read_order_derived(self, state, index: int,
+                           last_close: float | None = None) -> dict | None:
+        """ABI v4 task 8: the engine-computed derived values of one resting
+        order. ``level_resolved`` and ``effective_levels`` are the engine's
+        reads verbatim (NaN -> None). ``fill_qty`` reports the engine-sized
+        opening quantity at every finite effective STOP / LIMIT level the
+        order itself carries (the prices a priced entry can fill at) and at
+        ``last_close`` (the MARKET / gap-through proxy: the next open is
+        unknown after a run, the last close is its best stand-in); None for
+        an EXIT, which has no opening size. None when the .so predates the
+        exports."""
+        if not getattr(self, "has_order_derived", False):
+            return None
+        resolved = int(self.lib.strategy_pending_order_level_resolved(state, index))
+        stop = ctypes.c_double(float("nan"))
+        limit = ctypes.c_double(float("nan"))
+        trail = ctypes.c_double(float("nan"))
+        rc = self.lib.strategy_pending_order_effective_levels(
+            state, index, ctypes.byref(stop), ctypes.byref(limit), ctypes.byref(trail))
+        if rc != 0:
+            raise RuntimeError(
+                f"strategy_pending_order_effective_levels({index}) returned {rc}")
+        levels = {
+            "stop": _nan_to_none(stop.value),
+            "limit": _nan_to_none(limit.value),
+            "trail_activation": _nan_to_none(trail.value),
+        }
+        fill_qty: dict[str, dict] | None = {}
+        for key, price in (("at_stop", levels["stop"]), ("at_limit", levels["limit"]),
+                           ("at_last_close", last_close)):
+            if price is None:
+                continue
+            probe = self._probe_fill_qty(state, index, price)
+            if probe is None:      # rc 1: an EXIT -- no opening size at all
+                fill_qty = None
+                break
+            fill_qty[key] = probe
+        return {
+            "level_resolved": resolved,
+            "effective_levels": levels,
+            "fill_qty": fill_qty,
+        }
+
+    def read_position_scalars(self, state) -> dict | None:
+        """ABI v4 task 8: strategy_position_avg_price (None when flat),
+        strategy_position_cycle_seq (0 when flat), strategy_trail_best_price
+        (None until a position filled). None when the .so predates them."""
+        if not getattr(self, "has_order_derived", False):
+            return None
+        return {
+            "avg_price": _nan_to_none(self.lib.strategy_position_avg_price(state)),
+            "cycle_seq": int(self.lib.strategy_position_cycle_seq(state)),
+            "trail_best_price": _nan_to_none(self.lib.strategy_trail_best_price(state)),
+        }
+
+    def read_pending_orders(self, state, last_close: float | None = None) -> list[dict]:
+        """Snapshot the live handle's resting-order book (ABI v4 task 7):
+        strategy_pending_orders_len + one strategy_pending_order_get per
+        order, each decoded through the layout-built PendingOrderV1. Must be
+        called while ``state`` is alive (run() does so before strategy_free).
+        Empty list when the .so predates the exports (PendingOrderV1 is
+        None) -- callers that need to distinguish check that attribute.
+        When the .so also exports the task-8 derived accessors each dict
+        gains a ``derived`` sub-dict (read_order_derived; ``last_close`` is
+        the fill-qty probe price for the MARKET / gap-through case)."""
+        if self.PendingOrderV1 is None or self.pending_order_layout is None:
+            return []
+        n = int(self.lib.strategy_pending_orders_len(state))
+        book: list[dict] = []
+        for i in range(n):
+            rec = self.PendingOrderV1()
+            rc = self.lib.strategy_pending_order_get(
+                state, i, ctypes.byref(rec), ctypes.sizeof(rec))
+            if rc != 0:
+                raise RuntimeError(f"strategy_pending_order_get({i}) returned {rc} (len={n})")
+            if int(rec.struct_version) != PENDING_ORDER_STRUCT_VERSION:
+                raise RuntimeError(
+                    f"pending order {i}: struct_version {int(rec.struct_version)} != "
+                    f"{PENDING_ORDER_STRUCT_VERSION}")
+            if int(rec.size) != ctypes.sizeof(rec):
+                raise RuntimeError(
+                    f"pending order {i}: runtime size {int(rec.size)} != "
+                    f"layout-built sizeof {ctypes.sizeof(rec)}")
+            entry = pending_order_to_dict(rec, self.pending_order_layout)
+            derived = self.read_order_derived(state, i, last_close)
+            if derived is not None:
+                entry["derived"] = derived
+            book.append(entry)
+        return book
+
     def run(self, bars_csv: Path, params: dict | None = None,
             *, trace_enabled: bool = False, trade_start_time_ms: int | None = None,
+            realtime_tail_horizon: int | None = None,
+            probe_suppress_tail: bool = False,
+            path_order: str | None = None,
+            broker_state_hash_recording: bool = False,
+            dump_book: bool = False,
             strategy_overrides: dict | None = None,
             chart_timezone: str | None = None,
             syminfo_timezone: str | None = None,
@@ -1345,6 +1675,16 @@ class Strategy:
         after the engine-error check and BEFORE ``report_free``, so
         callers can read report fields the summary dict does not carry
         (``metrics.equity``, the raw ``equity_curve``, ...).
+
+        ``dump_book`` adds ``pending_orders`` -- the post-run resting-order
+        book as a list of dicts (read_pending_orders, ABI v4 task 7), each
+        carrying a ``derived`` sub-dict (fill qty / partition / close-only
+        at every finite effective level and at the last close, level
+        resolution, effective levels; ABI v4 task 8) -- and ``position``
+        (avg_price, cycle_seq, trail_best_price) to the returned dict.
+        Read-only: the run itself is unchanged. Omitted (not an empty list)
+        when the .so predates the exports; ``derived`` / ``position`` are
+        omitted when it predates only the task-8 accessors.
         """
         source_feed_sha256 = None
         if preloaded_bars is not None:
@@ -1423,8 +1763,32 @@ class Strategy:
                         state, str(okey).encode(), str(oval).encode())
             if trace_enabled and hasattr(self.lib, "strategy_set_trace_enabled"):
                 self.lib.strategy_set_trace_enabled(state, 1)
+            # ABI v4 live-runtime surface (task 6): per-script-bar
+            # broker-state hash recording. Off by default, like trace.
+            if (broker_state_hash_recording
+                    and hasattr(self.lib, "strategy_set_broker_state_hash_recording")):
+                self.lib.strategy_set_broker_state_hash_recording(state, 1)
             if trade_start_time_ms is not None and hasattr(self.lib, "strategy_set_trade_start_time"):
                 self.lib.strategy_set_trade_start_time(state, int(trade_start_time_ms))
+            # Live-runtime tail (ABI v4, spec §3.1): the last bar of this run
+            # is a still-forming bar, not the chart's rightmost historical
+            # bar. Off unless a horizon is given.
+            if realtime_tail_horizon is not None and hasattr(self.lib, "strategy_set_realtime_tail"):
+                self.lib.strategy_set_realtime_tail(state, 1, int(realtime_tail_horizon))
+            # Live probe tail suppression (ABI v4, spec §3.2): the last bar of
+            # this run only runs dispatch_bar()'s pre-on_bar broker steps and
+            # returns, so the run's last-bar fills are the settled book's
+            # fills against the forming bar and the post-run book is the
+            # in-force book. Off unless requested.
+            if probe_suppress_tail and hasattr(self.lib, "strategy_set_probe_suppress_tail_logic"):
+                self.lib.strategy_set_probe_suppress_tail_logic(state, 1)
+            # ABI v4 live-runtime surface: force this run's intrabar path
+            # order (see strategy_set_path_order doc in pineforge.h). None
+            # (default) leaves the engine on AUTO.
+            if path_order is not None and hasattr(self.lib, "strategy_set_path_order"):
+                _PATH_ORDER_INT = {"auto": 0, "high": 1, "low": 2}
+                self.lib.strategy_set_path_order(
+                    state, _PATH_ORDER_INT[str(path_order).lower()])
             # Wire chart TZ before the run so date builtins (hour/minute/
             # dayofweek + the 1-arg function overloads) land on the same
             # wall clock TV used at export time. Empty/None == leave the
@@ -1562,11 +1926,52 @@ class Strategy:
             result = _report_to_dict(report)
             incarnation_accessor = getattr(
                 self.lib, "strategy_closed_trade_entry_incarnation", None)
+            # ABI v4 (task 9): entry_id / exit_id / exit_comment / close_cause
+            # are added to the JSON trade dicts ONLY -- never to
+            # write_engine_trades_csv's fixed column layout, which the
+            # corpus's engine_trades.csv is compared byte-for-byte against
+            # (verify_corpus.py). A new CSV column would change that
+            # committed byte layout for the flags-off identity task.
+            entry_id_accessor = getattr(self.lib, "strategy_closed_trade_entry_id", None)
+            exit_id_accessor = getattr(self.lib, "strategy_closed_trade_exit_id", None)
+            exit_comment_accessor = getattr(
+                self.lib, "strategy_closed_trade_exit_comment", None)
+            close_cause_accessor = getattr(
+                self.lib, "strategy_closed_trade_close_cause", None)
             for i, trade in enumerate(result["trades"]):
                 trade["entry_incarnation"] = (
                     int(incarnation_accessor(state, i))
                     if incarnation_accessor is not None else 0
                 )
+                # Default like entry_incarnation above: an older .so predating
+                # these exports still gets the key, just with the same value
+                # an unrecognised/absent close would report (empty string /
+                # UNKNOWN), so callers need not special-case a missing key.
+                if entry_id_accessor is not None:
+                    ptr = entry_id_accessor(state, i)
+                    trade["entry_id"] = ptr.decode("utf-8", "replace") if ptr else ""
+                else:
+                    trade["entry_id"] = ""
+                if exit_id_accessor is not None:
+                    ptr = exit_id_accessor(state, i)
+                    trade["exit_id"] = ptr.decode("utf-8", "replace") if ptr else ""
+                else:
+                    trade["exit_id"] = ""
+                if exit_comment_accessor is not None:
+                    ptr = exit_comment_accessor(state, i)
+                    trade["exit_comment"] = ptr.decode("utf-8", "replace") if ptr else ""
+                else:
+                    trade["exit_comment"] = ""
+                trade["close_cause"] = (
+                    int(close_cause_accessor(state, i))
+                    if close_cause_accessor is not None else 0
+                )
+            if dump_book and self.PendingOrderV1 is not None:
+                last_close = float(bars[n - 1].close) if n else None
+                result["pending_orders"] = self.read_pending_orders(state, last_close)
+                position = self.read_position_scalars(state)
+                if position is not None:
+                    result["position"] = position
             if source_feed_sha256 is not None:
                 result["source_feed_sha256"] = source_feed_sha256
             if aux_requested:
@@ -1776,6 +2181,20 @@ def _report_to_dict(r: ReportC) -> dict:
             "name": name,
             "value": float(e.value),
         })
+    # ABI v4 task 6: per-script-bar broker-state hash, empty unless the run
+    # enabled broker_state_hash_recording. Python ints are arbitrary
+    # precision, so these round-trip through json.dump exactly (unlike a
+    # JS/JSON-Number consumer, which loses precision above 2**53).
+    broker_state_hash = [int(r.broker_state_hash[i]) for i in range(r.broker_state_hash_len)]
+    # Per-script-bar OPEN timestamps, cheap to carry alongside
+    # broker_state_hash so a consumer (e.g. --broker-state-hash's JSON
+    # output) can align each hash to a bar without a separate --trace-json
+    # / equity-curve dump. equity_curve itself stays out of this dict (see
+    # on_report's docstring); recording invariant: when
+    # broker_state_hash_recording was on, broker_state_hash_len ==
+    # equity_curve_len (both are appended once per dispatched script bar,
+    # equity_curve unconditionally and broker_state_hash right after it).
+    equity_curve_time_ms = [int(r.equity_curve[i].time_ms) for i in range(r.equity_curve_len)]
     return {
         "total_trades": int(r.total_trades),
         "net_profit": float(r.net_profit),
@@ -1787,6 +2206,8 @@ def _report_to_dict(r: ReportC) -> dict:
         "trades": trades,
         "trace": trace,
         "trace_names": trace_names,
+        "broker_state_hash": broker_state_hash,
+        "equity_curve_time_ms": equity_curve_time_ms,
     }
 
 
@@ -2515,6 +2936,8 @@ def _run_via_docker(strategy_dir: Path, ohlcv_path: Path, params: dict,
         "input_bars_processed": int(raw.get("diagnostics", {}).get("input_bars_processed", 0)),
         "trace": [],
         "trace_names": [],
+        "broker_state_hash": [],
+        "equity_curve_time_ms": [],
     }
 
 
@@ -2548,6 +2971,44 @@ def main() -> int:
     ap.add_argument("--allow-trading-before-window", action="store_true",
                     help="When tv_trades_csv defines an emit window, keep broker order execution active before that window. "
                          "This matches TV exports that carry positions opened before the displayed date range.")
+    ap.add_argument("--realtime-tail", type=int, default=None, metavar="HORIZON",
+                    help="Live-runtime tail (ABI v4, spec §3.1): treat the fed OHLCV's last bar as "
+                         "still forming instead of the chart's rightmost historical bar "
+                         "(barstate.islast false, no range-end close row) and freeze "
+                         "pine_last_bar_index() at HORIZON - 1. Calls strategy_set_realtime_tail "
+                         "with on=1 before the run. --runner ctypes only.")
+    ap.add_argument("--probe-suppress-tail", action="store_true",
+                    help="Live probe tail suppression (ABI v4, spec §3.2): the fed OHLCV's "
+                         "last bar runs only the broker's pre-on_bar steps (resting-order "
+                         "fills, max-intraday-loss path check, per-trade extremes) and "
+                         "on_bar is never invoked for it -- no chart-side fills, no margin "
+                         "call / intraday-cap close against the forming bar. Calls "
+                         "strategy_set_probe_suppress_tail_logic with on=1 before the run. "
+                         "--runner ctypes only.")
+    ap.add_argument("--path-order", choices=["auto", "high", "low"], default=None,
+                    help="ABI v4 live-runtime surface: force this run's intrabar path order "
+                         "instead of the engine's own |H-O| vs |O-L| AUTO rule -- 'high' for "
+                         "O->H->L->C, 'low' for O->L->H->C. A live probe runs the same forming "
+                         "bar under both forced orders and keeps only the fills that agree. "
+                         "Calls strategy_set_path_order before the run. Default (unset) leaves "
+                         "the engine on AUTO. --runner ctypes only.")
+    ap.add_argument("--broker-state-hash", action="store_true",
+                    help="ABI v4 live-runtime surface (task 6): enable per-script-bar "
+                         "broker-state hash recording (strategy_set_broker_state_hash_recording) "
+                         "and write the array as JSON. Written next to --trace-json as "
+                         "'broker_state_hash.json' when that flag is given, else next to the "
+                         "engine_trades.csv output. --runner ctypes only.")
+    ap.add_argument("--dump-book", type=Path, default=None, metavar="PATH",
+                    help="ABI v4 live-runtime surface (task 7): after the run, write the "
+                         "engine's resting-order book -- every pf_pending_order_v1_t read "
+                         "through strategy_pending_orders_len/strategy_pending_order_get -- "
+                         "as JSON to PATH ({struct_version, layout, count, orders[], "
+                         "position}). Each order carries a 'derived' sub-dict (task 8): "
+                         "level_resolved, effective_levels {stop, limit, trail_activation} "
+                         "and fill_qty -- the engine-sized opening qty / partition / "
+                         "close_only probed at each finite effective stop/limit level and "
+                         "at the last close (null for an EXIT). Read-only; the run is "
+                         "unchanged. --runner ctypes only.")
     ap.add_argument("--inputs-json", type=Path, default=None,
                     help="Use this inputs.json instead of strategy_dir/inputs.json. "
                          "Lets ad-hoc validation runs override strategy properties "
@@ -2676,15 +3137,86 @@ def main() -> int:
                 "error: --runner docker does not support native "
                 "request.security feeds; use --runner ctypes with a freshly "
                 "built strategy library.")
+        if args.realtime_tail is not None:
+            sys.exit(
+                "error: --runner docker does not support --realtime-tail; "
+                "use --runner ctypes with a freshly built strategy library.")
+        if args.probe_suppress_tail:
+            sys.exit(
+                "error: --runner docker does not support --probe-suppress-tail; "
+                "use --runner ctypes with a freshly built strategy library.")
+        if args.path_order is not None:
+            sys.exit(
+                "error: --runner docker does not support --path-order; "
+                "use --runner ctypes with a freshly built strategy library.")
+        if args.broker_state_hash:
+            sys.exit(
+                "error: --runner docker does not support --broker-state-hash; "
+                "use --runner ctypes with a freshly built strategy library.")
+        if args.dump_book is not None:
+            sys.exit(
+                "error: --runner docker does not support --dump-book; "
+                "use --runner ctypes with a freshly built strategy library.")
         strat = None
         report = _run_via_docker(strategy_dir, ohlcv_path, params, run_kwargs,
                                  trade_start_ms, args.image)
     else:
         so_path = find_strategy_lib(strategy_dir, args.so_name)
         strat = Strategy(so_path)
+        if args.realtime_tail is not None:
+            # Live-runtime tail (ABI v4, spec §3.1). strat is None only under
+            # --runner docker, which already sys.exit's above when
+            # --realtime-tail is set. Strategy.run's internal call is
+            # hasattr-guarded, so a .so predating the export would otherwise
+            # run to completion having silently ignored the flag -- for a
+            # lane whose whole method is "does the flagged run differ from
+            # the base run", a silently ignored flag makes every comparison
+            # vacuously pass. Fail hard here, same as --broker-state-hash
+            # below, and BEFORE strat.run() -- checking only after the run
+            # (task-11 re-review, new finding 1) let a stale .so burn a full
+            # backtest (minutes on the default feed) before exiting 1.
+            if not hasattr(strat.lib, "strategy_set_realtime_tail"):
+                sys.exit(
+                    "error: --realtime-tail requires strategy_set_realtime_tail "
+                    "(strategy.so predates ABI v4 spec section 3.1; rebuild the engine)")
+        if args.broker_state_hash:
+            # strat is None only under --runner docker, which already
+            # sys.exit's above when --broker-state-hash is set -- so
+            # reaching here means strat is the ctypes Strategy. A .so
+            # predating the export would otherwise run to completion having
+            # recorded nothing -- fail hard (like --realtime-tail above) and
+            # BEFORE strat.run(), rather than after burning the backtest
+            # time, so downstream consumers (e.g. the live-flags lane) never
+            # have to wait out a doomed run.
+            if not hasattr(strat.lib, "strategy_set_broker_state_hash_recording"):
+                sys.exit(
+                    "error: --broker-state-hash requires "
+                    "strategy_set_broker_state_hash_recording (strategy.so predates "
+                    "ABI v4 task 6; rebuild the engine)")
+        if args.probe_suppress_tail:
+            # Same rationale as --realtime-tail / --broker-state-hash above
+            # (final review F8): strat.run's internal call is hasattr-guarded,
+            # so a stale .so would otherwise run to completion having
+            # silently ignored the flag. Fail hard here, BEFORE strat.run().
+            if not hasattr(strat.lib, "strategy_set_probe_suppress_tail_logic"):
+                sys.exit(
+                    "error: --probe-suppress-tail requires "
+                    "strategy_set_probe_suppress_tail_logic (strategy.so predates "
+                    "ABI v4 spec section 3.2; rebuild the engine)")
+        if args.path_order is not None:
+            # Same rationale (final review F8).
+            if not hasattr(strat.lib, "strategy_set_path_order"):
+                sys.exit(
+                    "error: --path-order requires strategy_set_path_order "
+                    "(strategy.so predates ABI v4 spec section 3.3; rebuild the engine)")
         report = strat.run(ohlcv_path, params=params,
                            trace_enabled=args.trace_json is not None,
                            trade_start_time_ms=trade_start_ms,
+                           realtime_tail_horizon=args.realtime_tail,
+                           probe_suppress_tail=args.probe_suppress_tail,
+                           path_order=args.path_order,
+                           broker_state_hash_recording=args.broker_state_hash,
+                           dump_book=args.dump_book is not None,
                            **run_kwargs)
     raw_trade_count = len(report["trades"])
     trades_to_write = _filter_trades_to_window(report["trades"], report_window)
@@ -2705,6 +3237,89 @@ def main() -> int:
                 "trace_names": report["trace_names"],
                 "trace": trace_to_write,
             }, f)
+    if args.realtime_tail is not None:
+        # Receipt: a consumer (scripts/live_flags_lane.py) asserts this line
+        # is present in a flagged run's stdout so a future regression that
+        # silently no-ops the flag (e.g. an accidental hasattr-guard removal
+        # upstream) shows up as a missing receipt, not a quiet P=0. The
+        # strategy_set_realtime_tail hard-fail guard runs earlier, right
+        # after `strat = Strategy(so_path)` and before strat.run(), so a
+        # stale .so is caught before the (possibly multi-minute) backtest
+        # rather than after it.
+        print(f"realtime-tail: on horizon={args.realtime_tail}")
+    if args.probe_suppress_tail:
+        # Receipt (final review F8), same rationale/style as --realtime-tail
+        # above: the strategy_set_probe_suppress_tail_logic hard-fail guard
+        # runs earlier, right after `strat = Strategy(so_path)` and before
+        # strat.run(), so a stale .so is caught before the run rather than
+        # after a silently no-op'd flag.
+        print("probe-suppress-tail: on")
+    if args.path_order is not None:
+        # Receipt (final review F8); the strategy_set_path_order hard-fail
+        # guard runs earlier, same rationale as above.
+        print(f"path-order: {args.path_order}")
+    if args.broker_state_hash:
+        # The strategy_set_broker_state_hash_recording hard-fail guard runs
+        # earlier, right after `strat = Strategy(so_path)` and before
+        # strat.run() -- see there for why. Reaching here means strat is the
+        # ctypes Strategy (--runner docker already sys.exit's above when
+        # --broker-state-hash is set) and the export is present.
+        # Sibling of --trace-json when given (both are per-script-bar
+        # debug arrays); otherwise sibling of the trades CSV output.
+        bsh_path = ((args.trace_json.parent if args.trace_json is not None else out_path.parent)
+                    / "broker_state_hash.json")
+        bsh_path.parent.mkdir(parents=True, exist_ok=True)
+        bsh_values = report["broker_state_hash"]
+        bsh_times = report["equity_curve_time_ms"]
+        # Self-describing: script_bars_processed lets a consumer verify
+        # coverage without loading the trades CSV, and each entry pairs
+        # its script-bar OPEN timestamp with the hash (hex, not a bare
+        # JSON-Number, so no consumer can silently truncate a uint64 to
+        # a JS-safe double). Invariant (Strategy.run/_report_to_dict):
+        # len(bsh_values) == len(bsh_times) whenever recording was on.
+        entries = [
+            {"time_ms": bsh_times[i], "hash": format(bsh_values[i], "016x")}
+            for i in range(len(bsh_values))
+        ]
+        with bsh_path.open("w", encoding="utf-8") as f:
+            json.dump({
+                "strategy": str(strategy_dir),
+                "ohlcv": str(ohlcv_path),
+                "script_bars_processed": report["script_bars_processed"],
+                "entries": entries,
+            }, f)
+        print(f"  broker-state-hash: wrote {len(entries)} entries to {bsh_path}")
+    if args.dump_book is not None:
+        # strat is None only under --runner docker, which sys.exit's above
+        # when --dump-book is set. A .so predating the exports still runs
+        # (the accessors are hasattr-guarded) but has no book to read --
+        # warn rather than write an empty, misleading file.
+        if strat.PendingOrderV1 is None:
+            print("  dump-book: WARNING -- strategy.so predates "
+                  "strategy_pending_order_layout (rebuild the engine); "
+                  f"skipping {args.dump_book}", file=sys.stderr)
+        else:
+            book = report.get("pending_orders", [])
+            args.dump_book.parent.mkdir(parents=True, exist_ok=True)
+            with args.dump_book.open("w", encoding="utf-8") as f:
+                json.dump({
+                    "strategy": str(strategy_dir),
+                    "ohlcv": str(ohlcv_path),
+                    "struct_version": PENDING_ORDER_STRUCT_VERSION,
+                    # The runtime's own field table, so a consumer can tell
+                    # which fields this engine build emitted.
+                    "layout": [
+                        {"name": n, "type": t, "offset": o, "size": z}
+                        for n, t, o, z in strat.pending_order_layout
+                    ],
+                    "count": len(book),
+                    "orders": book,
+                    # ABI v4 task 8: the position scalars the derived
+                    # values were resolved against (None on a .so that
+                    # predates strategy_position_avg_price & co.).
+                    "position": report.get("position"),
+                }, f)
+            print(f"  dump-book: wrote {len(book)} resting order(s) to {args.dump_book}")
     if args.fingerprint_json is not None:
         try:
             cpp_path = strategy_dir / "generated.cpp"
