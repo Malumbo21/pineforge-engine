@@ -113,7 +113,7 @@ def members(text: str | None = None, name: str = STRUCT_NAME) -> list[tuple[str,
         if not decl:
             continue
         m = DECL_RE.match(decl)
-        if not m:
+        if not m or "," in decl:
             _fail(f"cannot classify declaration in struct {name}: {decl!r} "
                   "(expected exactly `TYPE NAME [= init];`; split multi-name "
                   "declarations, and mirror-waive methods/templates explicitly)")

@@ -18,13 +18,14 @@ struct OpeningOwner {
     int barIndex;
     int64_t timestamp;
 
-    bool operator==(const OpeningOwner& other) const {
-        return positionCycle == other.positionCycle
-            && producerFill == other.producerFill
-            && orderIncarnation == other.orderIncarnation
-            && barIndex == other.barIndex && timestamp == other.timestamp;
-    }
 };
+
+inline bool operator==(const OpeningOwner& owner, const OpeningOwner& other) {
+    return owner.positionCycle == other.positionCycle
+        && owner.producerFill == other.producerFill
+        && owner.orderIncarnation == other.orderIncarnation
+        && owner.barIndex == other.barIndex && owner.timestamp == other.timestamp;
+}
 
 enum class OpeningDecision { Check, Exempt };
 enum class OpeningContinuation { None, RemainingAdversePath };

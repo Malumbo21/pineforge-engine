@@ -27,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_pending_order_mirror import members as struct_members  # noqa: E402
+from gen_pending_order_mirror import struct_body  # noqa: E402
 
 PENDING_WAIVER_PREFIX = "pending_order."
 PYRAMID_WAIVER_PREFIX = "pyramid_entry."
@@ -140,6 +141,109 @@ def _pyramid_folded(loop: str, cpp_type: str, member: str) -> bool:
     return re.search(rf"\bf\.{fold}\(\s*{value}\s*\)\s*;", loop) is not None
 
 
+def _one_braced_body(src: str, pattern: str, label: str) -> str:
+    matches = list(re.finditer(pattern, src))
+    if len(matches) != 1:
+        raise ValueError(f"{label}: expected exactly one body, got {len(matches)}")
+    start = matches[0].end()
+    depth = 1
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:i]
+    raise ValueError(f"{label}: unbalanced body")
+
+
+def _class_fields(src: str, name: str) -> dict[str, str]:
+    """Classify the small value classes; refuse unfamiliar declaration shapes.
+
+    Inline method/nested-type bodies are skipped by balanced braces. Every
+    remaining data declaration must be one TYPE NAME; adding a new field is
+    visible even when its name has no trailing underscore.
+    """
+    body = _one_braced_body(src, rf"\bclass\s+{name}\s*\{{", name)
+    fields = {}
+    statement = ""
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "{":
+            prefix = statement.strip()
+            nested = re.match(r"(?:struct|class)\s+\w+$", prefix)
+            method = "(" in prefix and "=" not in prefix.split("(", 1)[0]
+            if not nested and not method:
+                raise ValueError(f"{name}: unclassified braced declaration {prefix!r}")
+            depth = 1
+            i += 1
+            while i < len(body) and depth:
+                depth += (body[i] == "{") - (body[i] == "}")
+                i += 1
+            if depth:
+                raise ValueError(f"{name}: unbalanced member body")
+            statement = ""
+            continue
+        if ch == ";":
+            decl = " ".join(statement.split())
+            statement = ""
+            if decl and not decl.startswith("using "):
+                match = re.fullmatch(r"([\w:<>]+)\s+(\w+)(?:\s*=\s*[^,]+)?", decl)
+                if not match or match[2] in fields:
+                    raise ValueError(f"{name}: unclassified data declaration {decl!r}")
+                fields[match[2]] = match[1]
+        else:
+            statement += ch
+            if statement.strip() in ("public:", "private:", "protected:"):
+                statement = ""
+        i += 1
+    if statement.strip():
+        raise ValueError(f"{name}: unterminated declaration")
+    return fields
+
+
+def _opening_coverage(events: str, src: str) -> None:
+    """No waiver: the opening model has only causal state, all explicitly folded."""
+    events = _strip_cpp_comments(events)
+    owner_members = struct_members(events, "OpeningOwner")
+    if _class_fields(events, "OpeningReceipt") != {
+            "owner_": "OpeningOwner", "raw_fill_base_": "double", "decision_": "Decision"}:
+        raise ValueError("OpeningReceipt fields changed; classify every field in the hash contract")
+    if _class_fields(events, "OpeningObligations") != {
+            "pending_": "std::optional<OpeningReceipt>"}:
+        raise ValueError("OpeningObligations fields changed; classify every field in the hash contract")
+    if struct_members(events, "Check") != [("OpeningContinuation", "continuation")]:
+        raise ValueError("OpeningReceipt Check fields changed; update the hash contract")
+    if struct_body(events, "Exempt").strip():
+        raise ValueError("OpeningReceipt Exempt gained state; update the hash contract")
+    if not re.search(r"using\s+Decision\s*=\s*std::variant<Check,\s*Exempt>\s*;", events):
+        raise ValueError("OpeningReceipt Decision alternatives changed; update the hash contract")
+    for enum, expected in [("OpeningDecision", ["Check", "Exempt"]),
+                           ("OpeningContinuation", ["None", "RemainingAdversePath"])]:
+        body = _one_braced_body(events, rf"enum\s+class\s+{enum}\s*\{{", enum)
+        if [x.strip() for x in body.split(",")] != expected:
+            raise ValueError(f"{enum} alternatives changed; update the hash encoding")
+
+    body = _one_braced_body(src,
+        r"if\s*\(const auto& receipt = opening_obligations_\.peek\(\)\)\s*\{",
+        "opening receipt hash")
+    if "{" in body or "}" in body or re.search(r"\b(?:if|switch|for|while)\s*\(", body):
+        raise ValueError("opening receipt folds must cover Check and Exempt unconditionally")
+    for cpp_type, member in owner_members:
+        fold = PYRAMID_FOLD.get(cpp_type)
+        if not fold or not re.search(rf"\bf\.{fold}\(owner\.{member}\);", body):
+            raise ValueError(f"OpeningOwner.{member} missing its typed fold in the receipt body")
+    required = [r"f\.i\(static_cast<int64_t>\(receipt->decision\(\)\)\);",
+                r"f\.b\(receipt->requires_adverse_pass\(\)\);",
+                r"f\.d\(receipt->raw_fill_base\(\)\);",
+                r"const auto& owner = receipt->owner\(\);" ]
+    if not all(re.search(pattern, body) for pattern in required):
+        raise ValueError("opening receipt is missing decision/continuation/raw/owner binding")
+    if not re.search(r"f\.b\(opening_obligations_\.pending\(\)\);\s*if", src):
+        raise ValueError("opening receipt presence fold must precede its body")
+
+
 def main(root: Path = ROOT) -> int:
     hpp = (root / "include/pineforge/engine.hpp").read_text(encoding="utf-8")
     regions = _regions(hpp)
@@ -147,6 +251,11 @@ def main(root: Path = ROOT) -> int:
 
     src_raw = (root / "src/engine_state_hash.cpp").read_text(encoding="utf-8")
     src = _strip_cpp_comments(src_raw)
+    try:
+        _opening_coverage((root / "include/pineforge/broker_events.hpp").read_text(), src)
+    except (ValueError, OSError) as exc:
+        print(f"check_broker_state_hash_coverage: {exc}", file=sys.stderr)
+        return 1
 
     all_waivers = _load_waivers(root / "scripts/broker_state_hash_waivers.txt")
     waivers = {k: v for k, v in all_waivers.items()

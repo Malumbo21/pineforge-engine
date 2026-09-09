@@ -15,16 +15,18 @@ from gen_pending_order_mirror import members
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "include/pineforge/engine.hpp").read_text()
+EVENTS = (ROOT / "include/pineforge/broker_events.hpp").read_text()
 SOURCE = (ROOT / "src/engine_state_hash.cpp").read_text()
 WAIVERS = (ROOT / "scripts/broker_state_hash_waivers.txt").read_text()
 
 
 class PhysicalLotCoverage(unittest.TestCase):
-    def check(self, header=HEADER, source=SOURCE, waivers=WAIVERS):
+    def check(self, header=HEADER, source=SOURCE, waivers=WAIVERS, events=EVENTS):
         with tempfile.TemporaryDirectory(prefix="pf-lot-hash-check-") as temp:
             root = Path(temp)
             for name, content in [
                 ("include/pineforge/engine.hpp", header),
+                ("include/pineforge/broker_events.hpp", events),
                 ("src/engine_state_hash.cpp", source),
                 ("scripts/broker_state_hash_waivers.txt", waivers),
             ]:
@@ -93,7 +95,8 @@ class PhysicalLotCoverage(unittest.TestCase):
         self.assertEqual(self.check(waivers=WAIVERS + "\npyramid_entry.market_pyramid_add #\n")[0], 1)
 
     def test_unclassified_nested_declaration_refuses(self):
-        for declaration in ["double first, second;", "std::vector<double> state;", "double value() const;"]:
+        for declaration in ["double first, second;", "double first = 0, second = 0;",
+                            "std::vector<double> state;", "double value() const;"]:
             with self.subTest(declaration=declaration):
                 header = HEADER.replace("struct PyramidEntry {", "struct PyramidEntry {\n    " + declaration)
                 self.assertNotEqual(self.check(header=header)[0], 0)
@@ -104,6 +107,44 @@ class PhysicalLotCoverage(unittest.TestCase):
         code, output = self.check(source=source)
         self.assertEqual(code, 1, output)
         self.assertIn("stop_price", output)
+
+    def test_every_opening_owner_field_requires_its_own_fold(self):
+        for _type, name in members(EVENTS, "OpeningOwner"):
+            with self.subTest(member=name):
+                source = SOURCE.replace(f"owner.{name}", f"owner.missing_{name}")
+                code, output = self.check(source=source)
+                self.assertEqual(code, 1, output)
+                self.assertIn(name, output)
+        events = EVENTS.replace("struct OpeningOwner {", "struct OpeningOwner {\n int64_t extra;")
+        code, output = self.check(events=events)
+        self.assertEqual(code, 1, output)
+        self.assertIn("extra", output)
+
+    def test_new_receipt_state_or_decision_alternative_requires_review(self):
+        mutations = [
+            ("OpeningOwner owner_;", "OpeningOwner owner_;\n double extra;"),
+            ("std::optional<OpeningReceipt> pending_;", "std::optional<OpeningReceipt> pending_;\n bool extra_ = false;"),
+            ("struct Check {", "struct Check { double extra;"),
+            ("struct Exempt {}", "struct Exempt { double extra; }"),
+            ("std::variant<Check, Exempt>", "std::variant<Check, Exempt, int>"),
+            ("OpeningDecision { Check, Exempt }", "OpeningDecision { Check, Exempt, Extra }"),
+            ("OpeningContinuation { None, RemainingAdversePath }", "OpeningContinuation { None, RemainingAdversePath, Extra }"),
+        ]
+        for before, after in mutations:
+            with self.subTest(mutation=after):
+                self.assertIn(before, EVENTS)
+                self.assertNotEqual(self.check(events=EVENTS.replace(before, after))[0], 0)
+
+    def test_opening_receipt_folds_are_unconditional_and_owned(self):
+        fold = "f.d(receipt->raw_fill_base());"
+        for replacement in ["// " + fold, "const auto ignored = receipt->raw_fill_base();",
+                            "f.u(receipt->raw_fill_base());",
+                            "if (receipt->decision() == broker::OpeningDecision::Check) " + fold]:
+            with self.subTest(replacement=replacement):
+                self.assertEqual(self.check(source=SOURCE.replace(fold, replacement))[0], 1)
+        self.assertEqual(self.check(source=SOURCE.replace(fold, "") + "\n" + fold)[0], 1)
+        self.assertEqual(self.check(source=SOURCE.replace("f.b(opening_obligations_.pending());", ""))[0], 1)
+        self.assertEqual(self.check(source=SOURCE.replace("f.b(receipt->requires_adverse_pass());", ""))[0], 1)
 
 
 if __name__ == "__main__":
