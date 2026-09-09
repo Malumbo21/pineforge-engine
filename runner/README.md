@@ -132,9 +132,11 @@ Tick and bar modes share strategy/indicator/order implementations but can
 produce different fills: ticks reveal an actual intrabar path, whereas OHLC
 bars require the backtest's path assumptions. Native fills are simulated
 engine actions, not broker execution acknowledgments. Native close-only
-execution does not promise parity for `calc_on_every_tick`, order-fill
-recalculation, timestamped account-FX curves or separately installed native/
-auxiliary security feeds; unsupported native stream configurations refuse.
+execution requires strategies that calculate only on bar close. Do not use
+strategies that require `calc_on_every_tick`: the runner rejects an explicit
+true override, but cannot detect that declaration in every compiled strategy.
+Order-fill recalculation, timestamped account-FX curves and separately installed
+native/auxiliary security feeds are refused by the native stream configuration.
 Ordinary security evaluations derived from the input stream retain the
 existing native engine behavior.
 
