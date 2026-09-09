@@ -26,7 +26,7 @@
 
 TradingView's strategy tester is the reference every Pine author trusts, and nothing outside TradingView reproduced it — until now. PineForge is a C++17 runtime with a stable C ABI that runs PineScript v6 strategies exactly the way TradingView's broker emulator does: same fills, same sizing, same margin calls, same trailing stops, same `request.security()` buckets, on any OHLCV you give it, in microseconds per bar.
 
-- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,180 excellent, 10 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,481 matched by the verifier.
+- **Proven, not promised.** All 4,190 probes — 312 open reference strategies plus 413 real community scripts on 15 markets and timeframes — grade *excellent* or *strong* against TradingView's own trade lists: **4,181 excellent, 9 strong, zero moderate**. The current full sweep evaluates 2,819,967 TradingView trades, with 2,817,485 matched by the verifier.
 - **Open.** Engine, transpiler, corpus, benchmarks and the validation tooling are all public and Apache-2.0. The only thing you cannot download is the closed test set, because TradingView's Terms of Service forbid redistributing community scripts.
 - **Fast.** In-process, no interpreter: median **162× faster than PyneCore** on 99 timed strategies. Parameter sweeps re-run a loaded `.so` with new inputs — no recompile, no fork.
 - **Deterministic to the bit.** Two runs with the same inputs produce identical trade lists. Same on Linux and macOS.
@@ -110,20 +110,20 @@ Lifecycle-aware compiled modules reset Pine variables, indicator/history buffers
 
 ## Validation scoreboard
 
-**Round 37 · 2026-09-09:** **4,180 excellent / 10 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
+**Round 38 · 2026-09-09:** **4,181 excellent / 9 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
 
 | Board | Test set | Result | TradingView trades evaluated |
 |---|---|---|---|
 | **Public** — [open corpus](https://github.com/pineforge-4pass/pineforge-corpus) | 312 reference strategies, Apache-2.0, reproducible by anyone | **309/309 graded excellent** (ETH/USDT-perp 15m; the corpus' declared engine-only / anomaly probes are not graded) | 429,866 |
-| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,871 excellent + 10 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
+| **Closed test** — the parity campaign | 413 community-shared TradingView scripts across 15 market/timeframe lanes: **3,881 script-lane probes** — private under TradingView's Terms of Service | **3,872 excellent + 9 strong + zero moderate** = 3,881/3,881 (100%) excellent-or-strong | 2,390,101 |
 
-**2,819,967 TradingView trades** evaluated, **2,817,481 matched by the verifier** (99.91%), from the round 37 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
+**2,819,967 TradingView trades** evaluated, **2,817,485 matched by the verifier** (99.91%), from the round 38 full Cloud Run sweep. **18 TradingView-side anomalies** remain excluded under the unchanged population; each was documented before exclusion. No scored probe remains below *strong*.
 
-Round 37 corrects MFI source direction and compiled-strategy reuse. MFI uses Pine's existing absolute float-comparison band, so equal-decimal HLC3 values do not contribute a full bar's money flow because of binary rounding residue. A reused compiled strategy resets persistent Pine state before each new batch or stream warmup, while retaining input settings and preserving accumulated state within an active stream.
+Round 38 corrects admission of an opening order whose whole-lot quantity uses rounded equity but whose exact cost exceeds the available budget. The rule applies to either direction and also after a separate close has completed. The valid closing fill is preserved; the unaffordable opening is declined.
 
-**RSI/MFI Divergence Momentum (antoniolinux)** on **NYSE:F 15m** moves from strong to excellent: canonical match rises from 95.2% to 100%, the trade-count gap falls from 2 to 0, and entry-price, exit-price, PnL and quantity error remain zero at the 90th percentile. The same strategy on **OANDA:EURUSD 15m** and **EWO/RSI Advanced Signals (pridarasx)** on **NYSE:F 15m** remain excellent and improve to 100% canonical match. Independent raw inspection verifies **315/315 strict entry-and-exit matches** across these three probes, gaining 13 with none lost. The pre-existing EURUSD open-position mark and display-precision differences remain; this is not complete reporting-byte equality.
+**Support Resistance Zones (lazyhacker22)** on **NYSE:F 15m** moves from strong to excellent: canonical match rises from 99.7% to 100%, with zero trade-count gap and zero entry-price, exit-price, PnL and quantity error at the 90th percentile. Independent comparison of the unfiltered trade files gains **551 exact physical trade-pair matches, with none lost**. The remaining physical-row difference is one TradingView trade represented as two engine margin fragments with equal total quantity and PnL; canonical match is 100%.
 
-The fixes have no strategy, symbol or date lookup. Direct TradingView controls distinguish below-band and above-band MFI movements at three price scales, including a nonzero HLC3 rounding residue. Separate Cloud diagnostics retain the same C handle across repeated runs and verify the lifecycle repair. All **704 hard-surface probes** retain their canonical grades, quantity metrics and trade CSVs; 4,187 of 4,190 CSVs are unchanged. Verifier code, grading rules, profile-selection code, reference tapes, feeds, input files and scored population are unchanged.
+The fix has no strategy, symbol or date lookup. Sixteen TradingView controls cover both directions, flat entries, separate closes, reversals, explicit quantities and budget boundaries. A Cloud diagnostic reproduces the original selected trade CSV and confirms that a one-lot allowance admitted an order whose cost exceeded frozen equity by one binary64 step. All **704 hard-surface probes** retain their canonical grades, quantity metrics and trade CSVs; **4,189 of 4,190 CSVs are unchanged**. Verifier code, grading rules, profile-selection code, reference tapes, feeds, input files and scored population are unchanged.
 
 ### The closed test, lane by lane
 
@@ -139,12 +139,12 @@ The fixes have no strategy, symbol or date lookup. Direct TradingView controls d
 | NASDAQ:AAPL · 15m | 356 | 354 | 2 | — |
 | NSE:NIFTY · 15m | 191 | 191 | — | — |
 | NSE:NIFTY · 1D | 145 | 145 | — | — |
-| NYSE:F · 15m | 340 | 337 | 3 | — |
+| NYSE:F · 15m | 340 | 338 | 2 | — |
 | NYSE:F · 1D | 263 | 263 | — | — |
 | OANDA:EURUSD · 15m | 373 | 372 | 1 | — |
 | OANDA:XAUUSD · 15m | 376 | 375 | 1 | — |
 | OANDA:XAUUSD · 1D | 248 | 248 | — | — |
-| **Total** | **3,881** | **3,871** | **10** | **0** |
+| **Total** | **3,881** | **3,872** | **9** | **0** |
 
 ### How a probe is graded
 
