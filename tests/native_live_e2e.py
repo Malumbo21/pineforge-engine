@@ -16,7 +16,7 @@ import threading
 import base64
 import struct
 
-runner, library, parser = sys.argv[1:]
+runner, library, parser, batch_parser = sys.argv[1:]
 received = []
 responses = []
 secret = "synthetic-loopback-test-key"
@@ -116,6 +116,8 @@ try:
             assert final['inputs_processed'] == final['webhooks_delivered'] == 0
             assert received == prior
             assert final['prefix_skipped'] == len(events)
+            same_timezone = invoke(options+['--chart-timezone', 'UTC'])
+            assert same_timezone['webhooks_delivered'] == 0 and received == prior
             with sqlite3.connect(ledger) as db:
                 assert db.execute('SELECT count(*) FROM inputs').fetchone()[0] == len(events)
             # Changing a declared strategy input changes deployment identity.
@@ -144,6 +146,48 @@ try:
         invoke(options)
         assert received[1] == first
         assert len({e['event_id'] for e in received}) == 4
+
+        # Redirect refusal is permanent, with one durable attempt per invocation.
+        received.clear(); responses[:] = [302]
+        redirect_ledger = root/'redirect.sqlite3'
+        invoke(['--mode','bars','--feed',str(feed),'--ledger',str(redirect_ledger)],success=False)
+        assert len(received) == 1
+        with sqlite3.connect(redirect_ledger) as db:
+            assert db.execute('SELECT attempts FROM events WHERE acknowledged=0 ORDER BY ordinal LIMIT 1').fetchone()[0] == 1
+
+        # A complete provider batch is one durable input, even when delivery
+        # fails or max-events requests a stop. No remaining event is lost.
+        received.clear(); responses[:] = [503]
+        feed = root/'batch.jsonl'
+        feed.write_text(json.dumps({'type':'batch','events':bar_events})+'\n')
+        ledger = root/'batch.sqlite3'
+        options = ['--mode','bars','--feed',str(feed),'--ledger',str(ledger),'--max-events','1']
+        invoke(options+['--max-attempts','1'],success=False)
+        with sqlite3.connect(ledger) as db:
+            assert db.execute('SELECT COUNT(*) FROM inputs').fetchone()[0] == 1
+            assert db.execute('SELECT COUNT(*) FROM events').fetchone()[0] == 4
+        first = received[0]
+        invoke(options)
+        assert received[1] == first and len({e['event_id'] for e in received}) == 4
+
+        # A later invalid event in a batch must not commit any of the message.
+        received.clear()
+        invalid = root/'batch-invalid.jsonl'
+        invalid.write_text(json.dumps({'type':'batch','events':[tick_events[0],dict(tick_events[1],seq=99)]})+'\n')
+        invalid_ledger = root/'batch-invalid.sqlite3'
+        invoke(['--mode','ticks','--feed',str(invalid),'--ledger',str(invalid_ledger)],success=False)
+        with sqlite3.connect(invalid_ledger) as db:
+            assert db.execute('SELECT COUNT(*) FROM inputs').fetchone()[0] == 0
+            assert db.execute('SELECT COUNT(*) FROM events').fetchone()[0] == 0
+        assert not received
+
+        # A plugin may emit multiple trades; its message is still one input.
+        feed = root/'parser-batch.txt'; feed.write_text('two-trades\n')
+        ledger = root/'parser-batch.sqlite3'
+        options=['--mode','ticks','--feed',str(feed),'--ledger',str(ledger),'--parser',batch_parser,'--max-events','1']
+        result=invoke(options)
+        assert result['inputs_committed']==1 and result['last_tick_sequence']==2
+        assert invoke(options)['inputs_processed']==0
 
         # A custom C++ parser accepts provider messages without a Python adapter.
         # The next-minute tick finalizes the previous minute in the native engine.
@@ -189,6 +233,12 @@ try:
         else:
             assert len(received) == 4
             assert json.loads(result.stdout)['inputs_committed'] == len(messages)-1
+            received.clear()
+            stream_messages = ['two-trades']
+            result = invoke(['--mode','ticks','--feed-url',f'ws://127.0.0.1:{server.server_port}/stream',
+                             '--max-events','1','--parser',batch_parser,
+                             '--ledger',str(root/'websocket-batch.sqlite3')])
+            assert result['inputs_committed']==1 and result['last_tick_sequence']==2
         print('native C++ runner: bars/ticks/parser, HMAC HTTP, partial restart, exact recovery and immutable retry passed')
 finally:
     server.shutdown()

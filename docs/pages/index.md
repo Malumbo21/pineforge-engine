@@ -44,10 +44,10 @@ consumption.
 - <b class="tab-title">I'm connecting a realtime feed</b>
   Start with **[Historical to realtime streaming](@ref streaming)** for
   the warmup, ordered-trade, clock, and report lifecycle, then run
-  `tutorial/run_stream.py` against the bundled MACD strategy. Building the
-  `pineforge-live` recompute runtime instead? Read
-  **[ABI v4 live surface](@ref live_surface)** — streaming's lifecycle is
-  not what it uses.
+  `tutorial/run_stream.py` against the bundled MACD strategy. The optional
+  native C++ runner is documented in `runner/README.md`. For the separate
+  Python `pineforge-live` recompute project, read
+  **[ABI v4 live surface](@ref live_surface)**.
 
 - <b class="tab-title">I'm analysing backtest results</b>
   Read the **[Trading metrics reference](@ref metrics)** — every

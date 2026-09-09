@@ -47,6 +47,12 @@ extern "C" PF_LIVE_PARSER_API int pf_live_parse_message(
         for (const auto* event : {&tick, &bar, &time}) if (emit(event, user)) return -1;
         return 0;
     }
+    if (text == "two-trades") {
+        tick.timestamp=180001;tick.sequence=1;
+        if(emit(&tick,user)) return -1;
+        tick.timestamp=180002;tick.sequence=2;tick.price=101;
+        return emit(&tick,user);
+    }
     if (text == "config") {
         if (std::string_view(config, config_size) != "{\"scale\":2}") return -1;
         tick.price = 200;

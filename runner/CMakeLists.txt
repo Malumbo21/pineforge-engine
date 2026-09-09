@@ -52,7 +52,8 @@ if(PINEFORGE_BUILD_TESTS)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME native_live_e2e COMMAND ${Python3_EXECUTABLE}
         ${PROJECT_SOURCE_DIR}/tests/native_live_e2e.py $<TARGET_FILE:pineforge-live>
-        $<TARGET_FILE:native_live_example> $<TARGET_FILE:native_live_parser_example>)
+        $<TARGET_FILE:native_live_example> $<TARGET_FILE:native_live_parser_example>
+        $<TARGET_FILE:live_parser_fixture>)
     set_tests_properties(native_live_e2e PROPERTIES TIMEOUT 120)
     foreach(native_test test_native_live_store test_native_live_websocket)
         add_executable(${native_test} ${PROJECT_SOURCE_DIR}/tests/${native_test}.cpp)

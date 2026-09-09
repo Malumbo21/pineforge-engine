@@ -81,7 +81,9 @@ instrument metadata. `--session` defaults to `24x7`, `--timezone` to `UTC`;
 `--chart-timezone` is independent and defaults to the engine UTC chart path.
 Repeat `--input TITLE=VALUE` and `--override KEY=VALUE` for strategy settings.
 Those setters belong to the compiled strategy; it must validate unsupported
-settings. The bundled example has no inputs or configurable overrides.
+settings. The bundled example has no inputs or configurable overrides. It also exports
+`run_backtest`/`run_backtest_full`/`report_free`, so the same C++ strategy can
+be loaded by either a batch or native live harness.
 
 `--feed -` reads stdin. `--feed-url https://...` polls a **complete JSONL
 snapshot** (maximum 4 MiB) every `--poll-ms` (default 1000); `--check` fetches
@@ -142,7 +144,10 @@ Use `--parser your-parser.so --parser-config mapping.json` to translate a
 provider's complete message into normalized ticks, bars or time boundaries.
 The parser can emit zero events for a recognized control message, or several
 ordered events for a provider batch. The runner stages and validates the whole
-parser result before applying any events. An error emits no partial parse.
+parser result before applying any events. Parser errors emit no partial parse.
+All normalized events from one provider message then commit as one ledger
+input and outbox transaction; a failure during application discards the
+instance without committing any part of that message.
 
 The public [C ABI header](../include/pineforge/live_parser.h) defines the
 versioned POD and callbacks. A C++ plugin exports:
@@ -173,7 +178,7 @@ order ledger or exposed in transport errors.
 ## Durable orders and recovery
 
 One process holds an exclusive lock beside the SQLite ledger. Each successful
-native input commits its normalized JSON, observable engine/stream hash and
+provider message commits its normalized event or batch, observable engine/stream hash and
 ordered immutable webhook events in one database transaction. Network delivery
 starts only after commit. A failed engine/database operation ends that
 process; it never continues with an advanced but uncommitted strategy.
@@ -187,12 +192,17 @@ and stream state, not arbitrary C++ private variables.
 
 Files and HTTP snapshots normally repeat the full normalized event prefix;
 matching records are skipped, changed records are refused. `--from-input N`
-declares the zero-based first **normalized event** in a resumed file/stdin/WS
-tail; it cannot skip beyond the recorded count. Parser heartbeats do not
-consume an input index. HTTP snapshots always begin at index zero. The final
+declares the zero-based first **nonempty provider message** in a resumed
+file/stdin/WS tail; it cannot skip beyond the recorded count. A parser batch
+of multiple events uses one index, and heartbeats emitting no events use
+none. HTTP snapshots always begin at index zero. The final
 stdout JSON reports `inputs_committed`; use that cursor with a provider that
-can resume exactly. `--max-events N` counts newly committed normalized input
-events, not order actions, and is useful for bounded replay/restart checks.
+can resume exactly. `--max-events N` counts newly committed nonempty provider
+messages, not individual batch elements or order actions. It stops only
+between atomic messages. `last_tick_sequence` reports the last committed
+source tick sequence for provider-specific resumption. The built-in JSONL
+parser also accepts `{"type":"batch","events":[...]}` with 1..1024
+normalized tick/bar/time events.
 
 The webhook payload schema is `pineforge-native-order-action/v1`:
 
@@ -211,7 +221,7 @@ Delivery is **at least once**: a receiver may accept a request before the
 runner can persist its acknowledgment. Deduplicate `event_id` before trading.
 Attempts are saved before requests. The oldest unacknowledged event blocks
 later delivery; bounded exponential delays retry transient errors. Permanent
-HTTP refusal stops the process. After investigating, restart to retry, raising
+HTTP refusal, including redirects, stops the process. After investigating, restart to retry, raising
 `--max-attempts` beyond the durable count if its default of 8 was exhausted.
 This limit does not discard events or reset their IDs. There is no implicit
 skip/rewrite of a failed order.

@@ -8,26 +8,25 @@ The handoff preserves broker state, position and equity, pending orders, Pine
 series and variables, TA objects, `request.security()` evaluators, and a
 partially formed higher-timeframe candle.
 
-@note **`pineforge-live` does not use this lifecycle.** The live runtime's
-fill model is the batch broker graded by the parity campaign, not the
-streaming broker's fills-at-the-observed-print model (with its warmup gates
-that disable some batch rules). Instead of `strategy_stream_*`,
-`pineforge-live` recomputes `run_backtest_full` over the accumulated
-script-timeframe bar array on every settlement and every intra-bar probe,
-using the ABI v4 live-runtime flags (`strategy_set_realtime_tail`,
-`strategy_set_probe_suppress_tail_logic`, `strategy_set_path_order`,
-`strategy_set_broker_state_hash_recording`) to treat the array's last bar as
-a still-forming tail without changing `run_backtest_full`'s own semantics.
-See [ABI v4 live surface](@ref live_surface) for the full flag reference,
-default values, and evidence.
+The optional **native C++ `pineforge-live` executable** in this repository
+uses this lifecycle directly. It includes native transport, custom C++ parser
+plugins, SQLite recovery and order-action webhooks; see the
+[native runner guide](https://github.com/pineforge-4pass/pineforge-engine/blob/main/runner/README.md).
+
+The separate [Python `pineforge-live` project](https://github.com/pineforge-4pass/pineforge-live)
+uses accumulated-bar `run_backtest_full` recomputation and the
+[ABI v4 live surface](@ref live_surface) instead. Its verification evidence
+and journals are separate from the native runner. Tick-stream fills at observed
+prices/times can differ from batch OHLC path assumptions.
 
 This is the runtime model used by a continuously running strategy:
 
 1. Call #strategy_stream_begin with every confirmed historical input bar.
 2. Feed normalized trades with #strategy_stream_push_tick, or pass one contiguous
    replay tape to #strategy_stream_push_ticks.
-3. Call #strategy_stream_advance_time at wall-clock boundaries, including
-   quiet periods where no trade arrived.
+3. Call #strategy_stream_advance_time when the provider confirms no earlier
+   ticks remain, including quiet periods. A wall clock alone does not prove
+   that delayed source records have all arrived.
 4. Call #strategy_stream_end, then snapshot cumulative state with
    #strategy_stream_fill_report.
 5. Release report arrays with #report_free and the instance with

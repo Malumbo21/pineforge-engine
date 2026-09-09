@@ -34,7 +34,7 @@ constexpr std::size_t MAX_FRAME = 1024 * 1024;
 struct Config {
     std::string strategy, warmup, feed = "-", ledger, webhook, mode = "", input_tf = "1", script_tf,
                                   symbol, name = "strategy";
-    std::string session = "24x7", timezone = "UTC", chart_timezone, secret_env, feed_url,
+    std::string session = "24x7", timezone = "UTC", chart_timezone = "UTC", secret_env, feed_url,
                 parser_path, parser_config_path, subscribe_path;
     std::vector<std::pair<std::string, std::string>> inputs, overrides, syminfo;
     std::uint64_t from_input = 0, max_events = 0, max_attempts = 8;
@@ -74,7 +74,8 @@ void validate_script_tf(const std::string &tf) {
     if (!tf.empty() && (tf.back() == 'D' || tf.back() == 'W')) {
         seconds = tf.back() == 'D' ? 86400 : 604800;
         digits.pop_back();
-        if (digits.empty()) digits = "1";
+        if (digits.empty())
+            digits = "1";
     }
     auto count = unsigned_arg(digits);
     if (!count || count > static_cast<std::uint64_t>(INT_MAX) / seconds)
@@ -171,6 +172,8 @@ Config args(int argc, char **argv) {
     if (c.input_tf != "1")
         throw std::runtime_error("native runner input-tf currently must be 1 minute");
     validate_script_tf(c.script_tf);
+    if (c.chart_timezone.empty())
+        c.chart_timezone = "UTC";
     if (!c.feed_url.empty() && seen.count("--feed"))
         throw std::runtime_error("choose feed or feed-url");
     const bool websocket = c.feed_url.rfind("ws://", 0) == 0 || c.feed_url.rfind("wss://", 0) == 0;
@@ -500,6 +503,18 @@ std::vector<Event> actions(Strategy &s, const Config &c, const std::string &depl
     }
     return out;
 }
+void apply_record(Strategy &strategy, const Config &c, Cursor &cursor, const Json &record) {
+    if (record.at("type").text() != "batch") {
+        apply(strategy, c, cursor, record);
+        return;
+    }
+    only_fields(record, {"type", "events"});
+    const auto &events = record.at("events");
+    if (events.kind != Json::Kind::Array || events.items.empty() || events.items.size() > 1024)
+        throw std::runtime_error("normalized batch requires 1..1024 events");
+    for (const auto &event : events.items)
+        apply(strategy, c, cursor, event);
+}
 std::string identity(const Config &c, const std::string &warmup, const std::string &library,
                      const std::string &parser_bytes, const std::string &parser_config) {
     Json j = Json::object({{"schema", Json::string("pineforge-native-ledger/v1")},
@@ -571,7 +586,7 @@ bool drain(Ledger &ledger, const HttpOptions &options, const Config &c, std::uin
             continue;
         }
         ledger.record_delivery_failure(e->id, result.error);
-        if (result.status >= 400 && result.status < 500 && result.status != 408 &&
+        if (result.status >= 300 && result.status < 500 && result.status != 408 &&
             result.status != 429)
             throw std::runtime_error("webhook receiver refused event; event remains queued");
         const auto delay =
@@ -604,11 +619,12 @@ int run(const Config &c) {
         throw std::runtime_error("strategy library changed during initialization");
     auto recorded = ledger.input_count();
     for (std::uint64_t i = 0; i < recorded; ++i) {
-        if (stopped) return 130;
+        if (stopped)
+            return 130;
         auto row = ledger.input(i);
         if (!row)
             throw std::runtime_error("ledger input hole");
-        apply(strategy, c, cursor, parse_json(row->canonical_json));
+        apply_record(strategy, c, cursor, parse_json(row->canonical_json));
         auto events = actions(strategy, c, deployment);
         if (row->state_hash != std::to_string(strategy.hash(strategy.state)) ||
             events.size() != row->events.size())
@@ -632,27 +648,38 @@ int run(const Config &c) {
     std::uint64_t delivered = 0, processed = 0, replayed_prefix = 0;
     drain(ledger, webhook, c, delivered);
     auto consume_message = [&](const std::string &message, std::uint64_t &index) {
-        for (const auto &frame : normalize(parser.get(), message)) {
-            auto canonical = frame.dump();
-            if (auto previous = ledger.input(index)) {
-                if (previous->canonical_json != canonical)
-                    throw std::runtime_error("input conflicts with committed prefix");
-                ++replayed_prefix;
-            } else {
-                if (index != ledger.input_count())
-                    throw std::runtime_error("input sequence is not contiguous");
-                apply(strategy, c, cursor, frame);
-                auto events = actions(strategy, c, deployment);
-                ledger.commit_input(index, canonical, strategy.hash(strategy.state), events);
-                strategy.clear(strategy.state);
-                ++processed;
-                if (!drain(ledger, webhook, c, delivered))
-                    return;
-            }
-            ++index;
-            if (stopped || (c.max_events && processed >= c.max_events))
+        auto frames = normalize(parser.get(), message);
+        if (frames.empty())
+            return;
+        Json frame;
+        if (frames.size() == 1)
+            frame = std::move(frames.front());
+        else {
+            Json events;
+            events.kind = Json::Kind::Array;
+            events.items = std::move(frames);
+            frame = Json::object({{"type", Json::string("batch")}, {"events", std::move(events)}});
+        }
+        auto canonical = frame.dump();
+        if (auto previous = ledger.input(index)) {
+            if (previous->canonical_json != canonical)
+                throw std::runtime_error("input conflicts with committed prefix");
+            ++replayed_prefix;
+        } else {
+            if (index != ledger.input_count())
+                throw std::runtime_error("input sequence is not contiguous");
+            // The entire provider message advances in memory before one
+            // input/state/outbox transaction. Failure discards this instance;
+            // interruption and delivery begin only after every event commits.
+            apply_record(strategy, c, cursor, frame);
+            auto events = actions(strategy, c, deployment);
+            ledger.commit_input(index, canonical, strategy.hash(strategy.state), events);
+            strategy.clear(strategy.state);
+            ++processed;
+            if (!drain(ledger, webhook, c, delivered))
                 return;
         }
+        ++index;
     };
     auto consume = [&](std::istream &in, std::uint64_t start, bool full_snapshot) {
         std::string row;
@@ -747,12 +774,14 @@ int run(const Config &c) {
         } while (!stopped);
     }
     auto pending = ledger.pending_count();
-    std::cout << Json::object({{"deployment", Json::string(deployment)},
-                               {"inputs_committed", num(ledger.input_count())},
-                               {"inputs_processed", num(processed)},
-                               {"prefix_skipped", num(replayed_prefix)},
-                               {"webhooks_delivered", num(delivered)},
-                               {"webhooks_pending", num(pending)}})
+    std::cout << Json::object(
+                     {{"deployment", Json::string(deployment)},
+                      {"inputs_committed", num(ledger.input_count())},
+                      {"inputs_processed", num(processed)},
+                      {"prefix_skipped", num(replayed_prefix)},
+                      {"webhooks_delivered", num(delivered)},
+                      {"webhooks_pending", num(pending)},
+                      {"last_tick_sequence", cursor.seen_tick ? num(cursor.tick_seq) : Json{}}})
                      .dump()
               << '\n';
     return stopped ? 130 : pending ? 2 : 0;

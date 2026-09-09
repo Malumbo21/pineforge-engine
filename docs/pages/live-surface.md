@@ -3,7 +3,7 @@
 @tableofcontents
 
 **ABI v4** (`PF_ABI_VERSION == 4`) appends 24 exports and two `pf_report_t`
-fields for `pineforge-live`, the recompute-based live runtime built on top
+fields for the separate Python `pineforge-live` recompute-based project built on top
 of this engine (see [`pineforge-workflow-live/docs/superpowers/specs/2026-09-07-pineforge-live-design.md` §3](https://github.com/pineforge-4pass/pineforge-workflow-live)
 for the full contract this surface serves). Every one of the 24 symbols is
 **default off / read-only** and **never changes a historical run**: the
@@ -12,10 +12,11 @@ accessor is a pure read over state the engine already computed for its own
 internal use. Historical-identity is pinned by the L0 evidence in
 [Evidence](#live_surface_evidence).
 
-**No new evaluator.** Nothing here adds a second broker model —
-`run_backtest_full` is still the only fill-deciding entry point. The live
-runtime works by *recomputing* it (see @ref streaming for why the
-`strategy_stream_*` lifecycle is not used instead).
+**No new evaluator in this surface.** The Python runtime recomputes
+`run_backtest_full`. The optional native C++ runner in this engine repository
+uses `strategy_stream_*` instead (see @ref streaming and `runner/README.md`).
+Its live extension API, journals and verification scope are separate from
+these recomputation controls.
 
 ## The 24 symbols
 
