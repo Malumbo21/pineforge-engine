@@ -35,6 +35,40 @@ public:
     // "every hashed member changes the hash" -- task-5-review.md Important
     // #3). Kept in the same order as engine_state_hash.cpp so a future
     // reviewer can diff the two lists directly.
+    void seed_opening() {
+        opening_obligations_.replace(broker::OpeningReceipt::check(
+            {position_cycle_seq_, 17, 19, 2, 120000}, 102.0));
+    }
+    void mutate_opening_owner(const std::function<void(broker::OpeningOwner&)>& mutate) {
+        auto owner = opening_obligations_.peek()->owner();
+        mutate(owner);
+        opening_obligations_.replace(broker::OpeningReceipt::check(
+            owner, opening_obligations_.raw_fill_base()));
+    }
+    static std::vector<Pin> OpeningPins() {
+        return {
+            {"presence", [](Probe& s) { s.opening_obligations_.invalidate(); }},
+            {"positionCycle", [](Probe& s) { s.mutate_opening_owner([](auto& o) { ++o.positionCycle; }); }},
+            {"producerFill", [](Probe& s) { s.mutate_opening_owner([](auto& o) { ++o.producerFill; }); }},
+            {"orderIncarnation", [](Probe& s) { s.mutate_opening_owner([](auto& o) { ++o.orderIncarnation; }); }},
+            {"barIndex", [](Probe& s) { s.mutate_opening_owner([](auto& o) { ++o.barIndex; }); }},
+            {"timestamp", [](Probe& s) { s.mutate_opening_owner([](auto& o) { ++o.timestamp; }); }},
+            {"decision", [](Probe& s) {
+                s.opening_obligations_.replace(broker::OpeningReceipt::exempt(
+                    s.opening_obligations_.peek()->owner(), s.opening_obligations_.raw_fill_base()));
+            }},
+            {"continuation", [](Probe& s) {
+                s.opening_obligations_.replace(broker::OpeningReceipt::check(
+                    s.opening_obligations_.peek()->owner(), s.opening_obligations_.raw_fill_base(),
+                    broker::OpeningContinuation::RemainingAdversePath));
+            }},
+            {"raw_fill_base", [](Probe& s) {
+                s.opening_obligations_.replace(broker::OpeningReceipt::check(
+                    s.opening_obligations_.peek()->owner(), 103.0));
+            }},
+        };
+    }
+
     static std::vector<Pin> ScalarPins() {
         return {
             // Position core
@@ -49,16 +83,6 @@ public:
             {"position_open_bar_", [](Probe& s) { s.position_open_bar_ += 1; }},
             {"position_cycle_seq_", [](Probe& s) { s.position_cycle_seq_ += 1; }},
             {"next_position_cycle_seq_", [](Probe& s) { s.next_position_cycle_seq_ += 1; }},
-
-            // KI-61 affordability provenance
-            {"opening_affordability_pending_", [](Probe& s) { s.opening_affordability_pending_ = !s.opening_affordability_pending_; }},
-            {"opening_affordability_eligible_", [](Probe& s) { s.opening_affordability_eligible_ = !s.opening_affordability_eligible_; }},
-            {"commissioned_all_in_market_long_opening_affordability_", [](Probe& s) { s.commissioned_all_in_market_long_opening_affordability_ = !s.commissioned_all_in_market_long_opening_affordability_; }},
-            {"opening_affordability_default_long_reversal_", [](Probe& s) { s.opening_affordability_default_long_reversal_ = !s.opening_affordability_default_long_reversal_; }},
-            {"close_then_short_opening_requires_adverse_retry_", [](Probe& s) { s.close_then_short_opening_requires_adverse_retry_ = !s.close_then_short_opening_requires_adverse_retry_; }},
-            {"commissioned_all_in_market_short_lifecycle_", [](Probe& s) { s.commissioned_all_in_market_short_lifecycle_ = !s.commissioned_all_in_market_short_lifecycle_; }},
-            {"default_market_direct_short_reversal_lifecycle_", [](Probe& s) { s.default_market_direct_short_reversal_lifecycle_ = !s.default_market_direct_short_reversal_lifecycle_; }},
-            {"opening_affordability_raw_fill_base_", [](Probe& s) { s.opening_affordability_raw_fill_base_ = 424242.5; }},
 
             // KI-64 POOC freeze snapshot + same-bar close carry
             {"pos_view_freeze_bar_", [](Probe& s) { s.pos_view_freeze_bar_ += 1; }},
@@ -480,6 +504,19 @@ int main() {
         p.mutate(s);
         if (s.broker_state_hash() == before) {
             std::fprintf(stderr, "FAIL scalar pin %s: hash unchanged\n", p.name);
+            ++failures;
+        }
+    }
+
+    // Start from the same present receipt for every pin. Seeding presence
+    // inside a mutation would conceal a missing nested field from this test.
+    for (const auto& p : Probe::OpeningPins()) {
+        Probe s = Build3Bars();
+        s.seed_opening();
+        const uint64_t before = s.broker_state_hash();
+        p.mutate(s);
+        if (s.broker_state_hash() == before) {
+            std::fprintf(stderr, "FAIL opening receipt pin %s: hash unchanged\n", p.name);
             ++failures;
         }
     }

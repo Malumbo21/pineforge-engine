@@ -86,6 +86,7 @@ void hash_str_set(Fnv& f, const std::unordered_set<std::string>& s) {
 
 uint64_t BacktestEngine::broker_state_hash() const {
     Fnv f;
+    f.s("pineforge-broker-state/v2");
 
     // --- Position core ---
     f.i(static_cast<int64_t>(position_side_));
@@ -97,29 +98,43 @@ uint64_t BacktestEngine::broker_state_hash() const {
     f.i(position_cycle_seq_);
     f.i(next_position_cycle_seq_);
 
-    // --- One-shot / lifecycle post-fill affordability provenance (KI-61) ---
-    // Consumed by process_margin_call / the affordability re-checks to decide
-    // a future forced-liquidation or trim event.
-    f.b(opening_affordability_pending_);
-    f.b(opening_affordability_eligible_);
-    f.b(commissioned_all_in_market_long_opening_affordability_);
-    f.b(opening_affordability_default_long_reversal_);
-    f.b(close_then_short_opening_requires_adverse_retry_);
-    f.b(commissioned_all_in_market_short_lifecycle_);
-    f.b(default_market_direct_short_reversal_lifecycle_);
-    f.d(opening_affordability_raw_fill_base_);
+    // Owned opening checkpoint. Serialize semantic fields, never variant
+    // storage or padding. Version 2 deliberately retires four dead labels.
+    f.b(opening_obligations_.pending());
+    if (const auto& receipt = opening_obligations_.peek()) {
+        const auto& owner = receipt->owner();
+        f.i(owner.positionCycle);
+        f.u(owner.producerFill);
+        f.u(owner.orderIncarnation);
+        f.i(owner.barIndex);
+        f.i(owner.timestamp);
+        f.i(static_cast<int64_t>(receipt->decision()));
+        f.b(receipt->requires_adverse_pass());
+        f.d(receipt->raw_fill_base());
+    }
 
-    // --- Pyramid book: price, time, qty, entry_id, entry_bar_index ---
+    // --- Physical lots: every PyramidEntry field is continuation state ---
+    // Comments/excursions are Pine-readable; the other provenance fields
+    // choose financial or same-bar path transitions. Preserve explicit typed
+    // folds: never hash struct padding, string storage or native object bytes.
     f.u(pyramid_entries_.size());
     for (const auto& e : pyramid_entries_) {
         f.d(e.price); f.i(e.time); f.d(e.qty); f.s(e.entry_id);
         f.i(static_cast<int64_t>(e.entry_bar_index));
+        f.s(e.entry_comment);
+        f.d(e.max_runup); f.d(e.max_drawdown);
+        f.b(e.skip_entry_bar_high); f.b(e.skip_entry_bar_low);
+        f.b(e.market_pyramid_add);
+        f.d(e.entry_path_position);
+        f.d(e.entry_commission_account);
         // Physical-lot provenance (task-7 carried ruling): bracket
         // ownership and same-id replacement rules match lots by the
         // incarnation of the PendingOrder that filled them, not by entry_id.
         f.u(e.entry_incarnation);
-        // This physical-lot flag selects a future opening money event.
+        f.b(e.bracket_slot_shadowed);
+        f.b(e.ordinary_market_open);
         f.b(e.pooc_terminal_market_entry);
+        f.b(e.ordinary_stop_open);
     }
 
     // cycle_filled_entry_ids_ is std::set<string>: already ordered.

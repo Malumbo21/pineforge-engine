@@ -101,8 +101,8 @@ public:
         entry.entry_commission_account = 0;
         entry.pooc_terminal_market_entry = true;
         pyramid_entries_.push_back(entry);
-        opening_affordability_pending_ = opening_affordability_eligible_ = true;
-        opening_affordability_raw_fill_base_ = 1.13593;
+        opening_obligations_.replace(broker::OpeningReceipt::check(
+                {position_cycle_seq_, broker_fill_event_seq_, 0, bar_index_, current_bar_.timestamp}, 1.13593));
         process_margin_call(current_bar_);
     }
 };

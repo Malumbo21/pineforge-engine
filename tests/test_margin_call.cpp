@@ -77,15 +77,30 @@ public:
     int exit_bar(int i) const { return closed_trade_exit_bar_index(i); }
     double position_size() const { return signed_position_size(); }
     double liq_price() const { return margin_liquidation_price(); }
-    bool opening_pending() const { return opening_affordability_pending_; }
-    bool opening_eligible() const { return opening_affordability_eligible_; }
+    bool opening_pending() const { return opening_obligations_.pending(); }
+    bool opening_eligible() const { return opening_obligations_.actionable(); }
     bool opening_default_short_reversal() const {
-        return close_then_short_opening_requires_adverse_retry_;
+        return opening_obligations_.requires_adverse_pass();
     }
     double opening_raw_base() const {
-        return opening_affordability_raw_fill_base_;
+        return opening_obligations_.raw_fill_base();
     }
     int live_entry_count() const { return position_entry_count_; }
+
+protected:
+    void seed_opening_check(double raw_base,
+                           broker::OpeningContinuation continuation) {
+        const uint64_t incarnation = pyramid_entries_.empty()
+            ? 0 : pyramid_entries_.back().entry_incarnation;
+        opening_obligations_.replace(broker::OpeningReceipt::check(
+            {position_cycle_seq_, broker_fill_event_seq_, incarnation,
+             bar_index_, current_bar_.timestamp}, raw_base, continuation));
+    }
+
+    bool opening_owner_matches_position() const {
+        const auto& receipt = opening_obligations_.peek();
+        return receipt && receipt->owner().positionCycle == position_cycle_seq_;
+    }
 };
 
 // ---- A: 100%-equity short force-liquidated by a rising market --------------
@@ -615,9 +630,9 @@ public:
             // The next-open fill precedes this callback. Prove this fixture
             // actually reaches the opening-affordability branch before its
             // one-shot event is consumed at bar end.
-            saw_actionable_opening_event = opening_affordability_pending_
-                && opening_affordability_eligible_
-                && std::isfinite(opening_affordability_raw_fill_base_);
+            saw_actionable_opening_event = opening_obligations_.pending()
+                && opening_obligations_.actionable()
+                && std::isfinite(opening_obligations_.raw_fill_base());
         }
     }
 };
@@ -1525,9 +1540,9 @@ public:
                     && near(position_qty_, 2.0)
                     && !pyramid_entries_.empty()
                     && near(pyramid_entries_.back().price, 110.0);
-                widened_event = opening_affordability_pending_
-                    || opening_affordability_eligible_
-                    || std::isfinite(opening_affordability_raw_fill_base_);
+                widened_event = opening_obligations_.pending()
+                    || opening_obligations_.actionable()
+                    || std::isfinite(opening_obligations_.raw_fill_base());
             }
             return;
         }
@@ -1548,9 +1563,9 @@ public:
                 break;
         }
         process_pending_orders(current_bar_);
-        widened_event = opening_affordability_pending_
-            || opening_affordability_eligible_
-            || std::isfinite(opening_affordability_raw_fill_base_);
+        widened_event = opening_obligations_.pending()
+            || opening_obligations_.actionable()
+            || std::isfinite(opening_obligations_.raw_fill_base());
     }
 
 private:
@@ -1608,11 +1623,11 @@ public:
             strategy_close("Long");
             strategy_entry("Short", false, kNaN, kNaN, kNaN);
         } else if (bar_index_ == 2) {
-            captured_short_event = opening_affordability_pending_
-                && opening_affordability_eligible_
-                && close_then_short_opening_requires_adverse_retry_
-                && commissioned_all_in_market_short_lifecycle_
-                && near(opening_affordability_raw_fill_base_, 1798.09);
+            captured_short_event = opening_obligations_.pending()
+                && opening_obligations_.actionable()
+                && opening_obligations_.requires_adverse_pass()
+                && opening_owner_matches_position()
+                && near(opening_obligations_.raw_fill_base(), 1798.09);
         }
     }
 
@@ -1694,9 +1709,9 @@ public:
                 ? frozen_default_market_qty(/*is_buy=*/true) : kNaN;
             strategy_entry("Long", true, kNaN, kNaN, qty);
         } else if (bar_index_ == 2) {
-            captured = opening_affordability_pending_
-                && opening_affordability_eligible_
-                && commissioned_all_in_market_long_opening_affordability_
+            captured = opening_obligations_.pending()
+                && opening_obligations_.actionable()
+                && opening_owner_matches_position()
                 && position_side_ == PositionSide::LONG;
         }
     }
@@ -1707,9 +1722,9 @@ private:
     bool explicit_qty_;
 };
 
-// The commissioned-default-long PROVENANCE BIT is still scoped to an
-// omitted-quantity entry, but it no longer gates the floor-zero lot: both
-// shapes reach the same broker discontinuity and both close one contract.
+// Omitted and explicit quantities both create a live opening check and reach
+// the same floor-zero discontinuity. No obsolete commissioned-shape tag is
+// needed to distinguish their identical one-contract liquidation outcome.
 static void test_commissioned_close_then_long_floor_zero_scope() {
     std::printf("test_commissioned_close_then_long_floor_zero_scope\n");
     std::vector<Bar> bars = {
@@ -1723,14 +1738,14 @@ static void test_commissioned_close_then_long_floor_zero_scope() {
     explicit_control.run(bars.data(), static_cast<int>(bars.size()));
 
     CHECK(omitted.captured);
-    CHECK(!explicit_control.captured);
+    CHECK(explicit_control.captured);
     CHECK(omitted.trade_count() == 2);  // short close + long margin trim
     CHECK(margin_call_rows(omitted) == 1);
     CHECK(omitted.exit_comment(1) == std::string("Margin call"));
     CHECK(near(omitted.entry_price(1), 2967.80));
     CHECK(near(omitted.exit_price(1), 2967.80));
     CHECK(near(omitted.trade_size(1), 1.0, 1e-9));
-    // Same discontinuity, same lot: only the provenance bit differs.
+    // Same discontinuity and lot under the independently sized explicit call.
     CHECK(explicit_control.trade_count() == 2);
     CHECK(margin_call_rows(explicit_control) == 1);
     CHECK(near(explicit_control.trade_size(1), 1.0, 1e-9));
@@ -1739,8 +1754,8 @@ static void test_commissioned_close_then_long_floor_zero_scope() {
 // After the close-then-short fill-price trim, its bounded ordinary adverse
 // retry can require a positive restore quantity smaller than one configured
 // lot. TV's source-bound tape closes one whole contract at that exact
-// discontinuity, whether or not the position carries entry-lifecycle
-// provenance — the two arms below are now expected to agree.
+// discontinuity. The former tagged/untagged arms below are retained as
+// identical-input repeat controls after removal of the unused lifecycle bit.
 class DefaultShortLaterFloorZeroProbe : public MCEngine {
 public:
     explicit DefaultShortLaterFloorZeroProbe(bool full_residual = false) {
@@ -1778,30 +1793,30 @@ public:
 
     void on_bar(const Bar&) override {}
 
-    void trigger(bool carry_s_provenance) {
+    void trigger() {
         current_bar_ = mk_bar(
             2000, 1800.00, 1801.26, 1799.50, 1800.50, 1.0);
         bar_index_ = 1;
-        commissioned_all_in_market_short_lifecycle_ = carry_s_provenance;
         process_margin_call(current_bar_);
     }
 
-    bool lifecycle_active() const {
-        return commissioned_all_in_market_short_lifecycle_;
+    bool has_live_short_position() const {
+        return position_side_ == PositionSide::SHORT
+            && position_cycle_seq_ != 0 && position_qty_ > 0.0;
     }
 };
 
 static void test_default_short_lifecycle_floor_zero_one_contract() {
     std::printf("test_default_short_lifecycle_floor_zero_one_contract\n");
     DefaultShortLaterFloorZeroProbe top_level;
-    top_level.trigger(/*carry_s_provenance=*/false);
+    top_level.trigger();
     DefaultShortLaterFloorZeroProbe one_contract;
-    one_contract.trigger(/*carry_s_provenance=*/true);
+    one_contract.trigger();
     DefaultShortLaterFloorZeroProbe full_residual(/*full_residual=*/true);
-    full_residual.trigger(/*carry_s_provenance=*/true);
+    full_residual.trigger();
 
-    // A normal short without default-opening lifecycle provenance gets the
-    // SAME one whole contract: the fallback is not lifecycle-conditioned.
+    // Retain both former provenance arms as same-economics repeat controls.
+    // The fallback is not conditioned on an entry-lifecycle label.
     CHECK(top_level.trade_count() == 1);
     CHECK(near(top_level.trade_size(0), 1.0, 1e-9));
     CHECK(near(top_level.position_size(), -2.6930, 1e-9));
@@ -1811,7 +1826,8 @@ static void test_default_short_lifecycle_floor_zero_one_contract() {
     CHECK(near(one_contract.exit_price(0), 1801.26));
     CHECK(near(one_contract.trade_size(0), 1.0, 1e-9));
     CHECK(near(one_contract.position_size(), -2.6930, 1e-9));
-    CHECK(one_contract.lifecycle_active());
+    CHECK(one_contract.has_live_short_position());
+    CHECK(!one_contract.opening_pending());
 
     // The opt-in whole-residual interpretation no longer overrides the
     // settled floor-zero slice: when the one-contract fallback is
@@ -1822,15 +1838,16 @@ static void test_default_short_lifecycle_floor_zero_one_contract() {
     CHECK(near(full_residual.exit_price(0), 1801.26));
     CHECK(near(full_residual.trade_size(0), 1.0, 1e-9));
     CHECK(near(full_residual.position_size(), -2.6930, 1e-9));
-    CHECK(full_residual.lifecycle_active());
+    CHECK(full_residual.has_live_short_position());
+    CHECK(!full_residual.opening_pending());
 }
 
-// The commissioned lifecycle covers the opening checkpoint too. The positive
-// restore quantity below is half one lot: without lifecycle provenance the
-// event is a dust no-op; with it TV closes one contract at the raw fill base.
+// A positive opening restore below one lot closes one contract at the raw
+// fill base. The old lifecycle-tag variants are identical economic controls;
+// preserve both executions without seeding an unused Boolean.
 class DefaultShortOpeningFloorZeroProbe : public MCEngine {
 public:
-    explicit DefaultShortOpeningFloorZeroProbe(bool carry_lifecycle) {
+    DefaultShortOpeningFloorZeroProbe() {
         initial_capital_ = 1000.0;
         commission_type_ = CommissionType::PERCENT;
         commission_value_ = 0.05;
@@ -1853,11 +1870,8 @@ public:
         pyramid_entries_.back().entry_incarnation = 1;
         snapshot_entry_commission(pyramid_entries_.back());
         id_unclosed_qty_["S"] = qty;
-        opening_affordability_pending_ = true;
-        opening_affordability_eligible_ = true;
-        close_then_short_opening_requires_adverse_retry_ = true;
-        opening_affordability_raw_fill_base_ = entry;
-        commissioned_all_in_market_short_lifecycle_ = carry_lifecycle;
+        seed_opening_check(entry,
+            broker::OpeningContinuation::RemainingAdversePath);
     }
 
     void on_bar(const Bar&) override {}
@@ -1871,24 +1885,26 @@ public:
 
 static void test_default_short_opening_floor_zero_one_contract() {
     std::printf("test_default_short_opening_floor_zero_one_contract\n");
-    DefaultShortOpeningFloorZeroProbe baseline(/*carry_lifecycle=*/false);
+    DefaultShortOpeningFloorZeroProbe baseline;
     baseline.trigger();
-    DefaultShortOpeningFloorZeroProbe enabled(/*carry_lifecycle=*/true);
-    enabled.trigger();
+    DefaultShortOpeningFloorZeroProbe repeated;
+    repeated.trigger();
 
     // Fee-net equity is 1000 + .495 - .5 = 999.995, so the positive 0.00005
     // restore amount floors below one 0.0001 lot. The opening checkpoint acts
-    // on it identically with or without lifecycle provenance.
+    // on it identically in the two preserved repeat controls.
     CHECK(baseline.trade_count() == 1);
     CHECK(baseline.exit_comment(0) == std::string("Margin call"));
     CHECK(near(baseline.trade_size(0), 1.0, 1e-9));
     CHECK(near(baseline.position_size(), -9.0, 1e-9));
-    CHECK(enabled.trade_count() == 1);
-    CHECK(enabled.exit_comment(0) == std::string("Margin call"));
-    CHECK(near(enabled.entry_price(0), 100.0));
-    CHECK(near(enabled.exit_price(0), 100.0));
-    CHECK(near(enabled.trade_size(0), 1.0, 1e-9));
-    CHECK(near(enabled.position_size(), -9.0, 1e-9));
+    CHECK(repeated.trade_count() == 1);
+    CHECK(repeated.exit_comment(0) == std::string("Margin call"));
+    CHECK(near(repeated.entry_price(0), 100.0));
+    CHECK(near(repeated.exit_price(0), 100.0));
+    CHECK(near(repeated.trade_size(0), 1.0, 1e-9));
+    CHECK(near(repeated.position_size(), -9.0, 1e-9));
+    CHECK(!baseline.opening_pending());
+    CHECK(!repeated.opening_pending());
 }
 
 // A close-then-short fill-price opening check can be affordable while the same
@@ -1921,11 +1937,8 @@ public:
         pyramid_entries_.back().entry_incarnation = 1;
         snapshot_entry_commission(pyramid_entries_.back());
         id_unclosed_qty_["S"] = qty;
-        opening_affordability_pending_ = true;
-        opening_affordability_eligible_ = true;
-        close_then_short_opening_requires_adverse_retry_ = true;
-        opening_affordability_raw_fill_base_ = entry;
-        commissioned_all_in_market_short_lifecycle_ = true;
+        seed_opening_check(entry,
+            broker::OpeningContinuation::RemainingAdversePath);
     }
 
     void on_bar(const Bar&) override {}
@@ -1934,10 +1947,10 @@ public:
         current_bar_ = mk_bar(2000, 100.0, 105.0, 99.0, 100.0, 1.0);
         bar_index_ = 1;
         process_margin_call(current_bar_);
-        event_cleared = !opening_affordability_pending_
-            && !opening_affordability_eligible_
-            && !close_then_short_opening_requires_adverse_retry_
-            && std::isnan(opening_affordability_raw_fill_base_);
+        event_cleared = !opening_obligations_.pending()
+            && !opening_obligations_.actionable()
+            && !opening_obligations_.requires_adverse_pass()
+            && std::isnan(opening_obligations_.raw_fill_base());
     }
 
     bool event_cleared = false;
@@ -1962,13 +1975,12 @@ static void test_default_short_affordable_opening_retries_adverse_once() {
     CHECK(probe.event_cleared);
 }
 
-// A default-sized commissioned short opened from true flat has its own
-// lifecycle provenance. It must not inherit the prior close-then-short token,
-// and an ordinary add or fresh position will clear it through the shared
-// lifecycle reset sites.
-class CommissionedDefaultFlatShortLifecycleProbe : public MCEngine {
+// True-flat default shorts queue either a check (paid commission) or an
+// exemption (zero commission). Both receipts belong to the actual position,
+// and neither requires the direct-reversal adverse continuation.
+class DefaultFlatShortOpeningDecisionProbe : public MCEngine {
 public:
-    explicit CommissionedDefaultFlatShortLifecycleProbe(bool commissioned) {
+    explicit DefaultFlatShortOpeningDecisionProbe(bool commissioned) {
         initial_capital_ = 1000.0;
         default_qty_type_ = QtyType::PERCENT_OF_EQUITY;
         default_qty_value_ = 100.0;
@@ -1983,30 +1995,39 @@ public:
         if (bar_index_ == 0) {
             strategy_entry("Short", false, kNaN, kNaN, kNaN);
         } else if (bar_index_ == 1) {
-            captured = position_side_ == PositionSide::SHORT
-                && commissioned_all_in_market_short_lifecycle_;
+            captured_pending = position_side_ == PositionSide::SHORT
+                && opening_obligations_.pending()
+                && opening_owner_matches_position();
+            captured = captured_pending && opening_obligations_.actionable();
+            captured_adverse = opening_obligations_.requires_adverse_pass();
         }
     }
 
     bool captured = false;
+    bool captured_pending = false;
+    bool captured_adverse = false;
 };
 
-static void test_commissioned_default_flat_short_lifecycle_tag() {
-    std::printf("test_commissioned_default_flat_short_lifecycle_tag\n");
+static void test_default_flat_short_opening_decision_tracks_commission() {
+    std::printf("test_default_flat_short_opening_decision_tracks_commission\n");
     std::vector<Bar> bars = {
         mk_bar(1000, 100.0, 100.0, 100.0, 100.0, 1.0),
         mk_bar(2000, 100.0, 100.0, 100.0, 100.0, 1.0),
         mk_bar(3000, 100.0, 100.0, 100.0, 100.0, 1.0),
     };
-    CommissionedDefaultFlatShortLifecycleProbe uncommissioned(
+    DefaultFlatShortOpeningDecisionProbe uncommissioned(
         /*commissioned=*/false);
     uncommissioned.run(bars.data(), static_cast<int>(bars.size()));
-    CommissionedDefaultFlatShortLifecycleProbe commissioned(
+    DefaultFlatShortOpeningDecisionProbe commissioned(
         /*commissioned=*/true);
     commissioned.run(bars.data(), static_cast<int>(bars.size()));
 
     CHECK(!uncommissioned.captured);
     CHECK(commissioned.captured);
+    CHECK(uncommissioned.captured_pending);
+    CHECK(commissioned.captured_pending);
+    CHECK(!uncommissioned.captured_adverse);
+    CHECK(!commissioned.captured_adverse);
     CHECK(uncommissioned.trade_count() == 0);
     CHECK(commissioned.trade_count() == 0);
     CHECK(uncommissioned.position_size() < -1e-9);
@@ -2019,7 +2040,7 @@ static void test_commissioned_default_flat_short_lifecycle_tag() {
 // fallback to the entire 0.3383-contract residual.
 class DefaultFlatShortFloorZeroProbe : public MCEngine {
 public:
-    explicit DefaultFlatShortFloorZeroProbe(bool carry_flat_lifecycle) {
+    DefaultFlatShortFloorZeroProbe() {
         initial_capital_ = 10000.0;
         default_qty_type_ = QtyType::PERCENT_OF_EQUITY;
         default_qty_value_ = 100.0;
@@ -2045,7 +2066,6 @@ public:
         pyramid_entries_.back().entry_incarnation = 1;
         snapshot_entry_commission(pyramid_entries_.back());
         id_unclosed_qty_["Short"] = qty;
-        commissioned_all_in_market_short_lifecycle_ = carry_flat_lifecycle;
     }
 
     void on_bar(const Bar&) override {}
@@ -2060,35 +2080,32 @@ public:
 
 static void test_default_flat_short_floor_zero_caps_to_residual() {
     std::printf("test_default_flat_short_floor_zero_caps_to_residual\n");
-    DefaultFlatShortFloorZeroProbe baseline(
-        /*carry_flat_lifecycle=*/false);
+    DefaultFlatShortFloorZeroProbe baseline;
     baseline.trigger();
-    DefaultFlatShortFloorZeroProbe enabled(
-        /*carry_flat_lifecycle=*/true);
-    enabled.trigger();
+    DefaultFlatShortFloorZeroProbe repeated;
+    repeated.trigger();
 
     // 0.3383 contracts is below one, so the min(1.0, qty) cap closes the whole
-    // residual on both arms.
+    // residual in both former lifecycle-tag arms, now repeat controls.
     CHECK(baseline.trade_count() == 1);
     CHECK(near(baseline.exit_price(0), 3735.52));
     CHECK(near(baseline.trade_size(0), 0.3383, 1e-9));
     CHECK(near(baseline.position_size(), 0.0, 1e-9));
 
-    CHECK(enabled.trade_count() == 1);
-    CHECK(enabled.exit_comment(0) == std::string("Margin call"));
-    CHECK(near(enabled.entry_price(0), 3734.88));
-    CHECK(near(enabled.exit_price(0), 3735.52));
-    CHECK(near(enabled.trade_size(0), 0.3383, 1e-9));
-    CHECK(near(enabled.position_size(), 0.0, 1e-9));
+    CHECK(repeated.trade_count() == 1);
+    CHECK(repeated.exit_comment(0) == std::string("Margin call"));
+    CHECK(near(repeated.entry_price(0), 3734.88));
+    CHECK(near(repeated.exit_price(0), 3735.52));
+    CHECK(near(repeated.trade_size(0), 0.3383, 1e-9));
+    CHECK(near(repeated.position_size(), 0.0, 1e-9));
 }
 
-// A commissioned omitted-qty 100%-equity SHORT acquires lifecycle provenance
-// from its real entry shape. A user-requested partial exit changes that shape
-// and must invalidate the one-contract floor-zero provenance. Broker margin
-// reductions are covered separately above and intentionally preserve it.
-class CommissionedDefaultShortPartialLifecycleProbe : public MCEngine {
+// A script partial and a later margin partial preserve the physical short's
+// position identity while changing its quantity. The later floor-zero rule
+// does not depend on the removed commissioned-lifecycle label.
+class CommissionedDefaultShortPartialOwnerProbe : public MCEngine {
 public:
-    CommissionedDefaultShortPartialLifecycleProbe() {
+    CommissionedDefaultShortPartialOwnerProbe() {
         initial_capital_ = 1000.0;
         default_qty_type_ = QtyType::PERCENT_OF_EQUITY;
         default_qty_value_ = 100.0;
@@ -2104,16 +2121,21 @@ public:
         if (bar_index_ == 0) {
             strategy_entry("Short", false, kNaN, kNaN, kNaN);
         } else if (bar_index_ == 1) {
-            lifecycle_after_open =
-                commissioned_all_in_market_short_lifecycle_;
+            opening_after_open = opening_obligations_.actionable()
+                && opening_owner_matches_position();
+            original_cycle_ = position_cycle_seq_;
+            original_incarnation_ = pyramid_entries_.empty()
+                ? 0 : pyramid_entries_.front().entry_incarnation;
             strategy_close(
                 "Short", "partial lifecycle close", /*qty=*/1.0,
                 /*qty_percent=*/kNaN, /*immediately=*/true);
             qty_after_partial = position_qty_;
-            lifecycle_after_partial =
+            owner_after_partial =
                 position_side_ == PositionSide::SHORT
                 && position_qty_ > 1.0
-                && commissioned_all_in_market_short_lifecycle_;
+                && position_cycle_seq_ == original_cycle_
+                && pyramid_entries_.size() == 1
+                && pyramid_entries_.front().entry_incarnation == original_incarnation_;
         }
     }
 
@@ -2129,28 +2151,36 @@ public:
             3000, 100.0, adverse, 99.0, 100.0, 1.0);
         bar_index_ = 2;
         process_margin_call(current_bar_);
-        lifecycle_after_margin_partial =
-            commissioned_all_in_market_short_lifecycle_;
+        owner_after_margin_partial = position_side_ == PositionSide::SHORT
+            && position_cycle_seq_ == original_cycle_
+            && pyramid_entries_.size() == 1
+            && pyramid_entries_.front().entry_incarnation == original_incarnation_;
+        opening_consumed = !opening_obligations_.pending();
     }
 
-    bool lifecycle_after_open = false;
-    bool lifecycle_after_partial = false;
-    bool lifecycle_after_margin_partial = false;
+    bool opening_after_open = false;
+    bool owner_after_partial = false;
+    bool owner_after_margin_partial = false;
+    bool opening_consumed = false;
     double qty_after_partial = 0.0;
+
+private:
+    int64_t original_cycle_ = 0;
+    uint64_t original_incarnation_ = 0;
 };
 
-static void test_user_partial_invalidates_commissioned_short_lifecycle() {
+static void test_short_partials_preserve_position_owner() {
     std::printf(
-        "test_user_partial_invalidates_commissioned_short_lifecycle\n");
+        "test_short_partials_preserve_position_owner\n");
     std::vector<Bar> bars = {
         mk_bar(1000, 100.0, 100.0, 100.0, 100.0, 1.0),
         mk_bar(2000, 100.0, 100.0, 100.0, 100.0, 1.0),
     };
-    CommissionedDefaultShortPartialLifecycleProbe probe;
+    CommissionedDefaultShortPartialOwnerProbe probe;
     probe.run(bars.data(), static_cast<int>(bars.size()));
 
-    CHECK(probe.lifecycle_after_open);
-    CHECK(!probe.lifecycle_after_partial);
+    CHECK(probe.opening_after_open);
+    CHECK(probe.owner_after_partial);
     CHECK(probe.trade_count() == 1);
     CHECK(near(probe.trade_size(0), 1.0, 1e-9));
     const double qty_before_margin = probe.qty_after_partial;
@@ -2159,21 +2189,20 @@ static void test_user_partial_invalidates_commissioned_short_lifecycle() {
     CHECK(probe.trade_count() == 2);
     CHECK(probe.exit_comment(1) == std::string("Margin call"));
     CHECK(near(probe.exit_price(1), 105.0));
-    // The invalidated lifecycle no longer changes the LOT (the fallback is
-    // unconditional); it is still asserted below as provenance state.
+    // The unchanged lot fallback depends on the actual budget, not a label.
     CHECK(near(probe.trade_size(1), 1.0, 1e-9));
     CHECK(near(probe.position_size(), -(qty_before_margin - 1.0), 1e-9));
-    CHECK(!probe.lifecycle_after_margin_partial);
+    CHECK(probe.owner_after_margin_partial);
+    CHECK(probe.opening_consumed);
 }
 
-// The scoped lifecycle belongs to one unmodified position cycle. A genuine
-// accepted add invalidates it, while a full close clears it through the shared
-// flat-position reset path.
-class CommissionedDefaultShortLifecycleMutationProbe : public MCEngine {
+// A genuine add replaces the opening obligation with its own committed-fill
+// receipt in the same position cycle. A full close invalidates the obligation.
+class CommissionedDefaultShortOpeningMutationProbe : public MCEngine {
 public:
     enum class Mutation { AcceptedAdd, FullClose };
 
-    explicit CommissionedDefaultShortLifecycleMutationProbe(Mutation mutation)
+    explicit CommissionedDefaultShortOpeningMutationProbe(Mutation mutation)
         : mutation_(mutation) {
         initial_capital_ = 1000.0;
         default_qty_type_ = QtyType::PERCENT_OF_EQUITY;
@@ -2191,8 +2220,12 @@ public:
         if (bar_index_ == 0) {
             strategy_entry("Short", false, kNaN, kNaN, kNaN);
         } else if (bar_index_ == 1) {
-            lifecycle_after_open =
-                commissioned_all_in_market_short_lifecycle_;
+            opening_after_open = opening_obligations_.actionable()
+                && opening_owner_matches_position();
+            original_cycle_ = position_cycle_seq_;
+            if (opening_obligations_.peek()) {
+                original_fill_ = opening_obligations_.peek()->owner().producerFill;
+            }
             if (mutation_ == Mutation::AcceptedAdd) {
                 strategy_entry("Add", false, kNaN, kNaN, /*qty=*/1.0);
             } else {
@@ -2200,28 +2233,36 @@ public:
                     "Short", "full lifecycle close", /*qty=*/kNaN,
                     /*qty_percent=*/kNaN, /*immediately=*/true);
                 full_close_cleared = position_side_ == PositionSide::FLAT
-                    && !commissioned_all_in_market_short_lifecycle_;
+                    && position_cycle_seq_ == 0
+                    && !opening_obligations_.pending();
             }
         } else if (bar_index_ == 2
                    && mutation_ == Mutation::AcceptedAdd) {
             add_filled = position_side_ == PositionSide::SHORT
                 && position_entry_count_ == 2;
-            accepted_add_cleared = add_filled
-                && !commissioned_all_in_market_short_lifecycle_;
+            accepted_add_replaced = add_filled
+                && position_cycle_seq_ == original_cycle_
+                && opening_obligations_.actionable()
+                && opening_owner_matches_position()
+                && opening_obligations_.peek()->owner().producerFill > original_fill_
+                && opening_obligations_.peek()->owner().orderIncarnation
+                    == pyramid_entries_.back().entry_incarnation;
         }
     }
 
-    bool lifecycle_after_open = false;
+    bool opening_after_open = false;
     bool add_filled = false;
-    bool accepted_add_cleared = false;
+    bool accepted_add_replaced = false;
     bool full_close_cleared = false;
 
 private:
     Mutation mutation_;
+    int64_t original_cycle_ = 0;
+    uint64_t original_fill_ = 0;
 };
 
-static void test_commissioned_default_short_lifecycle_mutations() {
-    std::printf("test_commissioned_default_short_lifecycle_mutations\n");
+static void test_short_add_replaces_obligation_and_full_close_invalidates() {
+    std::printf("test_short_add_replaces_obligation_and_full_close_invalidates\n");
     // Bar 1 closes at 90 so the explicit 1-lot add is affordable as held + add
     // (design-market-entry-affordability): the all-in short is in profit,
     // MTM ~1,099 >= (9.99 + 1) * 90. At the former close of 100 the all-in
@@ -2231,17 +2272,17 @@ static void test_commissioned_default_short_lifecycle_mutations() {
         mk_bar(2000, 100.0, 100.0,  90.0,  90.0, 1.0),
         mk_bar(3000,  90.0,  90.0,  90.0,  90.0, 1.0),
     };
-    CommissionedDefaultShortLifecycleMutationProbe add(
-        CommissionedDefaultShortLifecycleMutationProbe::Mutation::AcceptedAdd);
+    CommissionedDefaultShortOpeningMutationProbe add(
+        CommissionedDefaultShortOpeningMutationProbe::Mutation::AcceptedAdd);
     add.run(bars.data(), static_cast<int>(bars.size()));
-    CommissionedDefaultShortLifecycleMutationProbe close(
-        CommissionedDefaultShortLifecycleMutationProbe::Mutation::FullClose);
+    CommissionedDefaultShortOpeningMutationProbe close(
+        CommissionedDefaultShortOpeningMutationProbe::Mutation::FullClose);
     close.run(bars.data(), static_cast<int>(bars.size()));
 
-    CHECK(add.lifecycle_after_open);
+    CHECK(add.opening_after_open);
     CHECK(add.add_filled);
-    CHECK(add.accepted_add_cleared);
-    CHECK(close.lifecycle_after_open);
+    CHECK(add.accepted_add_replaced);
+    CHECK(close.opening_after_open);
     CHECK(close.full_close_cleared);
 }
 
@@ -2273,9 +2314,9 @@ public:
 
         strategy_entry("BASE", false, kNaN, kNaN, /*qty=*/2.0);
         process_pending_orders(current_bar_);
-        base_event_captured = opening_affordability_pending_
-            && opening_affordability_eligible_
-            && near(opening_affordability_raw_fill_base_, 100.0);
+        base_event_captured = opening_obligations_.pending()
+            && opening_obligations_.actionable()
+            && near(opening_obligations_.raw_fill_base(), 100.0);
 
         if (later_fill_ == LaterFill::PricedEntry) {
             strategy_entry("ADD", false, /*limit=*/110.0, kNaN,
@@ -2291,9 +2332,9 @@ public:
             && near(position_qty_, 4.0)
             && pyramid_entries_.size() == 2
             && near(pyramid_entries_.back().price, 110.0);
-        stale_event_cleared = !opening_affordability_pending_
-            && !opening_affordability_eligible_
-            && std::isnan(opening_affordability_raw_fill_base_);
+        stale_event_cleared = !opening_obligations_.pending()
+            && !opening_obligations_.actionable()
+            && std::isnan(opening_obligations_.raw_fill_base());
     }
 
 private:
@@ -2360,18 +2401,18 @@ public:
 
         strategy_entry("OPEN", true, kNaN, kNaN, /*qty=*/10.0);
         process_pending_orders(current_bar_);
-        captured_after_open = opening_affordability_pending_
-            && opening_affordability_eligible_
-            && near(opening_affordability_raw_fill_base_, 100.0);
+        captured_after_open = opening_obligations_.pending()
+            && opening_obligations_.actionable()
+            && near(opening_obligations_.raw_fill_base(), 100.0);
 
         // A priced explicit entry bypasses the market-only signal admission
         // gate and is a genuine accepted append (10 -> 25), not a rejected
         // over-allocation attempt. It is immediately marketable at this close.
         strategy_entry("ADD", true, /*limit=*/100.0, kNaN, /*qty=*/15.0);
         process_pending_orders(current_bar_);
-        eligible_after_add = opening_affordability_pending_
-            && opening_affordability_eligible_
-            && near(opening_affordability_raw_fill_base_, 100.0);
+        eligible_after_add = opening_obligations_.pending()
+            && opening_obligations_.actionable()
+            && near(opening_obligations_.raw_fill_base(), 100.0);
 
         // FIFO removes the opening lot, leaving only ADD as a live pyramid
         // leg. This drain is a CLOSE-PATH retirement (strategy.close), so TV
@@ -2382,9 +2423,9 @@ public:
                        /*qty_percent=*/kNaN, /*immediately=*/true);
         count_after_fifo = position_entry_count_;
         legs_after_fifo = (int)pyramid_entries_.size();
-        eligible_after_fifo = opening_affordability_pending_
-            && opening_affordability_eligible_
-            && near(opening_affordability_raw_fill_base_, 100.0);
+        eligible_after_fifo = opening_obligations_.pending()
+            && opening_obligations_.actionable()
+            && near(opening_obligations_.raw_fill_base(), 100.0);
     }
 };
 
@@ -2440,9 +2481,9 @@ public:
         process_pending_orders(current_bar_);
         strategy_entry("REJECTED_ADD", true, kNaN, kNaN, /*qty=*/1.0);
         process_pending_orders(current_bar_);  // rejected by pyramiding=1
-        preserved_after_rejection = opening_affordability_pending_
-            && opening_affordability_eligible_
-            && near(opening_affordability_raw_fill_base_, 100.0)
+        preserved_after_rejection = opening_obligations_.pending()
+            && opening_obligations_.actionable()
+            && near(opening_obligations_.raw_fill_base(), 100.0)
             && position_entry_count_ == 1
             && near(position_qty_, 10.0);
     }
@@ -2495,9 +2536,9 @@ public:
         // zero-qty bookkeeping lot but live position quantity stays exactly 10.
         strategy_entry("ZERO_ADD", true, kNaN, kNaN, /*qty=*/0.5);
         process_pending_orders(current_bar_);
-        preserved_after_zero_add = opening_affordability_pending_
-            && opening_affordability_eligible_
-            && near(opening_affordability_raw_fill_base_, 100.0)
+        preserved_after_zero_add = opening_obligations_.pending()
+            && opening_obligations_.actionable()
+            && near(opening_obligations_.raw_fill_base(), 100.0)
             && near(position_qty_, 10.0);
     }
 };
@@ -2544,8 +2585,8 @@ public:
         process_pending_orders(current_bar_);
         strategy_entry("ZERO_ADD", true, kNaN, kNaN, /*qty=*/0.5);
         process_pending_orders(current_bar_);
-        preserved_after_zero_add = opening_affordability_pending_
-            && opening_affordability_eligible_
+        preserved_after_zero_add = opening_obligations_.pending()
+            && opening_obligations_.actionable()
             && near(position_qty_, 10.0);
     }
 };
@@ -2596,26 +2637,26 @@ public:
         if (bar_index_ != 0) return;
         strategy_entry("OPEN", true, kNaN, kNaN, /*qty=*/10.0);
         process_pending_orders(current_bar_);
-        first_captured = opening_affordability_pending_
-            && opening_affordability_eligible_;
+        first_captured = opening_obligations_.pending()
+            && opening_obligations_.actionable();
 
         strategy_order("ADD", true, /*qty=*/15.0);
         process_pending_orders(current_bar_);
-        add_eligible = opening_affordability_pending_
-            && opening_affordability_eligible_
-            && near(opening_affordability_raw_fill_base_, 100.0);
+        add_eligible = opening_obligations_.pending()
+            && opening_obligations_.actionable()
+            && near(opening_obligations_.raw_fill_base(), 100.0);
 
         strategy_close_all();
         flat_cleared = position_side_ == PositionSide::FLAT
-            && !opening_affordability_pending_
-            && !opening_affordability_eligible_
-            && std::isnan(opening_affordability_raw_fill_base_);
+            && !opening_obligations_.pending()
+            && !opening_obligations_.actionable()
+            && std::isnan(opening_obligations_.raw_fill_base());
 
         strategy_order("RAW_FRESH", true, /*qty=*/12.0);
         process_pending_orders(current_bar_);
-        raw_fresh_captured = opening_affordability_pending_
-            && opening_affordability_eligible_
-            && near(opening_affordability_raw_fill_base_, 100.0);
+        raw_fresh_captured = opening_obligations_.pending()
+            && opening_obligations_.actionable()
+            && near(opening_obligations_.raw_fill_base(), 100.0);
     }
 };
 
@@ -2862,9 +2903,7 @@ public:
         pyramid_entries_.back().entry_incarnation = 1;
         snapshot_entry_commission(pyramid_entries_.back());
         id_unclosed_qty_["L"] = qty;
-        opening_affordability_pending_ = true;
-        opening_affordability_eligible_ = true;
-        opening_affordability_raw_fill_base_ = entry;
+        seed_opening_check(entry, broker::OpeningContinuation::None);
     }
 
     void on_bar(const Bar&) override {}
@@ -3086,9 +3125,9 @@ public:
     void on_bar(const Bar& /*bar*/) override {
         if (bar_index_ != 0) return;
         saw_clean_run_start = position_side_ == PositionSide::FLAT
-            && !opening_affordability_pending_
-            && !opening_affordability_eligible_
-            && std::isnan(opening_affordability_raw_fill_base_);
+            && !opening_obligations_.pending()
+            && !opening_obligations_.actionable()
+            && std::isnan(opening_obligations_.raw_fill_base());
         if (second_mode) {
             strategy_order("RAW", true, /*qty=*/10.0);
         } else {
@@ -3213,10 +3252,10 @@ int main() {
     test_default_short_lifecycle_floor_zero_one_contract();
     test_default_short_opening_floor_zero_one_contract();
     test_default_short_affordable_opening_retries_adverse_once();
-    test_commissioned_default_flat_short_lifecycle_tag();
+    test_default_flat_short_opening_decision_tracks_commission();
     test_default_flat_short_floor_zero_caps_to_residual();
-    test_user_partial_invalidates_commissioned_short_lifecycle();
-    test_commissioned_default_short_lifecycle_mutations();
+    test_short_partials_preserve_position_owner();
+    test_short_add_replaces_obligation_and_full_close_invalidates();
     test_priced_short_add_invalidates_scoped_opening_event();
     test_raw_short_add_invalidates_scoped_opening_event();
     test_accepted_add_fifo_keeps_add_affordability_event();
