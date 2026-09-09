@@ -26,6 +26,7 @@ set(TEST_SOURCES
     test_recompute
     test_str_utils
     test_ta
+    test_mfi_source_direction
     test_ta_indicators_extras
     test_kc
     test_ta_rma_warmup
