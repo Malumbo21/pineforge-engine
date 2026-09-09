@@ -104,6 +104,8 @@ int main(void) {
 
 Every PineForge-compiled strategy `.so` exports this same ABI — write the harness once, swap strategies forever. Worked examples for [C](https://cdocs.pineforge.dev/examples_c.html), [Python sweeps](https://cdocs.pineforge.dev/examples_python_sweep.html), [Rust](https://cdocs.pineforge.dev/examples_rust.html), [multi-strategy](https://cdocs.pineforge.dev/examples_multi.html) and [magnifier A/B](https://cdocs.pineforge.dev/examples_magnifier.html) are in the docs.
 
+Lifecycle-aware compiled modules reset Pine variables, indicator/history buffers and the broker book before each batch run or `strategy_stream_begin` warmup. Inputs and runtime settings persist until changed; ticks within a stream continue its state. Regenerate and rebuild existing modules with current codegen and matching engine headers/archive to obtain this behavior; the [internal C++ rebuild boundary](docs/pages/abi-stability.md) is checked at compile/link time.
+
 ---
 
 ## Validation scoreboard
