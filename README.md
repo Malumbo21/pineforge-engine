@@ -108,6 +108,21 @@ Lifecycle-aware compiled modules reset Pine variables, indicator/history buffers
 
 ---
 
+## Native live runner
+
+The optional C++17 `pineforge-live` executable uses this engine's native
+warmup-to-stream lifecycle. It accepts tick or confirmed 1m OHLCV input,
+supports user-defined C++ parsers for broker/provider messages, and commits
+inputs plus order-action webhooks to a durable SQLite ledger. Hand-written
+C++ and codegen-generated strategies use the same strategy interface.
+
+Build with `-DPINEFORGE_BUILD_LIVE_RUNNER=ON`; the option is off by default,
+so core-only users do not acquire SQLite/libcurl/OpenSSL dependencies. See
+the [native runner guide](runner/README.md) for feed modes, symbol metadata,
+parser ABI, recovery and execution limitations. The existing validation
+scoreboard below describes batch backtests; it does not certify new native
+live behavior or real broker fills.
+
 ## Validation scoreboard
 
 **Round 39 · 2026-09-09:** **4,182 excellent / 8 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
@@ -226,6 +241,7 @@ TradingView ties some day-boundary logic (intraday order caps, session rollovers
 | `strategy_set_trace_enabled` | Toggle per-bar trace recording |
 | `strategy_set_trade_start_time` | Suppress historical order placement before a time |
 | `strategy_stream_begin` / `_push_tick` / `_push_ticks` / `_advance_time` / `_end` / `_fill_report` | Warm on OHLCV, then run realtime on ordered trades |
+| `strategy_stream_api_version` / `_push_bar` / `_order_actions_len` / `_order_action_get` / `_order_actions_clear` / `_state_hash` | Native live extension v1: confirmed input bars, physical fill events and observable replay state |
 | `strategy_set_chart_timezone` / `strategy_set_syminfo_timezone` / `strategy_set_syminfo_session` | Chart and exchange time |
 | `strategy_set_syminfo_mintick` / `_pointvalue` / `_metadata` / `_type` / `_string` | Symbol tick size, point value, numeric metadata, instrument class, string members |
 | `strategy_set_native_security_feed` / `strategy_set_aux_security_feed` | Feed `request.security()` from a native higher-timeframe series / an auxiliary bar-aligned feed |

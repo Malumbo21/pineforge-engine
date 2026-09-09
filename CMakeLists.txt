@@ -39,6 +39,8 @@ option(PINEFORGE_BUILD_CORPUS_STRATEGIES
     "Build a strategy.so per .pine in corpus/ from its generated.cpp" OFF)
 option(PINEFORGE_BUILD_TUTORIAL
     "Build the tutorial MACD strategy.so under tutorial/" ON)
+option(PINEFORGE_BUILD_LIVE_RUNNER
+    "Build the native live runner (requires SQLite3, libcurl and OpenSSL)" OFF)
 option(PINEFORGE_ENABLE_COVERAGE
     "Instrument the runtime + tests for source-level coverage (Clang or GCC)" OFF)
 # Opt-in AddressSanitizer + UndefinedBehaviorSanitizer. Off by default
@@ -310,6 +312,10 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/PineForge
 )
 
+if(PINEFORGE_BUILD_LIVE_RUNNER)
+    add_subdirectory(runner)
+endif()
+
 # === Summary ===========================================================
 message(STATUS "")
 message(STATUS "PineForge ${PINEFORGE_VERSION_FULL}")
@@ -319,5 +325,6 @@ message(STATUS "  install prefix:    ${CMAKE_INSTALL_PREFIX}")
 message(STATUS "  build tests:       ${PINEFORGE_BUILD_TESTS}")
 message(STATUS "  build tutorial:    ${PINEFORGE_BUILD_TUTORIAL}")
 message(STATUS "  build corpus:      ${PINEFORGE_BUILD_CORPUS_STRATEGIES}")
+message(STATUS "  build live runner: ${PINEFORGE_BUILD_LIVE_RUNNER}")
 message(STATUS "  build bench strat: ${PINEFORGE_BUILD_BENCH_STRATEGIES}")
 message(STATUS "")

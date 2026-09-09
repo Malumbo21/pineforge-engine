@@ -874,6 +874,10 @@ void BacktestEngine::reset_run_state() {
     stream_next_script_bar_index_ = 0;
     stream_script_bar_had_tick_ = false;
     stream_script_tick_seen_ = false;
+    stream_input_mode_ = StreamInputMode::UNSET;
+    stream_observe_actions_ = false;
+    stream_action_sequence_ = 0;
+    stream_order_actions_.clear();
 
     // Native source-series history (input.source(...) ring buffers). Must list
     // EVERY _src_*_ member declared in engine.hpp — a missing one leaks history

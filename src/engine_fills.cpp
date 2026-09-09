@@ -7383,6 +7383,7 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
                 lot.market_pyramid_add = true;
                 snapshot_entry_commission(lot);
                 pyramid_entries_.push_back(std::move(lot));
+                if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
                 id_unclosed_qty_[order.id] += add_qty;
                 cycle_filled_entry_ids_.insert(order.id);
             }
@@ -7712,6 +7713,7 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
         materialized.entry_incarnation = order.incarnation;
         snapshot_entry_commission(materialized);
         pyramid_entries_.push_back(std::move(materialized));
+        if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
         id_unclosed_qty_[order.id] += qty;
         cycle_filled_entry_ids_.insert(order.id);
         return;
@@ -7754,6 +7756,7 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
             artifact.entry_incarnation = order.incarnation;
             snapshot_entry_commission(artifact);
             pyramid_entries_.push_back(std::move(artifact));
+            if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
             id_unclosed_qty_[order.id] += qty;
             cycle_filled_entry_ids_.insert(order.id);
             return;
@@ -8042,6 +8045,7 @@ void BacktestEngine::apply_raw_order_fill(PendingOrder& order, double fill_price
         pyramid_entries_.push_back({fill_price, current_bar_.timestamp, qty, order.id, bar_index_});
         pyramid_entries_.back().entry_incarnation = order.incarnation;
         snapshot_entry_commission(pyramid_entries_.back());
+        if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
         id_unclosed_qty_[order.id] += qty;
         cycle_filled_entry_ids_.insert(order.id);
         if (!std::isnan(order.stop_price) || !std::isnan(order.limit_price)) {
@@ -8096,6 +8100,7 @@ void BacktestEngine::apply_raw_order_fill(PendingOrder& order, double fill_price
             pyramid_entries_.push_back({fill_price, current_bar_.timestamp, new_qty, order.id, bar_index_});
             pyramid_entries_.back().entry_incarnation = order.incarnation;
             snapshot_entry_commission(pyramid_entries_.back());
+            if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
             // KI-62: flag same-direction MARKET adds (strategy.order path) so a
             // same-bar from_entry bracket exit can scratch them dur-0.
             pyramid_entries_.back().market_pyramid_add = !is_priced_entry;

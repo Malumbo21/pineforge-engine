@@ -30,10 +30,27 @@
 // against a runtime providing this hook. This is an internal C++ capability;
 // it does not change any public C POD or exported C function signature.
 #define PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1 1
+#define PINEFORGE_HAS_NATIVE_LIVE_V1 1
 
 namespace pineforge {
 
 enum class PositionSide { FLAT, LONG, SHORT };
+
+// One physical emulator lot entry/exit, in actual execution order. A reversal
+// may produce several exits followed by an entry. No range-end report rows.
+struct StreamOrderAction {
+    uint64_t sequence = 0;
+    int64_t timestamp_ms = 0;
+    int32_t bar_index = 0;
+    bool is_entry = false;
+    bool is_long = false;
+    double quantity = 0.0;
+    double price = 0.0;
+    std::string order_id;
+    std::string comment;
+    uint64_t entry_incarnation = 0;
+    size_t closed_trade_index = static_cast<size_t>(-1); // engine-private provenance
+};
 
 // round 8 family R (OANDA:EURUSD@15, 45 strong probes; campaign notes
 // log-20260905t164404z-85800609 (diagnosis), log-20260905t180248z-0dce5ab0
@@ -3386,6 +3403,11 @@ protected:
     int stream_next_script_bar_index_ = 0;
     bool stream_script_bar_had_tick_ = false;
     bool stream_script_tick_seen_ = false;
+    enum class StreamInputMode { UNSET, TICKS, BARS };
+    StreamInputMode stream_input_mode_ = StreamInputMode::UNSET;
+    bool stream_observe_actions_ = false;
+    uint64_t stream_action_sequence_ = 0;
+    std::vector<StreamOrderAction> stream_order_actions_;
 
     // --- request.security state ---
     struct HistoricalSecurityProjection {
@@ -4531,6 +4553,9 @@ private:
                      bool bar_magnifier,
                      int magnifier_samples,
                      MagnifierDistribution magnifier_dist);
+    void stream_observe_entry(const PyramidEntry& pe);
+    void stream_observe_exit(size_t trade_index);
+    void stream_refresh_action_metadata(size_t first_action, size_t first_trade);
     bool stream_finalize_until(int64_t timestamp_ms);
     void stream_feed_input_bar(const Bar& bar, bool had_tick);
     void stream_dispatch_script_bar(const Bar& bar, bool had_tick);
@@ -4594,11 +4619,23 @@ public:
     bool stream_begin(const Bar* warmup_bars, int n_warmup,
                       const std::string& input_tf,
                       const std::string& script_tf = "");
+    // Confirmed input bars use the same OHLC broker kernel as batch. The first
+    // tick/bar locks the input mode; mixing them is rejected. Missing in-session
+    // bars are rejected rather than padded. Closed-session gaps may be skipped.
+    bool stream_push_bar(const Bar& bar);
     bool stream_push_tick(const TradeTick& tick);
     bool stream_push_ticks(const TradeTick* ticks, int n);
     bool stream_advance_time(int64_t timestamp_ms);
     bool stream_end(bool finalize_partial_input_bar = false);
     bool stream_is_realtime() const { return stream_phase_ == StreamPhase::REALTIME; }
+    int stream_order_actions_len() const { return static_cast<int>(stream_order_actions_.size()); }
+    const StreamOrderAction& stream_order_action_at(int i) const {
+        return stream_order_actions_.at(static_cast<size_t>(i));
+    }
+    void stream_order_actions_clear() { stream_order_actions_.clear(); }
+    // Observable broker + stream cursors/forming bars, not a serialization of
+    // arbitrary strategy members. Deterministic strategy code is required.
+    uint64_t stream_state_hash() const;
 
     // Install an effective-time FX curve (account-currency units per one unit
     // of symbol quote currency). Points are copied and must have strictly

@@ -15,6 +15,15 @@ Eigen (https://eigen.tuxfamily.org/)
   Licensed under the Mozilla Public License 2.0 (MPL-2.0).
   SPDX-License-Identifier: MPL-2.0
 
+Optional native live runner dependencies (not part of libpineforge)
+-------------------------------------------------------------------
+SQLite (https://sqlite.org/): public domain.
+libcurl (https://curl.se/): curl license (MIT/X derivative).
+OpenSSL (https://www.openssl.org/): Apache License 2.0 for OpenSSL 3.x;
+older supported installations retain their applicable upstream terms.
+These libraries are linked only by the opt-in native runner. Preserve their
+upstream notices when distributing binaries that bundle them.
+
 Optional benchmark harness dependencies (not part of libpineforge)
 -------------------------------------------------------------------
 The contents under benchmarks/ may install separate Node.js and Python packages

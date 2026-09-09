@@ -688,6 +688,7 @@ void BacktestEngine::emit_close_trade(const PyramidEntry& pe, double close_qty,
     const double pnl = trade.pnl;
     const double trade_pnl = trade.pnl;
     trades_.push_back(std::move(trade));
+    if (stream_observe_actions_) stream_observe_exit(trades_.size() - 1);
     const double previous_net_profit = net_profit_sum_;
     net_profit_sum_ += trade_pnl;
     // Knuth TwoSum recovers this addition's exact binary64 residual without
@@ -854,6 +855,7 @@ void BacktestEngine::open_fresh_position(PositionSide requested, double fill_pri
     pyramid_entries_.push_back({fill_price, current_bar_.timestamp, qty, id, bar_index_});
     pyramid_entries_.back().entry_incarnation = entry_incarnation;
     snapshot_entry_commission(pyramid_entries_.back());
+    if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
     id_unclosed_qty_[id] += qty;
     cycle_filled_entry_ids_.insert(id);
 }
@@ -1026,6 +1028,7 @@ void BacktestEngine::add_to_pyramid_market(const std::string& id, bool is_long,
     pyramid_entries_.push_back({fill_price, current_bar_.timestamp, new_qty, id, bar_index_});
     pyramid_entries_.back().entry_incarnation = entry_incarnation;
     snapshot_entry_commission(pyramid_entries_.back());
+    if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
     // KI-62: only a same-direction MARKET add is scratched by a same-bar
     // from_entry bracket exit; a priced pyramid add is not this collision.
     pyramid_entries_.back().market_pyramid_add = !is_priced_entry;

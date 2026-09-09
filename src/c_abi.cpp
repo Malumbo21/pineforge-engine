@@ -10,6 +10,7 @@
  *   - The runtime-library-side `extern "C"` symbols (the closed-trade
  *     incarnation accessor, setters, strategy_get_last_error,
  *     the auxiliary-security-feed setter, the strategy_stream_* lifecycle,
+ *     native stream bar input/action polling/fingerprint/API-version exports,
  *     the live-runtime surface (strategy_request_abort,
  *     strategy_last_run_status, strategy_set_realtime_tail,
  *     strategy_set_probe_suppress_tail_logic, strategy_set_path_order,
@@ -492,6 +493,40 @@ PF_API int strategy_stream_begin(pf_strategy_t s,
         bars, n_warmup,
         input_tf ? std::string(input_tf) : std::string(),
         script_tf ? std::string(script_tf) : std::string()) ? 0 : -1;
+}
+
+PF_API int strategy_stream_api_version(void) { return 1; }
+
+PF_API int strategy_stream_push_bar(pf_strategy_t s, const pf_bar_t* bar) {
+    if (!s || !bar) return -1;
+    return static_cast<pineforge::BacktestEngine*>(s)->stream_push_bar(
+        *reinterpret_cast<const pineforge::Bar*>(bar)) ? 0 : -1;
+}
+
+PF_API int strategy_stream_order_actions_len(pf_strategy_t s) {
+    if (!s) return -1;
+    return static_cast<const pineforge::BacktestEngine*>(s)->stream_order_actions_len();
+}
+
+PF_API int strategy_stream_order_action_get(pf_strategy_t s, int index,
+                                            pf_stream_order_action_t* out) {
+    if (!s || !out || index < 0) return -1;
+    const auto* engine = static_cast<const pineforge::BacktestEngine*>(s);
+    if (index >= engine->stream_order_actions_len()) return -1;
+    const auto& a = engine->stream_order_action_at(index);
+    *out = pf_stream_order_action_t{a.sequence, a.timestamp_ms, a.bar_index,
+        a.is_entry ? 1 : 0, a.is_long ? 1 : 0, a.quantity, a.price,
+        a.order_id.c_str(), a.comment.c_str(), a.entry_incarnation};
+    return 0;
+}
+
+PF_API void strategy_stream_order_actions_clear(pf_strategy_t s) {
+    if (s) static_cast<pineforge::BacktestEngine*>(s)->stream_order_actions_clear();
+}
+
+PF_API uint64_t strategy_stream_state_hash(pf_strategy_t s) {
+    if (!s) return 0;
+    return static_cast<const pineforge::BacktestEngine*>(s)->stream_state_hash();
 }
 
 PF_API int strategy_stream_push_tick(pf_strategy_t s,

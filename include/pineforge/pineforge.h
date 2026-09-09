@@ -589,12 +589,61 @@ PF_API uint64_t strategy_closed_trade_entry_incarnation(
  *  lifecycle uses close-only strategy calculation (the Pine strategy default)
  *  while resting broker orders are evaluated on every normalized trade.
  *
+ *  calc_on_order_fills, historical probe/tail overrides, timestamped FX,
+ *  auxiliary and native security feeds are rejected. No every-tick strategy
+ *  callback is provided; hand-written strategies follow the same lifecycle.
  *  @return 0 on success, -1 on failure. Inspect #strategy_get_last_error. */
 PF_API int strategy_stream_begin(pf_strategy_t s,
                                  const pf_bar_t* warmup_bars,
                                  int n_warmup,
                                  const char* input_tf,
                                  const char* script_tf);
+
+/** Native live extension version (1). Additive to ABI v4; callers must probe
+ *  this symbol before using the confirmed-bar/action API in older modules. */
+PF_API int strategy_stream_api_version(void);
+
+/** One physical emulator lot action. is_long describes the position side:
+ *  buy = is_entry == is_long. A reversal is exits followed by an entry.
+ *  price/time are emulator reference values, not external broker fills.
+ *  Strings are borrowed until the next stream mutation or queue clear. */
+typedef struct pf_stream_order_action {
+    uint64_t sequence;
+    int64_t timestamp_ms;
+    int32_t bar_index;
+    int32_t is_entry;
+    int32_t is_long;
+    double quantity;
+    double price;
+    const char* order_id;
+    const char* comment;
+    uint64_t entry_incarnation;
+} pf_stream_order_action_t;
+
+/** Consume one confirmed input-timeframe bar. Its script-timeframe aggregate
+ *  uses the existing batch OHLC fill kernel when complete. Close-only strategy
+ *  calculation; no bar magnifier or synthetic trade ticks. The first tick/bar
+ *  locks the feed mode. Off-grid/out-of-order data, invalid OHLCV and missing
+ *  in-session bars fail. Calendar-closed intervals may be skipped. No padding.
+ *  Returns 0/-1. On ANY input-processing failure discard/recover the instance:
+ *  the operation is not transactional and can have advanced native state. */
+PF_API int strategy_stream_push_bar(pf_strategy_t s, const pf_bar_t* bar);
+
+/** Queued physical fills since the last clear, in execution order. Historical
+ *  warmup and report-only range-end rows never enqueue. Sequence starts at 1
+ *  after warmup and is not reset by clear. Returns -1 on a null handle. */
+PF_API int strategy_stream_order_actions_len(pf_strategy_t s);
+/** Copy one action; return 0 on success, -1 on invalid handle/index/output. */
+PF_API int strategy_stream_order_action_get(pf_strategy_t s, int index,
+                                            pf_stream_order_action_t* out);
+/** Clear observed events after the caller durably journals them. */
+PF_API void strategy_stream_order_actions_clear(pf_strategy_t s);
+/** Versioned deterministic fingerprint of observable broker/stream state.
+ *  Excludes the consumable queue and arbitrary private strategy members.
+ *  This is a replay check, not a complete state snapshot or cryptographic hash.
+ *  Fresh replay must use deterministic strategy code and pinned configuration.
+ *  Returns 0 for NULL. */
+PF_API uint64_t strategy_stream_state_hash(pf_strategy_t s);
 
 /** Push one normalized realtime trade. Returns 0 on success, -1 on failure. */
 PF_API int strategy_stream_push_tick(pf_strategy_t s,
