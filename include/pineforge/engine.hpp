@@ -79,8 +79,8 @@ enum class PositionSide { FLAT, LONG, SHORT };
 // 4583, the float-accumulated ledger's 4584.000000000001 or a 1e-6-nudged
 // floor gives 4584, one share the account cannot pay at the 238.78 fill), so
 // rule 1 sizes every lot-stepped instrument (tv_money_lot_sizing). Rule 2
-// additionally covers ordinary, fee-free high-value fractional lots (R24);
-// rule 5 stays scoped by tv_money_scope. Other admission keeps its existing
+// additionally covers ordinary, fee-free high-value fractional lots (R24),
+// as does the price-scale check in rule 5 (R39). Other admission keeps its existing
 // checks (1094521.681 -> Q 4584 dropped on AAPL). Rule 3
 // additionally covers ordinary MARKET-opened, fee/slippage-free single-position
 // fractional unit-pointvalue/same-currency books with lot value >=1 (R21 pins).
@@ -2269,10 +2269,10 @@ protected:
     // equity 1052170.9536054998 therefore keeps only a reversal's close leg.
     // XAU Q300 at 3443.625 likewise rejects capital cost-0.0001, while exact
     // cost and cost+0.0001 admit, despite the cheaper next opening price.
-    // This extends rule 2 alone; rule 5 and margin valuation keep their scope.
-    bool rounded_signal_cost_scope(const PendingOrder& order) const {
-        if (tv_money_scope(order.sizing_price)) return true;
-        if (rounded_pooc_flat_signal_cost_scope(order)) return true;
+    // R39 BTC/XAU controls also pin the independent price-scale check for
+    // this ordinary market book. Share its scope while keeping the separately
+    // pinned POOC signal-cost extension out of the price-scale extension.
+    bool ordinary_fractional_market_admission_scope(const PendingOrder& order) const {
         if (!(qty_step_ > 0.0 && qty_step_ < 1.0)
             || !std::isfinite(order.sizing_price) || order.sizing_price <= 0.0
             || !std::isfinite(order.sizing_equity)
@@ -2304,6 +2304,15 @@ protected:
             }
         }
         return true;
+    }
+    bool rounded_signal_cost_scope(const PendingOrder& order) const {
+        return tv_money_scope(order.sizing_price)
+            || rounded_pooc_flat_signal_cost_scope(order)
+            || ordinary_fractional_market_admission_scope(order);
+    }
+    bool rounded_price_admission_scope(const PendingOrder& order) const {
+        return tv_money_scope(order.sizing_price)
+            || ordinary_fractional_market_admission_scope(order);
     }
     // Rule 1's scope (round 10 family AE): the ten-digit equity and the raw
     // lot floor size EVERY lot-stepped instrument — integer shares included

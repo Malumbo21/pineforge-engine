@@ -5715,10 +5715,14 @@ void BacktestEngine::apply_filled_order_to_state(
                 }
                 order.affordability_close_only = true;
                 order.rounded_signal_cost_close_only = true;
-            } else if (!close_first_flat_open && tv_money_scope(order.sizing_price)) {
+            } else if (!close_first_flat_open && rounded_price_admission_scope(order)) {
                 // Rule 5: the price-scale margin check (comment above).
-                // The R24 high-value fractional-lot extension pins rule 2
-                // only; it does not widen this independent price-scale rule.
+                // R39 covered BTC/XAU controls extend it to the ordinary
+                // fractional market book even when one lot is worth >=1.
+                // At Q7.80692/P106318.18, rounded affordable price is one
+                // ulp below the tick-built sizing price: bare/entry-first
+                // and true-flat entries drop; funding +0.0003 admits.
+                // Close-first retains its independent exemption above.
                 const double notional_per_price =
                     order.frozen_default_qty * syminfo_.pointvalue * fx_s;
                 const double affordable_price = tv_money_round(
