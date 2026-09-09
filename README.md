@@ -123,14 +123,14 @@ Round 39 extends the existing price-scale admission check to ordinary, fee-free 
 
 **PK Willow Pulse UT Williams Live Movement** on **BINANCE:BTCUSDT 15m** moves from strong to excellent: canonical match rises from 96.9% to 100%, with zero trade-count gap and zero entry-price, exit-price, PnL and quantity error at the 90th percentile. Independent comparison of the unfiltered files matches all **12,408 physical trade pairs** on side, entry/exit times, prices and quantity, gaining **10,756 matches with none lost**. Including the displayed PnL in the exact comparison gains **2,193 matches with none lost**; the files use different PnL display precision.
 
-The fix has no strategy, symbol or date lookup. Sixteen TradingView controls cover both directions, flat entries, separate closes, reversals, explicit quantities and budget boundaries. A Cloud diagnostic reproduces the original selected trade CSV and confirms that a one-lot allowance admitted an order whose cost exceeded frozen equity by one binary64 step. All **704 hard-surface probes** retain their canonical grades, quantity metrics and trade CSVs; **4,189 of 4,190 CSVs are unchanged**. Verifier code, grading rules, profile-selection code, reference tapes, feeds, input files and scored population are unchanged.
+The fix has no strategy, symbol or date lookup. TradingView controls pin both directions, flat entries, reversal/close ordering and funding boundaries. A Cloud diagnostic reproduces the original selected trade CSV across all six observed invocations and confirms that the engine passed signal-cost admission but skipped the price-scale check for a high-value fractional lot. The exact explicit-quantity reversal control exposed a separate gap that remains unchanged by this default-sizing fix. All **704 hard-surface probes** retain their canonical grades, quantity metrics and trade CSVs; **4,189 of 4,190 CSVs are unchanged**. Verifier code, grading rules, profile-selection code, reference tapes, feeds, input files and scored population are unchanged.
 
 ### The closed test, lane by lane
 
 | Market · timeframe | Probes | Excellent | Strong | Moderate |
 |---|---:|---:|---:|---:|
 | BINANCE:ETHUSDT.P · 15m *(hard lane: zero regression allowed)* | 395 | 394 | 1 | — |
-| BINANCE:BTCUSDT · 15m | 354 | 353 | 1 | — |
+| BINANCE:BTCUSDT · 15m | 354 | 354 | — | — |
 | BINANCE:BTCUSDT · 1D | 259 | 259 | — | — |
 | CME_MINI:ES1! · 15m | 174 | 173 | 1 | — |
 | CME_MINI:ES1! · 1D | 117 | 117 | — | — |
@@ -144,7 +144,7 @@ The fix has no strategy, symbol or date lookup. Sixteen TradingView controls cov
 | OANDA:EURUSD · 15m | 373 | 372 | 1 | — |
 | OANDA:XAUUSD · 15m | 376 | 375 | 1 | — |
 | OANDA:XAUUSD · 1D | 248 | 248 | — | — |
-| **Total** | **3,881** | **3,872** | **9** | **0** |
+| **Total** | **3,881** | **3,873** | **8** | **0** |
 
 ### How a probe is graded
 
