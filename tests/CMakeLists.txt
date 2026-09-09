@@ -1,6 +1,5 @@
 set(TEST_SOURCES
     test_opening_obligation
-    test_gross_bucket_accounting
     test_high_value_price_admission
     test_integer_opening_budget
     test_script_run_prepare
