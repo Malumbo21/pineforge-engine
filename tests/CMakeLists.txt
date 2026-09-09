@@ -1,4 +1,5 @@
 set(TEST_SOURCES
+    test_integer_opening_budget
     test_script_run_prepare
     test_pooc_open_money_event
     test_live_abort

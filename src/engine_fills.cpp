@@ -5764,22 +5764,36 @@ void BacktestEngine::apply_filled_order_to_state(
             }
         }
     }
-    // Round17 ADXAE F: rule1 sizes from ten-digit rounded equity, so an
-    // integer-lot exact-budget tie need not satisfy the raw-equity floor
-    // invariant. At the zero-gap Apr28 open, Q768 * P12.31 is 9454.08 but
-    // frozen E is 9454.0799999999981; TV drops the entry. The general float
-    // allowance must not donate that missing budget in this pinned shape.
-    // Keep fractional lots, reversals, fees, other execution modes and all
-    // non-tie/gap admission rules on their established paths.
-    if (order.type == OrderType::MARKET && order.is_long && std::isnan(order.qty)
+    // Whole-lot all-in sizing uses ten-digit rounded equity, which can lift
+    // an exact notional tie above the frozen raw budget. At an unchanged
+    // fill price, the lot allowance must not fund that missing amount. This
+    // applies to either opening direction, including after a separate close
+    // has already filled. Completed closes remain in the vector until the end
+    // of the pass; they do not make this a competing-order opening.
+    // Only the opening leg is declined. Fractional lots, reversals, fees,
+    // other execution modes and non-tie/gap rules retain their own paths.
+    const auto sole_opening_after_closes = [&]() {
+        for (size_t index = 0; index < pending_orders_.size(); ++index) {
+            if (index != order_index
+                && (pending_orders_[index].type != OrderType::EXIT
+                    || pending_orders_[index].id.compare(0, kClosePrefix.size(), kClosePrefix) != 0
+                    || std::find(filled_indices.begin(), filled_indices.end(), index)
+                           == filled_indices.end())) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (order.type == OrderType::MARKET && std::isnan(order.qty)
         && !order.affordability_close_only && !order.sbmt_member
         && position_side_ == PositionSide::FLAT
-        && order.created_position_side == PositionSide::FLAT
-        && !order.created_after_position_close_in_bar
+        && (order.created_position_side == PositionSide::FLAT
+            || order.created_after_position_close_in_bar)
         && !order.created_by_same_id_replacement
-        && order.created_bar == bar_index_ - 1 && pending_orders_.size() == 1
+        && order.created_bar == bar_index_ - 1 && sole_opening_after_closes()
         && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-        && default_qty_value_ == 100 && margin_long_ == 100
+        && default_qty_value_ == 100
+        && (order.is_long ? margin_long_ : margin_short_) == 100
         // Omitted Pine pyramiding retains the engine's single-entry default1;
         // explicit0 has the same first-opening shape. Adds remain out of scope.
         && pyramiding_ >= 0 && pyramiding_ <= 1
