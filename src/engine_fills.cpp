@@ -703,7 +703,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 || max_intraday_filled_orders_ > 0
                 || risk_max_intraday_loss_ != 0 || risk_max_drawdown_ != 0
                 || risk_max_cons_loss_days_ > 0
-                || margin_long_ != 100 || opening_affordability_pending_
+                || margin_long_ != 100 || opening_obligations_.pending()
                 || !(bar.close < bar.open)) return false;
             const std::string& entry_id = pyramid_entries_.front().entry_id;
             double reserved = 0;
@@ -1357,19 +1357,15 @@ void BacktestEngine::process_margin_call(const Bar& bar) {
     // Consume first, including on disabled/degenerate paths. This is an event
     // attached to the just-completed fill cycle, never durable per-position
     // state that a later bar may reconstruct or reuse.
-    const bool opening_event_pending = opening_affordability_pending_;
-    const bool opening_event_eligible = opening_affordability_eligible_;
-    const bool opening_event_default_short_reversal =
-        close_then_short_opening_requires_adverse_retry_;
-    const double opening_event_raw_fill_base =
-        opening_affordability_raw_fill_base_;
-    opening_affordability_pending_ = false;
-    opening_affordability_eligible_ = false;
-    commissioned_all_in_market_long_opening_affordability_ = false;
-    opening_affordability_default_long_reversal_ = false;
-    close_then_short_opening_requires_adverse_retry_ = false;
-    opening_affordability_raw_fill_base_ =
-        std::numeric_limits<double>::quiet_NaN();
+    const auto opening_event = opening_obligations_.take(position_cycle_seq_);
+    const bool opening_event_pending = opening_event.has_value();
+    const bool opening_event_eligible = opening_event
+        && opening_event->decision() == broker::OpeningDecision::Check;
+    const bool opening_event_default_short_reversal = opening_event
+        && opening_event->requires_adverse_pass();
+    const double opening_event_raw_fill_base = opening_event
+        ? opening_event->raw_fill_base()
+        : std::numeric_limits<double>::quiet_NaN();
 
     if (!margin_call_enabled_) return;
     if (position_side_ == PositionSide::FLAT) return;
@@ -1999,7 +1995,7 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
         if (!carried_pooc_pre_close || position_open_bar_ < 0
             || position_open_bar_ >= bar_index_
             || (!pending_orders_.empty() && !before_trail_exit)
-            || opening_affordability_pending_
+            || opening_obligations_.pending()
             || (pyramiding_ != 0 && !slipped_pooc_open && !before_trail_exit)
             || position_entry_count_ != 1 || pyramid_entries_.size() != 1
             || pyramid_entries_.front().entry_bar_index >= bar_index_
@@ -2550,10 +2546,13 @@ bool BacktestEngine::margin_call_1x_long_opening_slice_before_priced_exit(
     // chronology; the opening check keeps its end-of-bar placement there.
     if (process_orders_on_close_) return false;
     // The one-shot event queued by this bar's successful opening/add fill.
-    if (!opening_affordability_pending_ || !opening_affordability_eligible_) {
+    const auto opening_event = opening_obligations_.peek();
+    if (!opening_event
+        || opening_event->owner().positionCycle != position_cycle_seq_
+        || opening_event->decision() != broker::OpeningDecision::Check) {
         return false;
     }
-    const double raw_fill_base = opening_affordability_raw_fill_base_;
+    const double raw_fill_base = opening_event->raw_fill_base();
     if (!std::isfinite(raw_fill_base) || !(raw_fill_base > 0.0)) return false;
 
     const double pv = syminfo_.pointvalue;
@@ -2669,13 +2668,7 @@ bool BacktestEngine::margin_call_1x_long_opening_slice_before_priced_exit(
     intrabar_exit_margin_call_bar_ = bar_index_;
     // The one-shot event is consumed by this chronological slice; the
     // end-of-bar process_margin_call must not replay it.
-    opening_affordability_pending_ = false;
-    opening_affordability_eligible_ = false;
-    commissioned_all_in_market_long_opening_affordability_ = false;
-    opening_affordability_default_long_reversal_ = false;
-    close_then_short_opening_requires_adverse_retry_ = false;
-    opening_affordability_raw_fill_base_ =
-        std::numeric_limits<double>::quiet_NaN();
+    opening_obligations_.consume(opening_event->owner());
     return true;
 }
 
@@ -6775,68 +6768,6 @@ void BacktestEngine::apply_filled_order_to_state(
             && order.created_bar < bar_index_
             && order.oca_name.empty()
             && order.oca_type == 0;
-        const bool default_market_long_close_then_open_after_fill =
-            successful_fresh_open
-            && position_side_before_fill == PositionSide::FLAT
-            && position_side_ == PositionSide::LONG
-            && order.type == OrderType::MARKET
-            && order.is_long
-            && std::isnan(order.qty)
-            && order.created_position_side == PositionSide::SHORT
-            && order.created_after_position_close_in_bar
-            && std::abs(order.tv_carry_qty) <= kQtyEpsilon
-            && admitted_flat_on_frozen_sizing_price
-            && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-            && std::abs(default_qty_value_ - 100.0) < 1e-12
-            && std::isfinite(margin_long_)
-            && std::abs(margin_long_ / 100.0 - 1.0) < 1e-12
-            && commission_type_ == CommissionType::PERCENT
-            && std::isfinite(commission_value_)
-            && commission_value_ > 0.0
-            && std::isfinite(new_opening_commission)
-            && new_opening_commission > 0.0
-            && std::isfinite(order.frozen_default_qty)
-            && order.frozen_default_qty > kQtyEpsilon
-            && std::isfinite(order.sizing_equity)
-            && order.sizing_equity > 0.0
-            && std::isfinite(order.sizing_price)
-            && order.sizing_price > 0.0
-            && std::isfinite(order.sizing_mark)
-            && order.sizing_mark > 0.0
-            && std::isfinite(order.sizing_fx)
-            && order.sizing_fx > 0.0
-            && slippage_ == 0
-            && !process_orders_on_close_
-            && !calc_on_order_fills_
-            && !bar_magnifier_enabled_
-            && !stream_warmup_mode_
-            && stream_phase_ == StreamPhase::IDLE
-            && !order.created_during_coof_recalc
-            && order.created_bar < bar_index_
-            && order.oca_name.empty()
-            && order.oca_type == 0;
-        // The lifecycle tag keeps its commissioned meaning (no reader
-        // today; test_margin_call pins the zero-fee flat short untagged).
-        const bool commissioned_opening_fee =
-            commission_type_ == CommissionType::PERCENT
-            && std::isfinite(commission_value_)
-            && commission_value_ > 0.0
-            && std::isfinite(new_opening_commission)
-            && new_opening_commission > 0.0;
-        if (successful_fresh_open) {
-            commissioned_all_in_market_short_lifecycle_ =
-                (default_market_short_close_then_open_after_fill
-                 || default_market_flat_short_after_fill)
-                && commissioned_opening_fee;
-            default_market_direct_short_reversal_lifecycle_ =
-                default_market_direct_short_reversal_after_fill;
-        } else if (accepted_additional_entry) {
-            // A later add changes the exact position lifecycle whose TV
-            // zero-cover behavior is pinned by the source tape. Fail closed
-            // rather than lending the original provenance to the new shape.
-            commissioned_all_in_market_short_lifecycle_ = false;
-            default_market_direct_short_reversal_lifecycle_ = false;
-        }
         const bool positive_raw_base =
             std::isfinite(fill_price) && fill_price > 0.0;
         const bool successful_short_open_or_add =
@@ -6858,13 +6789,7 @@ void BacktestEngine::apply_filled_order_to_state(
              || default_market_direct_short_reversal_after_fill)
             && positive_raw_base;
         if (successful_short_open_or_add && !scoped_short_opening_fill) {
-            opening_affordability_pending_ = false;
-            opening_affordability_eligible_ = false;
-            commissioned_all_in_market_long_opening_affordability_ = false;
-            opening_affordability_default_long_reversal_ = false;
-            close_then_short_opening_requires_adverse_retry_ = false;
-            opening_affordability_raw_fill_base_ =
-                std::numeric_limits<double>::quiet_NaN();
+            opening_obligations_.invalidate();
         }
         if ((long_full_margin_after_fill
              || explicit_market_short_full_margin_after_fill
@@ -6905,51 +6830,21 @@ void BacktestEngine::apply_filled_order_to_state(
                 && std::isfinite(new_opening_commission)
                 && new_opening_commission == 0.0;
 
-            opening_affordability_pending_ = true;
-            opening_affordability_eligible_ =
-                accepted_additional_entry
-                || !frozen_all_in_true_flat_exemption;
-            commissioned_all_in_market_long_opening_affordability_ =
-                (successful_fresh_open
-                 && order.opening_affordability_exemption_candidate
-                 && order.type == OrderType::MARKET
-                 && order.is_long
-                 && std::isnan(order.qty)
-                 && order.created_position_side == PositionSide::FLAT
-                 && !order.created_after_position_close_in_bar
-                 && position_side_before_fill == PositionSide::FLAT
-                 && admitted_flat_on_frozen_sizing_price
-                 && commission_type_ == CommissionType::PERCENT
-                 && commission_value_ > 0.0
-                 && std::isfinite(new_opening_commission)
-                 && new_opening_commission > 0.0)
-                || (default_market_long_close_then_open_after_fill
-                    && std::isfinite(new_opening_commission)
-                    && new_opening_commission > 0.0);
-            opening_affordability_default_long_reversal_ =
-                successful_fresh_open
-                && position_side_before_fill == PositionSide::SHORT
-                && order.created_position_side == PositionSide::SHORT
-                && !order.created_after_position_close_in_bar
-                && order.type == OrderType::MARKET
-                && order.is_long
-                && std::isnan(order.qty)
-                && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-                && std::abs(default_qty_value_ - 100.0) < 1e-12
-                && std::isfinite(order.frozen_default_qty)
-                && order.frozen_default_qty > kQtyEpsilon
-                && std::isfinite(order.sizing_equity)
-                && order.sizing_equity > 0.0
-                && std::isfinite(order.sizing_price)
-                && order.sizing_price > 0.0
-                && std::isfinite(order.sizing_fx)
-                && order.sizing_fx > 0.0
-                && std::isfinite(new_opening_commission)
-                && new_opening_commission == 0.0;
-            close_then_short_opening_requires_adverse_retry_ =
+            const broker::OpeningOwner owner{
+                position_cycle_seq_, broker_fill_event_seq_, order.incarnation,
+                bar_index_, current_bar_.timestamp};
+            const auto continuation =
                 default_market_short_close_then_open_after_fill
-                || default_market_direct_short_reversal_after_fill;
-            opening_affordability_raw_fill_base_ = fill_price;
+                || default_market_direct_short_reversal_after_fill
+                    ? broker::OpeningContinuation::RemainingAdversePath
+                    : broker::OpeningContinuation::None;
+            if (accepted_additional_entry || !frozen_all_in_true_flat_exemption) {
+                opening_obligations_.replace(
+                    broker::OpeningReceipt::check(owner, fill_price, continuation));
+            } else {
+                opening_obligations_.replace(
+                    broker::OpeningReceipt::exempt(owner, fill_price));
+            }
         }
     }
 
@@ -8025,15 +7920,7 @@ void BacktestEngine::apply_raw_order_fill(PendingOrder& order, double fill_price
         // The shared post-dispatch hook queues the new fill's event. Clear any
         // prior-cycle provenance first; RAW_ORDER opens do not route through
         // open_fresh_position.
-        opening_affordability_pending_ = false;
-        opening_affordability_eligible_ = false;
-        commissioned_all_in_market_long_opening_affordability_ = false;
-        opening_affordability_default_long_reversal_ = false;
-        close_then_short_opening_requires_adverse_retry_ = false;
-        commissioned_all_in_market_short_lifecycle_ = false;
-        default_market_direct_short_reversal_lifecycle_ = false;
-        opening_affordability_raw_fill_base_ =
-            std::numeric_limits<double>::quiet_NaN();
+        opening_obligations_.invalidate();
         position_entry_time_ = current_bar_.timestamp;
         position_qty_ = qty;
         position_entry_count_ = 1;

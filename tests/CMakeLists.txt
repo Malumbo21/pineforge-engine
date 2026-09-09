@@ -1,4 +1,6 @@
 set(TEST_SOURCES
+    test_opening_obligation
+    test_gross_bucket_accounting
     test_high_value_price_admission
     test_integer_opening_budget
     test_script_run_prepare
@@ -229,6 +231,7 @@ set(TEST_SOURCES
     test_live_probe_suppress_tail
     test_live_path_order
     test_live_state_hash
+    test_pyramid_entry_state_hash
     test_live_state_hash_recording
     test_live_pending_order_mirror
     test_live_order_derived
@@ -350,6 +353,11 @@ add_test(
     NAME test_broker_state_hash_coverage
     COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/scripts/check_broker_state_hash_coverage.py
+)
+add_test(
+    NAME test_broker_state_hash_coverage_mutations
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_broker_state_hash_coverage.py
 )
 
 # When PINEFORGE_ENABLE_COVERAGE is ON we also instrument the test

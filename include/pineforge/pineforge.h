@@ -641,7 +641,8 @@ PF_API void strategy_stream_order_actions_clear(pf_strategy_t s);
 /** Versioned deterministic fingerprint of observable broker/stream state.
  *  Excludes the consumable queue and arbitrary private strategy members.
  *  This is a replay check, not a complete state snapshot or cryptographic hash.
- *  Fresh replay must use deterministic strategy code and pinned configuration.
+ *  Fresh replay must use deterministic strategy code, the same pinned engine
+ *  build and configuration. Fingerprint representations may change between builds.
  *  Returns 0 for NULL. */
 PF_API uint64_t strategy_stream_state_hash(pf_strategy_t s);
 
@@ -833,7 +834,9 @@ PF_API void strategy_set_broker_state_hash_recording(pf_strategy_t s, int on);
 /** Return the broker-state hash of the FINAL state after the most recent
  *  run() (see #strategy_set_broker_state_hash_recording's doc and
  *  pf_report_t::broker_state_hash for the per-bar recording; this accessor
- *  works whether or not recording was enabled). Returns 0 when @p s is
+ *  works whether or not recording was enabled). Compare only within the same
+ *  pinned engine build and configuration; this is not a serialized checkpoint.
+ *  Returns 0 when @p s is
  *  NULL. */
 PF_API uint64_t strategy_broker_state_hash(pf_strategy_t s);
 /** Number of orders resting in the engine's pending-order book after the

@@ -97,15 +97,15 @@ def struct_body(text: str, name: str = STRUCT_NAME) -> str:
     _fail(f"struct {name}: unbalanced braces")
 
 
-def members(text: str | None = None) -> list[tuple[str, str]]:
-    """Return [(cpp_type, name)] for every data member of PendingOrder, in
+def members(text: str | None = None, name: str = STRUCT_NAME) -> list[tuple[str, str]]:
+    """Return [(cpp_type, name)] for every data member of the named struct, in
     declaration order. Comments are stripped and multi-line declarations
     (a member whose initialiser wraps onto the next line) are joined before
     parsing. Any declaration that is not exactly ``TYPE NAME [= init];``
     aborts."""
     if text is None:
         text = HPP.read_text(encoding="utf-8")
-    body = struct_body(text)   # already comment-stripped
+    body = struct_body(text, name)   # already comment-stripped
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
     for raw in body.split(";"):
@@ -114,7 +114,7 @@ def members(text: str | None = None) -> list[tuple[str, str]]:
             continue
         m = DECL_RE.match(decl)
         if not m:
-            _fail(f"cannot classify declaration in struct {STRUCT_NAME}: {decl!r} "
+            _fail(f"cannot classify declaration in struct {name}: {decl!r} "
                   "(expected exactly `TYPE NAME [= init];`; split multi-name "
                   "declarations, and mirror-waive methods/templates explicitly)")
         t, n = m.group(1), m.group(2)
@@ -123,7 +123,7 @@ def members(text: str | None = None) -> list[tuple[str, str]]:
         seen.add(n)
         out.append((t, n))
     if not out:
-        _fail(f"struct {STRUCT_NAME} has no members?")
+        _fail(f"struct {name} has no members?")
     return out
 
 

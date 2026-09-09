@@ -3,8 +3,8 @@
  *
  * An omitted-qty, percent-of-equity=100 MARKET LONG-to-SHORT reversal at
  * margin_short=100 receives a fill-price affordability pass followed by one
- * bounded adverse-high retry. Its position-lifecycle bit also participates in
- * the established one-contract finite-price floor-zero fallback; the optional
+ * bounded adverse-high retry. The established one-contract finite-price
+ * floor-zero fallback depends on the budget and lot grid. The optional
  * full-residual interpretation yields to that settled slice whenever the
  * one-contract fallback is expressible (finding 279: TV slices and holds at
  * eps-scale deficits, it never full-liquidates there).
@@ -67,14 +67,19 @@ Bar bar(int64_t timestamp, double open, double high, double low, double close) {
 class DirectShortReversalProbe : public BacktestEngine {
 public:
     double position_size() const { return signed_position_size(); }
-    bool direct_lifecycle_active() const {
-        return default_market_direct_short_reversal_lifecycle_;
+    bool has_live_short_position() const {
+        return position_side_ == PositionSide::SHORT
+            && position_qty_ > 1e-9
+            && position_cycle_seq_ != 0
+            && !pyramid_entries_.empty()
+            && pyramid_entries_.front().qty > 1e-9
+            && pyramid_entries_.front().entry_incarnation != 0;
     }
     bool opening_event_cleared() const {
-        return !opening_affordability_pending_
-            && !opening_affordability_eligible_
-            && !close_then_short_opening_requires_adverse_retry_
-            && std::isnan(opening_affordability_raw_fill_base_);
+        return !opening_obligations_.pending()
+            && !opening_obligations_.actionable()
+            && !opening_obligations_.requires_adverse_pass()
+            && std::isnan(opening_obligations_.raw_fill_base());
     }
 
     std::vector<double> margin_quantities() const {
@@ -98,6 +103,12 @@ public:
     }
 
 protected:
+    bool opening_owner_matches_position() const {
+        const auto& receipt = opening_obligations_.peek();
+        return receipt && position_cycle_seq_ != 0
+            && receipt->owner().positionCycle == position_cycle_seq_;
+    }
+
     void seed_position(PositionSide side,
                        double entry,
                        double qty,
@@ -166,7 +177,7 @@ void test_direct_reversal_runs_opening_check_and_one_adverse_retry() {
         CHECK_NEAR(price[1], 3154.20, 1e-9);
     }
     CHECK_NEAR(probe.position_size(), -30.8219, 1e-9);
-    CHECK(probe.direct_lifecycle_active());
+    CHECK(probe.has_live_short_position());
     CHECK(probe.opening_event_cleared());
 }
 
@@ -197,9 +208,9 @@ public:
     }
 };
 
-void test_direct_lifecycle_floor_zero_full_residual_yields_to_slice() {
+void test_direct_reversal_floor_zero_full_residual_yields_to_slice() {
     std::printf(
-        "test_direct_lifecycle_floor_zero_full_residual_yields_to_slice\n");
+        "test_direct_reversal_floor_zero_full_residual_yields_to_slice\n");
     const std::vector<Bar> bars = {
         bar(1000, 4506.71, 4506.71, 4506.71, 4506.71),
         bar(2000, 4506.70, 4514.70, 4500.00, 4506.70),
@@ -222,7 +233,8 @@ void test_direct_lifecycle_floor_zero_full_residual_yields_to_slice() {
         CHECK_NEAR(one_contract_price[1], 4539.00, 1e-9);
     }
     CHECK_NEAR(one_contract.position_size(), -1.7346, 1e-9);
-    CHECK(one_contract.direct_lifecycle_active());
+    CHECK(one_contract.has_live_short_position());
+    CHECK(one_contract.opening_event_cleared());
 
     // The full-residual opt-in yields to the settled one-contract slice at
     // the floor-zero discontinuity: both cells now take the identical lots
@@ -244,7 +256,8 @@ void test_direct_lifecycle_floor_zero_full_residual_yields_to_slice() {
         CHECK_NEAR(full_residual_price[1], 4539.00, 1e-9);
     }
     CHECK_NEAR(full_residual.position_size(), -1.7346, 1e-9);
-    CHECK(full_residual.direct_lifecycle_active());
+    CHECK(full_residual.has_live_short_position());
+    CHECK(full_residual.opening_event_cleared());
 }
 
 class TrueFlatFullResidualControlProbe final
@@ -273,7 +286,6 @@ public:
         net_profit_sum_ =
             (qty - raw_q_min) * adverse - initial_capital_ + open_fee
             + (adverse - entry) * qty;
-        commissioned_all_in_market_short_lifecycle_ = true;
     }
 
     void on_bar(const Bar&) override {}
@@ -286,9 +298,8 @@ public:
     }
 };
 
-// Control: the commissioned true-flat lifecycle bit does not alter the
-// floor-zero outcome — with the full-residual opt-in set, the settled
-// one-contract slice still applies and the remainder is HELD.
+// Control: a commissioned short with the full-residual opt-in still takes
+// the settled one-contract slice and holds its remaining physical lot.
 void test_true_flat_floor_zero_control_slices_one_contract() {
     std::printf("test_true_flat_floor_zero_control_slices_one_contract\n");
     TrueFlatFullResidualControlProbe probe;
@@ -299,7 +310,8 @@ void test_true_flat_floor_zero_control_slices_one_contract() {
         CHECK_NEAR(qty[0], 1.0, 1e-9);
     }
     CHECK_NEAR(probe.position_size(), -2.6930, 1e-9);
-    CHECK(!probe.direct_lifecycle_active());
+    CHECK(probe.has_live_short_position());
+    CHECK(probe.opening_event_cleared());
 }
 
 class DirectPathExclusionProbe final : public DirectShortReversalProbe {
@@ -395,10 +407,10 @@ public:
             position_side_ == PositionSide::SHORT
             && position_qty_ > 1e-9;
         direct_opening_path_armed =
-            opening_affordability_pending_
-            && opening_affordability_eligible_
-            && close_then_short_opening_requires_adverse_retry_
-            && std::isfinite(opening_affordability_raw_fill_base_);
+            opening_obligations_.pending()
+            && opening_obligations_.actionable()
+            && opening_obligations_.requires_adverse_pass()
+            && std::isfinite(opening_obligations_.raw_fill_base());
     }
 
     bool reversal_filled = false;
@@ -435,7 +447,6 @@ void test_direct_path_exclusion_matrix() {
         DirectPathExclusionProbe probe(test_case.mechanism);
         probe.exercise();
         CHECK(probe.reversal_filled);
-        CHECK(!probe.direct_lifecycle_active());
         CHECK(!probe.direct_opening_path_armed);
     }
 }
@@ -476,9 +487,20 @@ public:
         current_bar_ = bar(2000, 100.0, 100.0, 100.0, 100.0);
         bar_index_ = 1;
         process_pending_orders(current_bar_);
-        captured_before_attempt = direct_lifecycle_active();
+        captured_before_attempt = opening_obligations_.actionable()
+            && opening_obligations_.requires_adverse_pass()
+            && opening_owner_matches_position();
+        // A disabled margin pass still consumes the opening checkpoint.
+        // A later rejected/no-op order must not create another receipt.
         process_margin_call(current_bar_);
+        consumed_before_attempt = opening_event_cleared();
         qty_before_attempt = position_qty_;
+        const int64_t cycle_before_attempt = position_cycle_seq_;
+        const uint64_t fills_before_attempt = broker_fill_event_seq_;
+        const uint64_t incarnation_before_attempt = pyramid_entries_.empty()
+            ? 0 : pyramid_entries_.front().entry_incarnation;
+        const double lot_qty_before_attempt = pyramid_entries_.empty()
+            ? 0.0 : pyramid_entries_.front().qty;
 
         const double requested_qty =
             attempt_ == Attempt::QuantizedToZero ? 0.5 : 1.0;
@@ -489,21 +511,31 @@ public:
 
         quantity_unchanged =
             std::abs(position_qty_ - qty_before_attempt) <= 1e-9;
-        provenance_preserved = direct_lifecycle_active();
+        owner_preserved = has_live_short_position()
+            && position_cycle_seq_ == cycle_before_attempt
+            && pyramid_entries_.front().entry_incarnation
+                == incarnation_before_attempt
+            && std::abs(pyramid_entries_.front().qty - lot_qty_before_attempt)
+                <= 1e-9;
+        no_fill_committed = broker_fill_event_seq_ == fills_before_attempt;
+        no_new_obligation = opening_event_cleared();
     }
 
     bool captured_before_attempt = false;
+    bool consumed_before_attempt = false;
     bool quantity_unchanged = false;
-    bool provenance_preserved = false;
+    bool owner_preserved = false;
+    bool no_fill_committed = false;
+    bool no_new_obligation = false;
     double qty_before_attempt = 0.0;
 
 private:
     Attempt attempt_;
 };
 
-void test_no_effect_same_side_add_preserves_direct_provenance() {
+void test_no_effect_same_side_add_keeps_owner_without_new_obligation() {
     std::printf(
-        "test_no_effect_same_side_add_preserves_direct_provenance\n");
+        "test_no_effect_same_side_add_keeps_owner_without_new_obligation\n");
     for (const NoEffectAddProbe::Attempt attempt : {
              NoEffectAddProbe::Attempt::RejectedByPyramiding,
              NoEffectAddProbe::Attempt::QuantizedToZero,
@@ -511,8 +543,11 @@ void test_no_effect_same_side_add_preserves_direct_provenance() {
         NoEffectAddProbe probe(attempt);
         probe.exercise();
         CHECK(probe.captured_before_attempt);
+        CHECK(probe.consumed_before_attempt);
         CHECK(probe.quantity_unchanged);
-        CHECK(probe.provenance_preserved);
+        CHECK(probe.owner_preserved);
+        CHECK(probe.no_fill_committed);
+        CHECK(probe.no_new_obligation);
     }
 }
 
@@ -536,7 +571,14 @@ public:
     void exercise() {
         current_bar_ = bar(1000, 100.0, 100.0, 100.0, 100.0);
         bar_index_ = 0;
-        default_market_direct_short_reversal_lifecycle_ = true;
+        const broker::OpeningOwner previous_owner{
+            position_cycle_seq_, broker_fill_event_seq_, 0,
+            bar_index_, current_bar_.timestamp};
+        opening_obligations_.replace(broker::OpeningReceipt::check(
+            previous_owner, 90.0,
+            broker::OpeningContinuation::RemainingAdversePath));
+        stale_obligation_seeded = opening_obligations_.actionable()
+            && opening_obligations_.requires_adverse_pass();
         if (opening_ == Opening::HighLevelEntry) {
             strategy_entry("N", true, kNaN, kNaN, 1.0);
         } else {
@@ -548,33 +590,47 @@ public:
         process_pending_orders(current_bar_);
         fresh_open_filled =
             position_side_ == PositionSide::LONG
-            && position_qty_ > 1e-9;
-        provenance_cleared =
-            !default_market_direct_short_reversal_lifecycle_;
+            && position_qty_ > 1e-9
+            && position_cycle_seq_ != 0;
+        const auto& receipt = opening_obligations_.peek();
+        obligation_replaced = receipt
+            && receipt->decision() == broker::OpeningDecision::Check
+            && receipt->owner().positionCycle == position_cycle_seq_
+            && receipt->owner().positionCycle != previous_owner.positionCycle
+            && receipt->owner().producerFill > previous_owner.producerFill
+            && !pyramid_entries_.empty()
+            && receipt->owner().orderIncarnation
+                == pyramid_entries_.back().entry_incarnation
+            && receipt->owner().barIndex == bar_index_
+            && receipt->owner().timestamp == current_bar_.timestamp
+            && std::abs(receipt->raw_fill_base() - 100.0) <= 1e-9
+            && !receipt->requires_adverse_pass();
     }
 
+    bool stale_obligation_seeded = false;
     bool fresh_open_filled = false;
-    bool provenance_cleared = false;
+    bool obligation_replaced = false;
 
 private:
     Opening opening_;
 };
 
-void test_fresh_entry_and_raw_order_clear_direct_provenance() {
+void test_fresh_entry_and_raw_order_replace_stale_obligation() {
     std::printf(
-        "test_fresh_entry_and_raw_order_clear_direct_provenance\n");
+        "test_fresh_entry_and_raw_order_replace_stale_obligation\n");
     for (const FreshOpeningResetProbe::Opening opening : {
              FreshOpeningResetProbe::Opening::HighLevelEntry,
              FreshOpeningResetProbe::Opening::RawOrder,
          }) {
         FreshOpeningResetProbe probe(opening);
         probe.exercise();
+        CHECK(probe.stale_obligation_seeded);
         CHECK(probe.fresh_open_filled);
-        CHECK(probe.provenance_cleared);
+        CHECK(probe.obligation_replaced);
     }
 }
 
-class LifecycleMutationProbe final : public DirectShortReversalProbe {
+class OpeningMutationProbe final : public DirectShortReversalProbe {
 public:
     enum class Mutation {
         AcceptedAdd,
@@ -582,7 +638,7 @@ public:
         FullClose,
     };
 
-    explicit LifecycleMutationProbe(Mutation mutation)
+    explicit OpeningMutationProbe(Mutation mutation)
         : mutation_(mutation) {
         initial_capital_ = 10000.0;
         default_qty_type_ = QtyType::PERCENT_OF_EQUITY;
@@ -604,7 +660,16 @@ public:
                 /*realized_net_profit=*/0.0);
             strategy_entry("S", false, kNaN, kNaN, kNaN);
         } else if (bar_index_ == 1) {
-            captured_after_reversal = direct_lifecycle_active();
+            captured_after_reversal = opening_obligations_.actionable()
+                && opening_obligations_.requires_adverse_pass()
+                && opening_owner_matches_position();
+            original_cycle_ = position_cycle_seq_;
+            original_qty_ = position_qty_;
+            original_incarnation_ = pyramid_entries_.empty()
+                ? 0 : pyramid_entries_.front().entry_incarnation;
+            if (opening_obligations_.peek()) {
+                original_fill_ = opening_obligations_.peek()->owner().producerFill;
+            }
             if (mutation_ == Mutation::AcceptedAdd) {
                 // Placed on bar 2 instead (see below): the all-in short has no
                 // free equity at its own fill price, so an add costed as
@@ -615,14 +680,22 @@ public:
                     "S", "", 1.0, kNaN, /*immediately=*/true);
                 mutation_applied =
                     position_side_ == PositionSide::SHORT
-                    && position_qty_ > 1.0;
-                cleared_after_mutation = !direct_lifecycle_active();
+                    && position_qty_ > 1.0
+                    && std::abs(position_qty_ - (original_qty_ - 1.0)) <= 1e-9;
+                valid_after_mutation = position_cycle_seq_ == original_cycle_
+                    && pyramid_entries_.size() == 1
+                    && pyramid_entries_.front().entry_incarnation
+                        == original_incarnation_
+                    && opening_owner_matches_position()
+                    && opening_obligations_.peek()->owner().producerFill
+                        == original_fill_;
             } else {
                 strategy_close(
                     "S", "", kNaN, kNaN, /*immediately=*/true);
                 mutation_applied =
                     position_side_ == PositionSide::FLAT;
-                cleared_after_mutation = !direct_lifecycle_active();
+                valid_after_mutation = position_cycle_seq_ == 0
+                    && opening_event_cleared();
             }
         } else if (bar_index_ == 2
                    && mutation_ == Mutation::AcceptedAdd) {
@@ -632,21 +705,33 @@ public:
                    && mutation_ == Mutation::AcceptedAdd) {
             mutation_applied =
                 position_side_ == PositionSide::SHORT
-                && position_entry_count_ == 2;
-            cleared_after_mutation = !direct_lifecycle_active();
+                && position_entry_count_ == 2
+                && std::abs(position_qty_ - (original_qty_ + 1.0)) <= 1e-9;
+            valid_after_mutation = position_cycle_seq_ == original_cycle_
+                && opening_obligations_.actionable()
+                && opening_owner_matches_position()
+                && opening_obligations_.peek()->owner().producerFill > original_fill_
+                && pyramid_entries_.size() == 2
+                && pyramid_entries_.front().entry_incarnation == original_incarnation_
+                && opening_obligations_.peek()->owner().orderIncarnation
+                    == pyramid_entries_.back().entry_incarnation;
         }
     }
 
     bool captured_after_reversal = false;
     bool mutation_applied = false;
-    bool cleared_after_mutation = false;
+    bool valid_after_mutation = false;
 
 private:
     Mutation mutation_;
+    int64_t original_cycle_ = 0;
+    uint64_t original_incarnation_ = 0;
+    uint64_t original_fill_ = 0;
+    double original_qty_ = 0.0;
 };
 
-void test_direct_lifecycle_clears_on_script_mutations() {
-    std::printf("test_direct_lifecycle_clears_on_script_mutations\n");
+void test_direct_reversal_owner_and_obligation_follow_script_mutations() {
+    std::printf("test_direct_reversal_owner_and_obligation_follow_script_mutations\n");
     const std::vector<Bar> bars = {
         bar(1000, 100.0, 100.0, 100.0, 100.0),
         bar(2000, 100.0, 100.0, 100.0, 100.0),
@@ -654,16 +739,16 @@ void test_direct_lifecycle_clears_on_script_mutations() {
         bar(4000, 90.0, 90.0, 90.0, 90.0),
     };
 
-    for (const LifecycleMutationProbe::Mutation mutation : {
-             LifecycleMutationProbe::Mutation::AcceptedAdd,
-             LifecycleMutationProbe::Mutation::ScriptPartialReduction,
-             LifecycleMutationProbe::Mutation::FullClose,
+    for (const OpeningMutationProbe::Mutation mutation : {
+             OpeningMutationProbe::Mutation::AcceptedAdd,
+             OpeningMutationProbe::Mutation::ScriptPartialReduction,
+             OpeningMutationProbe::Mutation::FullClose,
          }) {
-        LifecycleMutationProbe probe(mutation);
+        OpeningMutationProbe probe(mutation);
         probe.run(bars.data(), static_cast<int>(bars.size()));
         CHECK(probe.captured_after_reversal);
         CHECK(probe.mutation_applied);
-        CHECK(probe.cleared_after_mutation);
+        CHECK(probe.valid_after_mutation);
     }
 }
 
@@ -673,25 +758,28 @@ public:
 
     void on_bar(const Bar&) override {}
 
-    void prime_direct_lifecycle() {
-        default_market_direct_short_reversal_lifecycle_ = true;
+    void prime_opening_obligation() {
+        opening_obligations_.replace(broker::OpeningReceipt::check(
+            {position_cycle_seq_, broker_fill_event_seq_, 0,
+             bar_index_, current_bar_.timestamp}, 100.0,
+            broker::OpeningContinuation::RemainingAdversePath));
     }
 
-    bool direct_lifecycle_active() const {
-        return default_market_direct_short_reversal_lifecycle_;
+    bool opening_pending() const {
+        return opening_obligations_.pending();
     }
 };
 
-void test_run_reset_clears_direct_lifecycle() {
-    std::printf("test_run_reset_clears_direct_lifecycle\n");
+void test_run_reset_clears_opening_obligation() {
+    std::printf("test_run_reset_clears_opening_obligation\n");
     const std::vector<Bar> bars = {
         bar(1000, 100.0, 100.0, 100.0, 100.0),
     };
     RunResetControlProbe probe;
-    probe.prime_direct_lifecycle();
-    CHECK(probe.direct_lifecycle_active());
+    probe.prime_opening_obligation();
+    CHECK(probe.opening_pending());
     probe.run(bars.data(), static_cast<int>(bars.size()));
-    CHECK(!probe.direct_lifecycle_active());
+    CHECK(!probe.opening_pending());
 }
 
 }  // namespace
@@ -699,13 +787,13 @@ void test_run_reset_clears_direct_lifecycle() {
 int main() {
     std::printf("--- direct short reversal affordability ---\n");
     test_direct_reversal_runs_opening_check_and_one_adverse_retry();
-    test_direct_lifecycle_floor_zero_full_residual_yields_to_slice();
+    test_direct_reversal_floor_zero_full_residual_yields_to_slice();
     test_true_flat_floor_zero_control_slices_one_contract();
     test_direct_path_exclusion_matrix();
-    test_no_effect_same_side_add_preserves_direct_provenance();
-    test_fresh_entry_and_raw_order_clear_direct_provenance();
-    test_direct_lifecycle_clears_on_script_mutations();
-    test_run_reset_clears_direct_lifecycle();
+    test_no_effect_same_side_add_keeps_owner_without_new_obligation();
+    test_fresh_entry_and_raw_order_replace_stale_obligation();
+    test_direct_reversal_owner_and_obligation_follow_script_mutations();
+    test_run_reset_clears_opening_obligation();
     std::printf(
         "=== Results: %d passed, %d failed ===\n",
         tests_passed, tests_failed);

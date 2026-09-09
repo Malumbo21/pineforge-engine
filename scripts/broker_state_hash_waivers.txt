@@ -148,3 +148,12 @@ dual_entry_path_              # per-PASS arbitration working state; last_bar_dua
 # by scripts/gen_pending_order_mirror.py, so a new member fails the check
 # until it is decided about.
 pending_order.comment         # trade-report label only: copied into the Trade row's entry/exit comment at fill and never read by any fill, admission, sizing or eligibility path -- it cannot change a future fill
+
+# --- struct PyramidEntry: every field is explicitly folded, zero waivers.
+# entry_comment/max_runup/max_drawdown are exposed through Pine open/closed
+# trade accessors. Entry-bar masks/path/add provenance can affect a later
+# event in the same broker bar and the excursions Pine reads afterward.
+# Commission, slot shadow and opening origin select financial transitions.
+# Do not waive a field merely because it is not a direct fill-price input.
+# Any future exception must be named pyramid_entry.<member> with its lifetime
+# or report-only proof; the recursive checker rejects missing/stale waivers.

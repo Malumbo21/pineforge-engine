@@ -13,17 +13,27 @@ review): every scalar/string member -- the list is reflected by
 scripts/gen_pending_order_mirror.py's parser, the one source of truth for
 what PendingOrder declares -- must be referenced as ``o.<name>`` inside the
 hash function's ``for (const auto& o : pending_orders_)`` loop or waived as
-``pending_order.<name>  # reason`` in the waivers file."""
+``pending_order.<name>  # reason`` in the waivers file.
+
+Nested physical lots are checked separately: every PyramidEntry member must
+have its type-appropriate f.<fold>(e.<name>) inside the pyramid_entries_ loop,
+or a justified pyramid_entry.<name> waiver. Merely hashing the container name,
+mentioning a member, or hashing it outside its owning loop does not cover it.
+Both member lists use the same fail-closed named-struct parser."""
 from __future__ import annotations
 import re, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gen_pending_order_mirror import members as pending_order_members  # noqa: E402
+from gen_pending_order_mirror import members as struct_members  # noqa: E402
 
-PENDING_ORDER_LOOP_RE = re.compile(r"for\s*\(\s*const\s+auto&\s+o\s*:\s*pending_orders_\s*\)\s*\{")
 PENDING_WAIVER_PREFIX = "pending_order."
+PYRAMID_WAIVER_PREFIX = "pyramid_entry."
+PYRAMID_FOLD = {
+    "double": "d", "int": "i", "int64_t": "i", "uint64_t": "u",
+    "bool": "b", "std::string": "s",
+}
 
 MEMBER_RE = re.compile(r"^\s+[\w:<>, ]+?\s+(\w+_)\s*(?:=|;|\{)", re.M)
 # The marker must be the whole (trimmed) line -- not merely a substring, so a
@@ -88,20 +98,21 @@ def _load_waivers(path: Path) -> dict[str, str]:
     return waivers
 
 
-def _pending_order_loop_body(src: str) -> str:
-    """The brace-balanced body of broker_state_hash()'s resting-order loop
-    (comments already stripped). Only an ``o.<name>`` inside THIS loop counts
-    as hashing PendingOrder::<name>."""
-    matches = list(PENDING_ORDER_LOOP_RE.finditer(src))
+def _collection_loop_body(src: str, collection: str, variable: str) -> str:
+    """Brace-balanced body of one owning collection loop, comments stripped."""
+    loop_re = re.compile(
+        rf"for\s*\(\s*const\s+auto&\s+{re.escape(variable)}\s*:\s*"
+        rf"{re.escape(collection)}\s*\)\s*\{{")
+    matches = list(loop_re.finditer(src))
     if not matches:
         print("check_broker_state_hash_coverage: could not find "
-              "`for (const auto& o : pending_orders_) {` in engine_state_hash.cpp",
+              f"`for (const auto& {variable} : {collection}) {{` in engine_state_hash.cpp",
               file=sys.stderr)
         sys.exit(2)
     if len(matches) > 1:
         print("check_broker_state_hash_coverage: found "
-              f"{len(matches)} `for (const auto& o : pending_orders_) {{` loops in "
-              "engine_state_hash.cpp; expected exactly one (the PendingOrder coverage "
+              f"{len(matches)} `for (const auto& {variable} : {collection}) {{` loops in "
+              "engine_state_hash.cpp; expected exactly one (the nested coverage "
               "rule inspects a single loop body)", file=sys.stderr)
         sys.exit(2)
     depth, start = 1, matches[0].end()
@@ -113,22 +124,37 @@ def _pending_order_loop_body(src: str) -> str:
             depth -= 1
             if depth == 0:
                 return src[start:i]
-    print("check_broker_state_hash_coverage: unbalanced pending_orders_ loop", file=sys.stderr)
+    print(f"check_broker_state_hash_coverage: unbalanced {collection} loop", file=sys.stderr)
     sys.exit(2)
 
 
-def main() -> int:
-    hpp = (ROOT / "include/pineforge/engine.hpp").read_text(encoding="utf-8")
+def _pyramid_folded(loop: str, cpp_type: str, member: str) -> bool:
+    fold = PYRAMID_FOLD.get(cpp_type)
+    if fold is None:
+        return False
+    # Require an actual typed serialization call, not a read/assignment or an
+    # unrelated reference in the same source. Existing integer casts are fine.
+    value = rf"e\.{re.escape(member)}"
+    if fold == "i":
+        value = rf"(?:{value}|static_cast<int64_t>\(\s*{value}\s*\))"
+    return re.search(rf"\bf\.{fold}\(\s*{value}\s*\)\s*;", loop) is not None
+
+
+def main(root: Path = ROOT) -> int:
+    hpp = (root / "include/pineforge/engine.hpp").read_text(encoding="utf-8")
     regions = _regions(hpp)
     members = _members(regions)
 
-    src_raw = (ROOT / "src/engine_state_hash.cpp").read_text(encoding="utf-8")
+    src_raw = (root / "src/engine_state_hash.cpp").read_text(encoding="utf-8")
     src = _strip_cpp_comments(src_raw)
 
-    all_waivers = _load_waivers(ROOT / "scripts/broker_state_hash_waivers.txt")
-    waivers = {k: v for k, v in all_waivers.items() if not k.startswith(PENDING_WAIVER_PREFIX)}
+    all_waivers = _load_waivers(root / "scripts/broker_state_hash_waivers.txt")
+    waivers = {k: v for k, v in all_waivers.items()
+               if not k.startswith((PENDING_WAIVER_PREFIX, PYRAMID_WAIVER_PREFIX))}
     po_waivers = {k[len(PENDING_WAIVER_PREFIX):]: v
                   for k, v in all_waivers.items() if k.startswith(PENDING_WAIVER_PREFIX)}
+    pe_waivers = {k[len(PYRAMID_WAIVER_PREFIX):]: v
+                  for k, v in all_waivers.items() if k.startswith(PYRAMID_WAIVER_PREFIX)}
 
     orphans = sorted(w for w in waivers if w not in members)
     if orphans:
@@ -145,13 +171,13 @@ def main() -> int:
         return 1
 
     # --- struct PendingOrder: every scalar/string member, o.<name> in the loop ---
-    po_members = [n for _t, n in pending_order_members(hpp)]
+    po_members = [n for _t, n in struct_members(hpp)]
     po_orphans = sorted(w for w in po_waivers if w not in po_members)
     if po_orphans:
         print("check_broker_state_hash_coverage: pending_order.* waiver(s) naming a "
               f"member not in struct PendingOrder: {po_orphans}", file=sys.stderr)
         return 1
-    loop = _pending_order_loop_body(src)
+    loop = _collection_loop_body(src, "pending_orders_", "o")
     po_missing = sorted(
         m for m in po_members
         if not re.search(rf"\bo\.{re.escape(m)}\b", loop) and m not in po_waivers
@@ -161,9 +187,27 @@ def main() -> int:
               "(o.<name> in the pending_orders_ loop) nor waived (pending_order.<name>):",
               po_missing)
         return 1
+    # --- struct PyramidEntry: inspect every physical-lot field recursively ---
+    pe_members = struct_members(hpp, "PyramidEntry")
+    pe_orphans = sorted(set(pe_waivers) - {n for _t, n in pe_members})
+    if pe_orphans:
+        print("check_broker_state_hash_coverage: pyramid_entry.* waiver(s) naming a "
+              f"member not in struct PyramidEntry: {pe_orphans}", file=sys.stderr)
+        return 1
+    pe_loop = _collection_loop_body(src, "pyramid_entries_", "e")
+    pe_missing = sorted(n for t, n in pe_members
+                        if n not in pe_waivers and not _pyramid_folded(pe_loop, t, n))
+    pe_redundant = sorted(n for t, n in pe_members
+                          if n in pe_waivers and _pyramid_folded(pe_loop, t, n))
+    if pe_missing or pe_redundant:
+        print("check_broker_state_hash_coverage: PyramidEntry requires one typed fold "
+              "inside its loop or a justified pyramid_entry.* waiver; "
+              f"missing={pe_missing}, redundant_waivers={pe_redundant}")
+        return 1
     print(f"check_broker_state_hash_coverage: {len(members)} members in {len(regions)} "
           f"region(s), {len(waivers)} waived, OK; PendingOrder {len(po_members)} members, "
-          f"{len(po_waivers)} waived, OK")
+          f"{len(po_waivers)} waived, OK; PyramidEntry {len(pe_members)} members, "
+          f"{len(pe_waivers)} waived, OK")
     return 0
 
 

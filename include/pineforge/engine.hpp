@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include "na.hpp"
 #include "bar.hpp"
+#include "broker_events.hpp"
 #include "series.hpp"
 #include "timeframe.hpp"
 #include "magnifier.hpp"
@@ -1094,66 +1095,20 @@ struct StrategyOverrides {
 };
 
 // The C++ subclass contract is internal, unlike pineforge.h's stable C ABI.
-// Changing its vtable requires all generated/native C++ objects to be rebuilt.
+// Changing its layout or vtable requires all generated/native C++ objects to be rebuilt.
 // Version the mangled class name so an object using the old vtable cannot
 // silently link to the new run loop and dispatch the wrong virtual slot.
-inline namespace engine_script_run_v1 {
+inline namespace engine_script_run_v2 {
 class BacktestEngine {
 protected:
     // --- Position state ---
     // @broker-state begin
     PositionSide position_side_ = PositionSide::FLAT;
     double position_entry_price_ = 0.0;   // volume-weighted average (for strategy calculations)
-    // One-shot post-fill affordability event. Every 100%-margin LONG opening /
-    // accepted add queues it as before; SHORT queues it only for a high-level
-    // explicit-qty MARKET strategy.entry opening/add at margin_short=100.
-    // The event carries the raw matched-price base and is eligible unless a
-    // LONG fill proves the narrow frozen-all-in true-flat MARKET exemption.
-    // Rejected/no-op attempts leave an existing event untouched; a later
-    // successful SHORT opening/add with any non-scoped shape invalidates prior
-    // short provenance rather than letting end-of-bar reuse its stale fill.
-    // process_margin_call consumes and clears it on the current script bar.
-    // Do not reconstruct it from trade rows or
-    // position_entry_count_: a paired close/reentry can create zero-PnL rows,
-    // and FIFO can reduce a real pyramid back to one live lot.
-    bool opening_affordability_pending_ = false;
-    bool opening_affordability_eligible_ = false;
-    // The queued event came from a successful, commissioned, omitted-qty
-    // percent_of_equity=100 high-level MARKET long that filled from flat.
-    // It covers the proven true-flat form and the separately proven
-    // close-then-open form. process_margin_call combines this one-shot
-    // provenance with the actual margin/commission arithmetic before applying
-    // TV's fee-created, floor-zero one-contract fallback. Adds,
-    // explicit/priced/RAW orders and zero/CASH commission stay outside it.
-    bool commissioned_all_in_market_long_opening_affordability_ = false;
-    // The queued event came from a successful omitted-qty, 100%-of-equity
-    // MARKET reversal from SHORT to LONG at 100% long margin with zero opening
-    // commission. TV applies a one-contract post-fill affordability trim when
-    // this exact reversal has a positive but sub-lot restore amount.
-    bool opening_affordability_default_long_reversal_ = false;
-    // An eligible omitted 100%-of-equity MARKET short opening. This covers
-    // both the close-then-open shape that reaches the fill from FLAT and the
-    // direct LONG-to-SHORT auto-reversal shape. The one-shot bit queues the
-    // fill-price affordability pass and then one ordinary adverse-price pass
-    // on that same bar, even when the opening check itself is a no-op.
-    bool close_then_short_opening_requires_adverse_retry_ = false;
-    // Position-lifecycle provenance for a commissioned, omitted-qty,
-    // percent-of-equity=100 MARKET short that fills from flat at 100% short
-    // margin. Unlike the one-shot close-then-short opening event, this remains
-    // live across partial margin trims and clears when the position lifecycle
-    // ends or a later add changes its shape.
-    bool commissioned_all_in_market_short_lifecycle_ = false;
-    // Position-lifecycle provenance for an omitted-qty,
-    // percent-of-equity=100 MARKET short opened by a direct LONG-to-SHORT
-    // auto-reversal at 100% short margin. It carries no commission or
-    // flat-admission requirement. Broker margin-call reductions preserve the
-    // lifecycle; a script-driven reduction, add, full close, or fresh position
-    // clears it. At a later finite-price floor-zero margin call, this lifecycle
-    // selects the one-contract fallback only when the configured full-residual
-    // interpretation is off.
-    bool default_market_direct_short_reversal_lifecycle_ = false;
-    double opening_affordability_raw_fill_base_ =
-        std::numeric_limits<double>::quiet_NaN();
+    // Owned, consumable post-fill checkpoint. The shared successful-fill
+    // dispatcher supplies its producer and position identities; economic
+    // eligibility is decided there, independently of this lifecycle model.
+    broker::OpeningObligations opening_obligations_;
     int64_t position_entry_time_ = 0;
     // Position is FLAT until the first entry fires; the canonical
     // accessor ``signed_position_size`` already reads as 0 when FLAT
@@ -4384,7 +4339,7 @@ private:
     double account_currency_fx_at(int64_t timestamp_ms) const;
     double active_account_currency_fx() const;
     void settle_position_after_partial_exit(
-        double qty_before, PositionReductionCause cause);
+        PositionReductionCause cause);
     void enter_market_from_flat(const std::string& id, bool is_long,
                                 double fill_price, double explicit_qty,
                                 int explicit_qty_type,
@@ -5209,5 +5164,5 @@ public:
     void trace(const std::string& name, int value)   { trace(name, static_cast<double>(value)); }
 };
 
-} // inline namespace engine_script_run_v1
+} // inline namespace engine_script_run_v2
 } // namespace pineforge

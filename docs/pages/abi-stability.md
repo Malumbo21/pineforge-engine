@@ -113,12 +113,20 @@ notice:
 
 Rebuild generated C++ objects against matching engine headers and the runtime
 archive. The script-run preparation hook uses the internal
-`engine_script_run_v1` inline namespace, so an object compiled against the old
-`BacktestEngine` vtable cannot silently bind the new run loop. Newly generated
+`engine_script_run_v2` inline namespace, so an object compiled against the old
+`BacktestEngine` layout or vtable cannot silently bind the new runtime. Newly generated
 lifecycle-aware modules also require `PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1` at
 compile time. Regenerate and rebuild a strategy module to obtain complete
 script-state reset; replacing an archive does not retrofit an old module.
 These checks do not change the public C function signatures or POD layouts.
+
+The owned-opening model uses broker fingerprint domain
+`pineforge-broker-state/v2` and stream fingerprint version 2. Fingerprints must
+be compared only for the same pinned engine build and configuration; prior
+fingerprints are not compatible with this representation. They are replay
+checks, not serialized checkpoints. The model removes four obsolete hashed
+labels and hashes the opening receipt's producer, position and checkpoint
+identity instead. Rebuild native/generated modules against the new headers.
 
 If you find yourself reaching for any of these from outside the closed
 PineForge transpiler, you're holding it wrong — file an issue and we'll
