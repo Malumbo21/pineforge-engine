@@ -30,7 +30,7 @@ public:
         set_syminfo_timezone("America/New_York");
         set_syminfo_session("1700-1700");
         set_chart_timezone(display_zone);
-        intraday_cap_count_pooc_full_close_fills_ = true;
+        set_syminfo_metadata("intraday_cap_count_pooc_full_close_fills", 1.0);
     }
     void on_bar(const Bar&) override {
         if (market_close && signed_position_size() > 0) strategy_close("L");
@@ -89,8 +89,13 @@ public:
         max_intraday_filled_orders_ = 6;
         current_bar_.timestamp = time;
         _intraday_cap_currently_latched();
-        intraday_fill_count_ = 6;
-        intraday_cap_hit_ = true;
+        for (int i = 0; i < 6; ++i) {
+            max_intraday_filled_orders_.pre_dispatch(pine_cap_clock(),
+                pine_cap_calculation(),
+                {compat::pine::OrderKind::Market, 0, 0, true,
+                 compat::pine::Side::Flat, 0, 0}, 0);
+        }
+        max_intraday_filled_orders_.after_immediate_close_attempt();
     }
     bool latched_at(int64_t time) {
         current_bar_.timestamp = time;
@@ -173,6 +178,79 @@ void test_other_timed_sessions_resume_on_the_next_open() {
         CHECK(!engine.latched_at(market.open+24*hour));
     }
 }
+
+// The spent slot belongs to one close, risk day, source bar, and exact pending
+// order incarnation. None of those identities may independently bypass a
+// latched day after the close has consumed its final slot.
+void test_close_quota_transfer_requires_all_owners_and_consumes_once() {
+    using compat::pine::OrderRiskDay;
+    using compat::pine::QuotaAdmission;
+    const OrderRiskDay first_day{101}, next_day{102};
+    compat::pine::IntradayOrderBudget budget;
+    CHECK(budget.admit_matched_attempt(first_day, 2, 7, 100, 0)
+          == QuotaAdmission::BelowLimit);
+    budget.count_committed_close(first_day, 2, 2, 8, 200);
+    CHECK(budget.charged_slots() == 2);
+    CHECK(budget.latched());
+    CHECK(budget.can_inherit(first_day, 8, 200, 2));
+    CHECK(!budget.can_inherit(first_day, 8, 201, 2));
+    CHECK(!budget.can_inherit(first_day, 9, 200, 2));
+    CHECK(!budget.can_inherit(next_day, 8, 200, 2));
+    CHECK(!budget.can_inherit(first_day, 8, 200, 3));
+
+    struct Attempt { int bar; uint64_t incarnation; uint64_t latest_fill; };
+    for (const auto attempt : {Attempt{8, 201, 2}, Attempt{9, 200, 2},
+                               Attempt{8, 200, 3}}) {
+        auto wrong_owner = budget;
+        CHECK(wrong_owner.admit_matched_attempt(first_day, 2, attempt.bar,
+                  attempt.incarnation, attempt.latest_fill)
+              == QuotaAdmission::Blocked);
+        CHECK(wrong_owner.charged_slots() == 2);
+        CHECK(wrong_owner.latched());
+    }
+
+    auto continued = budget;
+    CHECK(continued.admit_matched_attempt(first_day, 2, 8, 200, 2)
+          == QuotaAdmission::ReachedLimit);
+    CHECK(continued.charged_slots() == 2);
+    CHECK(!continued.transfer());
+    CHECK(continued.admit_matched_attempt(first_day, 2, 8, 200, 2)
+          == QuotaAdmission::Blocked);
+
+    auto declined = budget;
+    declined.decline(201); // Another declined attempt cannot spend this slot.
+    CHECK(declined.can_inherit(first_day, 8, 200, 2));
+    declined.decline(200);
+    CHECK(!declined.transfer());
+    CHECK(declined.charged_slots() == 2);
+    CHECK(declined.latched());
+
+    auto expired_batch = budget;
+    expired_batch.expire_transfer();
+    CHECK(expired_batch.admit_matched_attempt(first_day, 2, 8, 200, 2)
+          == QuotaAdmission::Blocked);
+
+    // A new close while already latched receives no debit. It therefore cannot
+    // mint a new transfer or keep the earlier close's continuation alive.
+    auto uncounted_close = budget;
+    uncounted_close.count_committed_close(first_day, 2, 3, 8, 201);
+    CHECK(uncounted_close.charged_slots() == 2);
+    CHECK(!uncounted_close.transfer());
+    CHECK(uncounted_close.admit_matched_attempt(first_day, 2, 8, 201, 3)
+          == QuotaAdmission::Blocked);
+
+    // Observing the same risk day leaves ownership intact. Renewing quota
+    // retires the old transfer; its incarnation must spend a fresh slot.
+    budget.enter_day(first_day);
+    CHECK(budget.can_inherit(first_day, 8, 200, 2));
+    budget.enter_day(next_day);
+    CHECK(budget.charged_slots() == 0);
+    CHECK(!budget.latched());
+    CHECK(!budget.transfer());
+    CHECK(budget.admit_matched_attempt(next_day, 2, 8, 200, 2)
+          == QuotaAdmission::BelowLimit);
+    CHECK(budget.charged_slots() == 1);
+}
 }
 
 int main() {
@@ -180,6 +258,7 @@ int main() {
     test_continuous_and_unconfigured_sessions_keep_chart_clock();
     test_native_holiday_merge_does_not_hold_broker_limit();
     test_other_timed_sessions_resume_on_the_next_open();
+    test_close_quota_transfer_requires_all_owners_and_consumes_once();
     std::printf("%d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;
 }

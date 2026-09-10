@@ -61,8 +61,10 @@ Sentinels for "not overridden": `NaN` (doubles), `-1` (ints).
 | `close_entries_rule` | FIFO | `ANY`/`any`/`1` = ANY, else FIFO |
 
 **Compile-time only (no override path):** `margin_long` / `margin_short`
-(default 100 = 1x). `script_has_strategy_close_` is retained only as a legacy
-generated-code compatibility bit and does not affect runtime behavior.
+(default 100 = 1x). Order behavior follows executed commands; the presence of
+an unreachable close call in source does not configure the broker. Regenerate
+older generated C++ that assigns the removed `script_has_strategy_close_`
+member before rebuilding against these headers.
 
 ## 1.3 `strategy.risk.*` — compile-time only
 

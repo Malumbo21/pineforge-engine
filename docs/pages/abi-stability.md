@@ -111,22 +111,41 @@ notice:
 - Internal symbol names (anything not tagged `PF_API`).
 - The shape of internal log lines (use them for humans, not parsers).
 
-Rebuild generated C++ objects against matching engine headers and the runtime
-archive. The script-run preparation hook uses the internal
-`engine_script_run_v2` inline namespace, so an object compiled against the old
-`BacktestEngine` layout or vtable cannot silently bind the new runtime. Newly generated
-lifecycle-aware modules also require `PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1` at
-compile time. Regenerate and rebuild a strategy module to obtain complete
-script-state reset; replacing an archive does not retrofit an old module.
-These checks do not change the public C function signatures or POD layouts.
+Rebuild generated and native C++ objects against matching engine headers and
+runtime. The cap compatibility extraction changes the v2 object layout and
+therefore uses the internal `engine_script_run_v3` inline namespace. An object
+built from base `38dc73e` headers references v2 out-of-line members and must
+fail to link to this v3 runtime. The source-pairing check compiles frozen exact
+base headers separately before testing the link, so a missing include or
+compile failure cannot masquerade as mismatch protection. Both generated-style
+and native-style current callers must still link.
 
-The owned-opening model uses broker fingerprint domain
-`pineforge-broker-state/v2` and stream fingerprint version 2. Fingerprints must
-be compared only for the same pinned engine build and configuration; prior
-fingerprints are not compatible with this representation. They are replay
-checks, not serialized checkpoints. The model removes four obsolete hashed
-labels and hashes the opening receipt's producer, position and checkpoint
-identity instead. Rebuild native/generated modules against the new headers.
+`PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1` remains 1: it describes the existing hook
+capability, not the class layout version. Regenerate and rebuild a strategy
+module to obtain complete script-state reset; replacing an archive does not
+retrofit an old module. Public C function signatures, POD layouts,
+`PF_ABI_VERSION` (4), and `strategy_stream_api_version()` (1) are unchanged.
+
+Namespace versioning protects referenced internal C++ symbols; it does not
+validate an erased `pf_strategy_t` handle. Use a handle only with functions from
+its creating strategy module. A fully self-contained old module can still use
+its own matching runtime; this check does not turn it into a v3 module.
+
+The cap boundary also advances the broker fingerprint domain to
+`pineforge-broker-state/v3` and stream fingerprint version to 3. These identify
+changed serialized state, including the Pine configuration/quota/cause and
+separate generic close request. The Pine component schema remains 1; it is
+independent of the aggregate fingerprint version. Prior v2 fingerprints are
+not comparable. Fingerprints are replay checks, not serialized checkpoints or
+complete hashes of private strategy state. The native runner already binds
+its strategy-library SHA; its ledger format and Python provenance fingerprints
+are separate contracts and do not change here.
+
+Determinism is conditional on identical externally supplied market, intent and
+fill-report sequences, configuration, code and version. It is not a claim that
+live execution prices, quantities or callback arrival are predictable. The
+version bump changes linkage and fingerprint bytes; it changes no financial
+rule, fill price, fee, quota policy or economic test expectation.
 
 If you find yourself reaching for any of these from outside the closed
 PineForge transpiler, you're holding it wrong — file an issue and we'll

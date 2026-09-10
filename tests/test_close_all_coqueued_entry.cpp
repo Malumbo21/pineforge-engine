@@ -410,10 +410,7 @@ static void test_G_carry_priorbar_still_cancelled() {
 // co-queued with close_all is never a target of the same-direction wipe
 // (is_long != exit_closed_was_long); its behavior is IDENTICAL before and after
 // this fix. Pins the generated-script behavior: the opposite short stop
-// survives and fills with its placement-time reversal transaction. Because
-// this source contains close_all, legacy codegen set
-// script_has_strategy_close_=true even before issue #141 removed that AST bit
-// from the runtime predicate.
+// survives and fills with its placement-time reversal transaction.
 //
 //   bar0: entry("L0", mkt)
 //   bar1: L0 fills @100 → LONG 1. arm OPPOSITE short stop "SOPP"@90 + close_all()
@@ -427,10 +424,7 @@ static void test_G_opposite_unchanged_ki64() {
     std::printf("G-opposite (KI-64 opposite-direction unchanged)\n");
     class Probe : public ProbeBase {
     public:
-        Probe() : ProbeBase(2) {
-            // Match what codegen emits for the reachable close_all below.
-            script_has_strategy_close_ = true;
-        }
+        Probe() : ProbeBase(2) {}
         void on_bar(const Bar&) override {
             if (bar_index_ == 0) strategy_entry("L0", true);
             if (bar_index_ == 1) {

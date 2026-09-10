@@ -661,7 +661,8 @@ void BacktestEngine::stream_refresh_action_metadata(size_t first_action, size_t 
 uint64_t BacktestEngine::stream_state_hash() const {
     // Versioned observable-state fingerprint. Not a native-object snapshot and
     // deliberately excludes the consumable action queue. Recovery replays the
-    // original inputs into a fresh deterministic strategy and checks every step.
+    // same externally supplied input sequence into the same strategy/config/
+    // version and checks every step. This does not predict live executions.
     uint64_t hash = 1469598103934665603ULL;
     auto bytes = [&hash](const void* data, size_t count) {
         const auto* p = static_cast<const unsigned char*>(data);
@@ -677,7 +678,7 @@ uint64_t BacktestEngine::stream_state_hash() const {
         integer(static_cast<uint64_t>(bar.timestamp));
         real(bar.open); real(bar.high); real(bar.low); real(bar.close); real(bar.volume);
     };
-    integer(2); integer(broker_state_hash());
+    integer(3); integer(broker_state_hash());
     integer(static_cast<uint64_t>(stream_phase_));
     integer(static_cast<uint64_t>(stream_input_mode_));
     integer(static_cast<uint64_t>(stream_input_tf_ms_));

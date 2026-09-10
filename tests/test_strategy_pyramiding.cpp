@@ -124,12 +124,12 @@ public:
 
 // Metamorphic probe for issue #141. Both instances execute exactly the same
 // broker commands: a bracket closes the source long, then a pre-armed priced
-// short entry fires from flat. The only difference is the legacy codegen AST
-// bit that says whether the Pine source contains any strategy.close call.
-// An unreachable call can change that bit but cannot change runtime behavior.
+// short entry fires from flat. One source variant contains an unreachable
+// close command; it must not change runtime behavior.
+template <bool IncludeUnreachableClose>
 class BracketExitDeferredFlipProbe : public BacktestEngine {
 public:
-    explicit BracketExitDeferredFlipProbe(bool ast_has_strategy_close) {
+    BracketExitDeferredFlipProbe() {
         initial_capital_ = 1'000'000;
         default_qty_type_ = QtyType::FIXED;
         default_qty_value_ = 1.0;
@@ -137,10 +137,12 @@ public:
         commission_value_ = 0;
         pyramiding_ = 1;
         syminfo_mintick_ = 0.01;
-        script_has_strategy_close_ = ast_has_strategy_close;
     }
 
     void on_bar(const Bar&) override {
+        if constexpr (IncludeUnreachableClose) {
+            if (false) strategy_close("unreachable");
+        }
         if (bar_index_ == 0) {
             strategy_entry("L", true,
                            std::numeric_limits<double>::quiet_NaN(),
@@ -211,8 +213,8 @@ static void test_deferred_flip_chain_grows() {
 }
 
 // Scenario 1b: a strategy.exit bracket is itself sufficient to close the
-// source position before a priced opposite entry fires. The global AST scan
-// for strategy.close must not decide whether the captured carry applies.
+// source position before a priced opposite entry fires. Adding an unreachable
+// close command must not change whether the captured carry applies.
 static void test_unreachable_strategy_close_is_semantically_inert() {
     std::printf("test_unreachable_strategy_close_is_semantically_inert\n");
     Bar bars[4] = {
@@ -222,8 +224,8 @@ static void test_unreachable_strategy_close_is_semantically_inert() {
         {100, 106,  99, 105, 1000, 240'000},  // S limit fires from flat
     };
 
-    BracketExitDeferredFlipProbe without_dead_close(false);
-    BracketExitDeferredFlipProbe with_dead_close(true);
+    BracketExitDeferredFlipProbe<false> without_dead_close;
+    BracketExitDeferredFlipProbe<true> with_dead_close;
     without_dead_close.run(bars, 4);
     with_dead_close.run(bars, 4);
 

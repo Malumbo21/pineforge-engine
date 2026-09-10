@@ -902,8 +902,7 @@ void BacktestEngine::consume_tv_carry_from_siblings(const std::string& id,
 //                                    -- new entry is opposite to the carry
 //                                       position
 //
-// Do not gate this on the compile-time ``script_has_strategy_close_`` AST
-// scan. A bracket from ``strategy.exit`` can close the source position too,
+// A bracket from ``strategy.exit`` can close the source position too,
 // and adding an unreachable ``strategy.close`` must be semantically inert.
 //
 // After applying the carry, ``consume_tv_carry_from_siblings`` zeroes the

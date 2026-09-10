@@ -25,6 +25,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 #include <pineforge/bar.hpp>
@@ -56,6 +57,66 @@ namespace {
 constexpr int64_t kT0_UTC = 1743379200000LL;       // 2025-03-31 00:00 UTC
 constexpr int64_t k15m_ms = 900'000LL;
 constexpr int64_t kNextDay_UTC = kT0_UTC + 86'400'000LL;  // 2025-04-01 00:00 UTC
+
+// Policy selection stays independent of runtime ownership. In particular,
+// resetting one candidate through metadata must not enable either sibling.
+void test_intraday_candidate_metadata_preserves_default_off_policies() {
+    class Probe : public BacktestEngine {
+    public:
+        void on_bar(const Bar&) override {}
+        bool policy(int index) const {
+            if (index == 0) return max_intraday_filled_orders_.configuration().skip_noop_market;
+            if (index == 1) return max_intraday_filled_orders_.configuration().defer_pooc_close;
+            return max_intraday_filled_orders_.configuration().count_pooc_full_close;
+        }
+    };
+    const char* keys[] = {
+        "intraday_cap_skip_noop_market_fills",
+        "intraday_cap_defer_pooc_close",
+        "intraday_cap_count_pooc_full_close_fills",
+    };
+    const double disabled[] = {
+        0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(),
+    };
+    for (int selected = 0; selected < 3; ++selected) {
+        Probe probe;
+        for (int index = 0; index < 3; ++index) CHECK(!probe.policy(index));
+        for (double value : disabled) {
+            probe.set_syminfo_metadata(keys[selected], 0.25);
+            for (int index = 0; index < 3; ++index)
+                CHECK(probe.policy(index) == (index == selected));
+            probe.set_syminfo_metadata(keys[selected], value);
+            for (int index = 0; index < 3; ++index) CHECK(!probe.policy(index));
+        }
+    }
+}
+
+// A due close owns a position cycle and a future ordinary opening boundary.
+// Neither a second visit to its trigger bar nor a replacement position may
+// consume the close as if it belonged to that different boundary or position.
+void test_due_cap_close_has_one_boundary_and_position_owner() {
+    broker::PositionCloseObligation due;
+    due.schedule({42, 11, 7, "literal cause"});
+    CHECK(!due.take_at_open(7, 11));
+    CHECK(due.pending());
+    const auto taken = due.take_at_open(8, 11);
+    CHECK(taken.has_value());
+    if (taken) {
+        CHECK(taken->action_id == 42);
+        CHECK(taken->position_cycle == 11);
+        CHECK(taken->after_bar == 7);
+        CHECK(taken->comment == "literal cause");
+    }
+    CHECK(!due.pending());
+    CHECK(!due.take_at_open(9, 11));
+
+    due.schedule({42, 11, 7, "literal cause"});
+    CHECK(!due.take_at_open(8, 12));
+    CHECK(!due.pending());
+    CHECK(!due.take_at_open(9, 11));
+}
 
 // ── Test 1: cap=2 latches after first cap-close, releases on day rollover ──
 //
@@ -224,7 +285,7 @@ void test_noop_market_attempt_does_not_consume_cap(bool is_long) {
 
     class Strat : public BacktestEngine {
     public:
-        explicit Strat(bool direction) : is_long(direction) {
+        explicit Strat(bool direction, bool skip_noop = true) : is_long(direction) {
             initial_capital_ = 100000;
             default_qty_type_ = QtyType::FIXED;
             default_qty_value_ = 1.0;
@@ -233,7 +294,8 @@ void test_noop_market_attempt_does_not_consume_cap(bool is_long) {
             pyramiding_ = 0;
             process_orders_on_close_ = true;
             max_intraday_filled_orders_ = 2;
-            set_syminfo_metadata("intraday_cap_skip_noop_market_fills", 1.0);
+            if (skip_noop)
+                set_syminfo_metadata("intraday_cap_skip_noop_market_fills", 1.0);
         }
         bool is_long;
         void on_bar(const Bar&) override {
@@ -244,6 +306,9 @@ void test_noop_market_attempt_does_not_consume_cap(bool is_long) {
             }
         }
         double get_signed_position_size() const { return signed_position_size(); }
+        int charged_slots() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
+        uint64_t broker_fills() const { return broker_fill_event_seq_; }
     };
 
     Strat strat(is_long);
@@ -256,6 +321,28 @@ void test_noop_market_attempt_does_not_consume_cap(bool is_long) {
     CHECK(strat.trade_count() == 0);
     CHECK(std::fabs(strat.get_signed_position_size()
                     - (is_long ? 1.0 : -1.0)) < 1e-9);
+    CHECK(strat.charged_slots() == 1);
+    CHECK(strat.broker_fills() == 1);
+    CHECK(!strat.cap_hit());
+
+    // Preserve the actual default policy: it charges the matched no-op and
+    // reaches cap=2. Only the real entry and resulting forced close are broker
+    // events; the charged attempt itself must not fabricate a third event.
+    Strat legacy(is_long, false);
+    legacy.run(bars, 2);
+    CHECK(legacy.trade_count() == 1);
+    CHECK(std::fabs(legacy.get_signed_position_size()) < 1e-9);
+    CHECK(legacy.charged_slots() == 2);
+    CHECK(legacy.broker_fills() == 2);
+    CHECK(legacy.cap_hit());
+    if (legacy.trade_count() == 1) {
+        CHECK(legacy.get_trade(0).entry_id == "E");
+        CHECK(legacy.get_trade(0).entry_price == 101.0);
+        CHECK(legacy.get_trade(0).exit_price == (is_long ? 103.0 : 102.0));
+        CHECK(legacy.get_trade(0).exit_time == bars[1].timestamp);
+        CHECK(legacy.get_trade(0).exit_comment ==
+              "Close Position (Max number of filled orders in one day)");
+    }
 }
 
 // A POOC MARKET entry that reaches the intraday cap is accepted at the signal
@@ -304,6 +391,135 @@ void test_pooc_cap_close_defers_to_next_open(bool is_long) {
         CHECK(trade.exit_comment == kCapMsg);
         CHECK(trade.exit_id.empty());
     }
+}
+
+// Yesterday's due close must survive today's quota renewal, and must execute
+// before today's script can open a new position. Each day's close is consumed
+// once, at its own next open, without charging the newly renewed quota.
+void test_due_pooc_cap_close_survives_day_gap(bool is_long) {
+    class Strat : public BacktestEngine {
+    public:
+        explicit Strat(bool direction) : is_long(direction) {
+            initial_capital_ = 100000;
+            default_qty_type_ = QtyType::FIXED;
+            default_qty_value_ = 1.0;
+            commission_value_ = 0.0;
+            slippage_ = 0;
+            pyramiding_ = 0;
+            process_orders_on_close_ = true;
+            max_intraday_filled_orders_ = 1;
+            set_syminfo_metadata("intraday_cap_defer_pooc_close", 1.0);
+        }
+        bool is_long;
+        bool flat_at_reopen = false;
+        bool latched_at_reopen = true;
+        int quota_at_reopen = -1;
+        void on_bar(const Bar&) override {
+            if (bar_index_ == 0) strategy_entry("OLD", is_long);
+            if (bar_index_ == 1) {
+                flat_at_reopen = std::fabs(signed_position_size()) < 1e-9;
+                latched_at_reopen = _intraday_cap_currently_latched();
+                quota_at_reopen = max_intraday_filled_orders_.budget().charged_slots();
+                strategy_entry("NEW", is_long);
+            }
+            if (bar_index_ >= 2) strategy_entry("LATE", is_long);
+        }
+        int charged_slots() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
+        bool due_pending() const { return position_close_obligation_.pending(); }
+        uint64_t broker_fills() const { return broker_fill_event_seq_; }
+        double position_size() const { return signed_position_size(); }
+    };
+    Strat strat(is_long);
+    Bar bars[] = {
+        {100, 112, 88, is_long ? 110.0 : 90.0, 50, kNextDay_UTC-k15m_ms},
+        {is_long ? 111.0 : 89.0, 114, 86, is_long ? 112.0 : 88.0,
+         50, kNextDay_UTC},
+        {is_long ? 113.0 : 87.0, 115, 85, is_long ? 114.0 : 86.0,
+         50, kNextDay_UTC+k15m_ms},
+        {is_long ? 114.0 : 86.0, 116, 84, is_long ? 115.0 : 85.0,
+         50, kNextDay_UTC+2*k15m_ms},
+    };
+    strat.run(bars, 4);
+    CHECK(strat.flat_at_reopen);
+    CHECK(!strat.latched_at_reopen);
+    CHECK(strat.quota_at_reopen == 0);
+    CHECK(strat.trade_count() == 2);
+    CHECK(strat.charged_slots() == 1);
+    CHECK(strat.cap_hit());
+    CHECK(!strat.due_pending());
+    CHECK(strat.broker_fills() == 4);
+    CHECK(std::fabs(strat.position_size()) < 1e-9);
+    if (strat.trade_count() == 2) {
+        CHECK(strat.get_trade(0).entry_id == "OLD");
+        CHECK(strat.get_trade(1).entry_id == "NEW");
+        for (int i = 0; i < 2; ++i) {
+            const auto& trade = strat.get_trade(i);
+            CHECK(trade.entry_time == bars[i].timestamp);
+            CHECK(trade.entry_price == bars[i].close);
+            CHECK(trade.exit_time == bars[i+1].timestamp);
+            CHECK(trade.exit_price == bars[i+1].open);
+            CHECK(std::fabs(trade.pnl - 1.0) < 1e-9);
+            CHECK(trade.exit_comment ==
+                  "Close Position (Max number of filled orders in one day)");
+            CHECK(trade.exit_id.empty());
+        }
+    }
+}
+
+// A one-bar run can end with an unconsumed due close. A second run on the same
+// engine starts a new lifecycle even when its literal timestamps are reused.
+void test_new_run_discards_old_due_close_and_quota(bool is_long) {
+    class Strat : public BacktestEngine {
+    public:
+        explicit Strat(bool direction) : is_long(direction) {
+            initial_capital_ = 100000;
+            default_qty_type_ = QtyType::FIXED;
+            default_qty_value_ = 1.0;
+            pyramiding_ = 0;
+            process_orders_on_close_ = true;
+            max_intraday_filled_orders_ = 1;
+            set_syminfo_metadata("intraday_cap_defer_pooc_close", 1.0);
+        }
+        bool is_long;
+        bool place_entry = true;
+        bool due_on_first_callback = false;
+        int slots_on_first_callback = -1;
+        void on_bar(const Bar&) override {
+            if (bar_index_ != 0) return;
+            due_on_first_callback = position_close_obligation_.pending();
+            slots_on_first_callback = max_intraday_filled_orders_.budget().charged_slots();
+            if (place_entry) strategy_entry("E", is_long);
+        }
+        int charged_slots() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
+        bool due_pending() const { return position_close_obligation_.pending(); }
+        uint64_t broker_fills() const { return broker_fill_event_seq_; }
+        double position_size() const { return signed_position_size(); }
+    };
+    Strat strat(is_long);
+    Bar bars[] = {
+        {100, 102, 98, 101, 50, kT0_UTC},
+        {101, 103, 99, 102, 50, kT0_UTC+k15m_ms},
+    };
+    strat.run(bars, 1);
+    CHECK(strat.due_pending());
+    CHECK(strat.charged_slots() == 1);
+    CHECK(strat.cap_hit());
+    CHECK(strat.broker_fills() == 1);
+    CHECK(strat.trade_count() == 0);
+    CHECK(std::fabs(strat.position_size() - (is_long ? 1.0 : -1.0)) < 1e-9);
+
+    strat.place_entry = false;
+    strat.run(bars, 2);
+    CHECK(!strat.due_on_first_callback);
+    CHECK(strat.slots_on_first_callback == 0);
+    CHECK(!strat.due_pending());
+    CHECK(strat.charged_slots() == 0);
+    CHECK(!strat.cap_hit());
+    CHECK(strat.broker_fills() == 0);
+    CHECK(strat.trade_count() == 0);
+    CHECK(std::fabs(strat.position_size()) < 1e-9);
 }
 
 // Fill-time role controls for factor A.  A same-tick close must make the
@@ -433,9 +649,9 @@ void test_pooc_strategy_close_consumes_cap(bool is_long) {
     CHECK(std::fabs(strat.get_signed_position_size()) < 1e-9);
 }
 
-// A close plus opposite MARKET entry on the same POOC tick is one TV reversal
-// fill, even though the engine scheduler materializes a close before the entry.
-// Counting both would latch on the scaffolding close and drop the real Nth fill.
+// Candidate C shares one quota slot between the close and opposite MARKET.
+// Broker operations and FIFO rows stay separate: sharing quota must not erase
+// the explicit close or the later synthetic close of the opposite entry.
 void test_pooc_close_coqueued_with_reversal_counts_once(bool starts_long) {
     std::printf("test_pooc_close_coqueued_with_reversal_counts_once(%s)\n",
                 starts_long ? "long-to-short" : "short-to-long");
@@ -461,6 +677,8 @@ void test_pooc_close_coqueued_with_reversal_counts_once(bool starts_long) {
             }
         }
         double get_signed_position_size() const { return signed_position_size(); }
+        int charged_slots() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        uint64_t broker_fills() const { return broker_fill_event_seq_; }
     };
 
     Strat strat(starts_long);
@@ -472,9 +690,73 @@ void test_pooc_close_coqueued_with_reversal_counts_once(bool starts_long) {
 
     CHECK(strat.trade_count() == 2);
     CHECK(std::fabs(strat.get_signed_position_size()) < 1e-9);
+    CHECK(strat.charged_slots() == 2);
+    // Initial entry, explicit close, opposite entry, synthetic risk close.
+    CHECK(strat.broker_fills() == 4);
     if (strat.trade_count() == 2) {
+        CHECK(strat.get_trade(0).entry_id == "FIRST");
+        CHECK(strat.get_trade(0).exit_id == "__close__FIRST");
+        CHECK(strat.get_trade(1).entry_id == "REVERSE");
+        CHECK(strat.get_trade(1).exit_id.empty());
         CHECK(strat.get_trade(1).exit_comment ==
               "Close Position (Max number of filled orders in one day)");
+    }
+}
+
+// Native accounting control for C's existing full-position close path: two
+// FIFO trade rows from one direct close consume one slot and one broker event.
+// This does not broaden the grader's restricted pyramiding=0 policy oracle.
+void test_pooc_full_close_counts_one_fill_for_two_fifo_rows(bool is_long) {
+    class Strat : public BacktestEngine {
+    public:
+        Strat(bool direction, bool count_close) : is_long(direction) {
+            initial_capital_ = 100000;
+            default_qty_type_ = QtyType::FIXED;
+            default_qty_value_ = 1.0;
+            commission_value_ = 0.0;
+            slippage_ = 0;
+            pyramiding_ = 2;
+            process_orders_on_close_ = true;
+            max_intraday_filled_orders_ = 4;
+            if (count_close)
+                set_syminfo_metadata("intraday_cap_count_pooc_full_close_fills", 1.0);
+        }
+        bool is_long;
+        void on_bar(const Bar&) override {
+            if (bar_index_ < 2) strategy_entry("E", is_long);
+            if (bar_index_ == 2) strategy_close("E");
+        }
+        int charged_slots() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
+        uint64_t broker_fills() const { return broker_fill_event_seq_; }
+        double position_size() const { return signed_position_size(); }
+    };
+    Bar bars[] = {
+        {100, 102, 98, 101, 50, kT0_UTC},
+        {101, 103, 99, 102, 50, kT0_UTC+k15m_ms},
+        {102, 104, 100, 103, 50, kT0_UTC+2*k15m_ms},
+    };
+    for (bool count_close : {false, true}) {
+        Strat strat(is_long, count_close);
+        strat.run(bars, 3);
+        CHECK(strat.trade_count() == 2);
+        CHECK(strat.charged_slots() == (count_close ? 3 : 2));
+        CHECK(strat.broker_fills() == 3);
+        CHECK(!strat.cap_hit());
+        CHECK(std::fabs(strat.position_size()) < 1e-9);
+        if (strat.trade_count() == 2) {
+            for (int i = 0; i < 2; ++i) {
+                const auto& trade = strat.get_trade(i);
+                CHECK(trade.entry_id == "E");
+                CHECK(trade.entry_time == bars[i].timestamp);
+                CHECK(trade.entry_price == bars[i].close);
+                CHECK(trade.exit_time == bars[2].timestamp);
+                CHECK(trade.exit_price == bars[2].close);
+                CHECK(trade.exit_id == "__close__E");
+                CHECK(std::fabs(trade.qty - 1.0) < 1e-9);
+                CHECK(std::fabs(trade.pnl - (is_long ? 1.0 : -1.0)*(2-i)) < 1e-9);
+            }
+        }
     }
 }
 
@@ -511,8 +793,8 @@ void test_pooc_close_count_survives_rejected_reversal(bool starts_long) {
             }
         }
         double position_size() const { return signed_position_size(); }
-        int fill_count() const { return intraday_fill_count_; }
-        bool cap_hit() const { return intraday_cap_hit_; }
+        int fill_count() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
     };
 
     Strat strat(starts_long);
@@ -561,8 +843,8 @@ void test_pooc_close_count_survives_cancelled_reversal(bool starts_long) {
             }
         }
         double position_size() const { return signed_position_size(); }
-        int fill_count() const { return intraday_fill_count_; }
-        bool cap_hit() const { return intraday_cap_hit_; }
+        int fill_count() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
     };
 
     Strat strat(starts_long);
@@ -609,8 +891,8 @@ void test_pooc_close_count_survives_noop_reversal(bool starts_long) {
             }
         }
         double position_size() const { return signed_position_size(); }
-        int fill_count() const { return intraday_fill_count_; }
-        bool cap_hit() const { return intraday_cap_hit_; }
+        int fill_count() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
     };
 
     Strat strat(starts_long);
@@ -658,8 +940,8 @@ void test_intervening_fill_expires_pooc_close_inheritance(bool starts_long) {
             }
         }
         double position_size() const { return signed_position_size(); }
-        int fill_count() const { return intraday_fill_count_; }
-        bool cap_hit() const { return intraday_cap_hit_; }
+        int fill_count() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
     };
 
     Strat strat(starts_long);
@@ -707,8 +989,8 @@ void test_pooc_close_count_candidate_excludes_magnifier() {
             if (bar_index_ == 0) strategy_entry("FIRST", true);
             if (bar_index_ == 1) strategy_close("FIRST");
         }
-        int fill_count() const { return intraday_fill_count_; }
-        bool cap_hit() const { return intraday_cap_hit_; }
+        int fill_count() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
     };
 
     Strat strat;
@@ -746,7 +1028,7 @@ void test_pooc_deferred_cap_candidate_excludes_magnifier() {
         }
         double position_size() const { return signed_position_size(); }
         bool deferred_close_pending() const {
-            return intraday_cap_deferred_close_pending_;
+            return position_close_obligation_.pending();
         }
     };
 
@@ -786,7 +1068,7 @@ void test_pooc_deferred_cap_candidate_excludes_coof() {
         }
         double position_size() const { return signed_position_size(); }
         bool deferred_close_pending() const {
-            return intraday_cap_deferred_close_pending_;
+            return position_close_obligation_.pending();
         }
     };
 
@@ -824,8 +1106,8 @@ void test_pooc_close_count_candidate_excludes_coof() {
             }
         }
         double position_size() const { return signed_position_size(); }
-        int fill_count() const { return intraday_fill_count_; }
-        bool cap_hit() const { return intraday_cap_hit_; }
+        int fill_count() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
     };
 
     Strat strat;
@@ -862,8 +1144,8 @@ void test_pooc_close_count_candidate_excludes_any_mode() {
             if (bar_index_ == 1) strategy_close("FIRST");
         }
         double position_size() const { return signed_position_size(); }
-        int fill_count() const { return intraday_fill_count_; }
-        bool cap_hit() const { return intraday_cap_hit_; }
+        int fill_count() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
     };
 
     Strat strat;
@@ -898,8 +1180,8 @@ void test_pooc_close_count_candidate_excludes_stream_realtime() {
             if (bar_index_ == 1) strategy_close("FIRST");
         }
         double position_size() const { return signed_position_size(); }
-        int fill_count() const { return intraday_fill_count_; }
-        bool cap_hit() const { return intraday_cap_hit_; }
+        int fill_count() const { return max_intraday_filled_orders_.budget().charged_slots(); }
+        bool cap_hit() const { return max_intraday_filled_orders_.budget().latched(); }
     };
 
     Strat strat;
@@ -939,7 +1221,7 @@ void test_pooc_deferred_cap_candidate_excludes_stream_warmup() {
         }
         double position_size() const { return signed_position_size(); }
         bool deferred_close_pending() const {
-            return intraday_cap_deferred_close_pending_;
+            return position_close_obligation_.pending();
         }
     };
 
@@ -960,12 +1242,18 @@ void test_pooc_deferred_cap_candidate_excludes_stream_warmup() {
 }  // namespace
 
 int main() {
+    test_intraday_candidate_metadata_preserves_default_off_policies();
+    test_due_cap_close_has_one_boundary_and_position_owner();
     test_cap_latches_until_day_rollover();
     test_cap_disabled_does_not_inject_auto_close();
     test_noop_market_attempt_does_not_consume_cap(true);
     test_noop_market_attempt_does_not_consume_cap(false);
     test_pooc_cap_close_defers_to_next_open(true);
     test_pooc_cap_close_defers_to_next_open(false);
+    test_due_pooc_cap_close_survives_day_gap(true);
+    test_due_pooc_cap_close_survives_day_gap(false);
+    test_new_run_discards_old_due_close_and_quota(true);
+    test_new_run_discards_old_due_close_and_quota(false);
     test_noop_filter_preserves_same_tick_close_then_reentry(true);
     test_noop_filter_preserves_same_tick_close_then_reentry(false);
     test_noop_filter_preserves_same_tick_reversal(true);
@@ -974,6 +1262,8 @@ int main() {
     test_pooc_strategy_close_consumes_cap(false);
     test_pooc_close_coqueued_with_reversal_counts_once(true);
     test_pooc_close_coqueued_with_reversal_counts_once(false);
+    test_pooc_full_close_counts_one_fill_for_two_fifo_rows(true);
+    test_pooc_full_close_counts_one_fill_for_two_fifo_rows(false);
     test_pooc_close_count_survives_rejected_reversal(true);
     test_pooc_close_count_survives_rejected_reversal(false);
     test_pooc_close_count_survives_cancelled_reversal(true);

@@ -105,6 +105,9 @@ that all hidden strategy state is equal.
 
 The new receipt replaces protected C++ members and changes the fingerprint
 representation. Rebuild generated and native modules against matching headers
-and runtime. The internal class namespace and fingerprint domain are versioned;
-public C function signatures and POD layouts remain unchanged. See
+and runtime. The cap extraction advances the internal class namespace to
+`engine_script_run_v3`, broker hash domain to `pineforge-broker-state/v3`, and
+stream fingerprint prefix to 3. These pairing/serialization versions change
+no financial rule; public C signatures, POD layouts and API versions remain
+unchanged. See
 [ABI stability](abi-stability.md).

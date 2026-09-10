@@ -86,7 +86,9 @@ void hash_str_set(Fnv& f, const std::unordered_set<std::string>& s) {
 
 uint64_t BacktestEngine::broker_state_hash() const {
     Fnv f;
-    f.s("pineforge-broker-state/v2");
+    // v3 owns cap configuration, quota/cause and generic close-request state.
+    // It is a serialization boundary, independent of the public C ABI version.
+    f.s("pineforge-broker-state/v3");
 
     // --- Position core ---
     f.i(static_cast<int64_t>(position_side_));
@@ -292,12 +294,44 @@ uint64_t BacktestEngine::broker_state_hash() const {
     f.i(priced_entry_activity_bar_);
     f.b(priced_entry_filled_this_bar_);
 
-    // --- Intraday fill cap ---
-    f.i(intraday_fill_count_);
-    f.i(intraday_day_);
-    f.b(intraday_cap_hit_);
-    f.b(intraday_cap_deferred_close_pending_);
-    f.u(intraday_cap_pooc_close_inheritor_incarnation_);
+    // --- Pine compatibility policy and its day-owned quota ---
+    f.u(compat::pine::IntradayCap::schema_version);
+    f.i(static_cast<int64_t>(max_intraday_filled_orders_.attachment()));
+    f.i(max_intraday_filled_orders_.configuration().limit);
+    f.b(max_intraday_filled_orders_.configuration().skip_noop_market);
+    f.b(max_intraday_filled_orders_.configuration().defer_pooc_close);
+    f.b(max_intraday_filled_orders_.configuration().count_pooc_full_close);
+    f.b(max_intraday_filled_orders_.budget().day().has_value());
+    if (const auto& day = max_intraday_filled_orders_.budget().day()) {
+        f.i(day->key);
+    }
+    f.i(max_intraday_filled_orders_.budget().charged_slots());
+    f.b(max_intraday_filled_orders_.budget().latched());
+    f.b(max_intraday_filled_orders_.budget().transfer().has_value());
+    if (const auto& transfer = max_intraday_filled_orders_.budget().transfer()) {
+        f.i(transfer->day.key);
+        f.u(transfer->close_fill);
+        f.i(transfer->source_bar);
+        f.u(transfer->inheritor);
+    }
+    f.b(max_intraday_filled_orders_.due_cause().has_value());
+    if (const auto& due = max_intraday_filled_orders_.due_cause()) {
+        f.u(due->action_id);
+        f.i(due->charged_day.key);
+        f.i(due->charged_slots);
+        f.i(due->trigger_bar);
+        f.u(due->trigger_order);
+    }
+    f.u(max_intraday_filled_orders_.next_action());
+
+    // The one-use position close obligation is independent of Pine risk days.
+    f.b(position_close_obligation_.pending());
+    if (const auto& request = position_close_obligation_.peek()) {
+        f.u(request->action_id);
+        f.i(request->position_cycle);
+        f.i(request->after_bar);
+        f.s(request->comment);
+    }
 
     // --- Cached net-profit sum + its roundoff-bound provenance (both read
     // by a fill-time arithmetic-tolerance gate; see engine_fills.cpp). ---

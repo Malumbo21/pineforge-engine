@@ -215,14 +215,13 @@ void BacktestEngine::dispatch_bar() {
     // A C-factor inheritance is same-ordinary-bar state. A candidate erased
     // by replacement/OCA/cancel never reaches the fill kernel, so discard any
     // stale identity before starting the next broker batch.
-    intraday_cap_pooc_close_inheritor_incarnation_ = 0;
+    max_intraday_filled_orders_.ordinary_open(bar_index_);
 
-    // Opt-in POOC intraday-cap candidate: the cap-triggering MARKET entry
-    // filled at the prior signal close, while the broker-generated flatten is
-    // due at this next broker boundary.  Run it before resting orders and
-    // before the current bar's path is sampled so the exit is exactly at open.
-    if (intraday_cap_deferred_close_pending_) {
-        intraday_cap_deferred_close_pending_ = false;
+    // Opt-in POOC intraday-cap candidate: the position left by the prior
+    // close's quota-triggering MARKET attempt owns a flatten due at this
+    // next broker boundary. Consume it before resting orders and path sampling,
+    // even if quota renews today; a replacement cycle cannot inherit it.
+    if (const auto request = position_close_obligation_.take_at_open(bar_index_, position_cycle_seq_)) {
         if (position_side_ != PositionSide::FLAT) {
             const size_t trades_before = trades_.size();
             const PositionSide side_before = position_side_;
@@ -234,8 +233,7 @@ void BacktestEngine::dispatch_bar() {
                 ++broker_fill_event_seq_;
             }
             for (size_t ti = trades_before; ti < trades_.size(); ++ti) {
-                trades_[ti].exit_comment =
-                    "Close Position (Max number of filled orders in one day)";
+                trades_[ti].exit_comment = request->comment;
                 trades_[ti].exit_id = "";
             }
         }
@@ -280,7 +278,7 @@ void BacktestEngine::dispatch_bar() {
         invoke_chart_on_bar(current_bar_);       // step 3: strategy logic
         flush_same_bar_close();                  // step 3b: surviving strategy.close fill
         process_pending_orders(current_bar_);    // step 4: new market orders
-        intraday_cap_pooc_close_inheritor_incarnation_ = 0;
+        max_intraday_filled_orders_.source_batch_end();
     } else {
         process_pending_orders(current_bar_);
         evaluate_max_intraday_loss_over_path(current_bar_);
@@ -847,11 +845,8 @@ void BacktestEngine::reset_run_state() {
     intraday_loss_block_day_ = -1;
     intraday_loss_evaluating_ = false;
     intraday_loss_cancel_pending_ = false;
-    intraday_day_ = -1;
-    intraday_cap_hit_ = false;
-    intraday_fill_count_ = 0;
-    intraday_cap_deferred_close_pending_ = false;
-    intraday_cap_pooc_close_inheritor_incarnation_ = 0;
+    max_intraday_filled_orders_.reset_run();
+    position_close_obligation_ = {};
     broker_fill_event_seq_ = 0;
     last_margin_call_event_bar_ = -1;        // finding-308: bar-keyed one-shot
     intrabar_exit_margin_call_bar_ = -1;     // markers must not survive a rerun

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Metadata-only mutation tests for nested physical-lot hash coverage.
+"""Metadata-only mutation tests for nested broker-state hash coverage.
 
 Every mutation is written under TemporaryDirectory; engine source is read only.
 No compile, engine execution, strategy, corpus, feed or grader is involved.
@@ -16,18 +16,27 @@ from gen_pending_order_mirror import members
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "include/pineforge/engine.hpp").read_text()
 EVENTS = (ROOT / "include/pineforge/broker_events.hpp").read_text()
+INTRADAY = (ROOT / "include/pineforge/compat/pine/intraday_order_budget.hpp").read_text()
+POLICY = (ROOT / "include/pineforge/compat/pine/intraday_cap.hpp").read_text()
+OBLIGATION = (ROOT / "include/pineforge/position_close_obligation.hpp").read_text()
 SOURCE = (ROOT / "src/engine_state_hash.cpp").read_text()
+STREAM = (ROOT / "src/engine_stream.cpp").read_text()
 WAIVERS = (ROOT / "scripts/broker_state_hash_waivers.txt").read_text()
 
 
 class PhysicalLotCoverage(unittest.TestCase):
-    def check(self, header=HEADER, source=SOURCE, waivers=WAIVERS, events=EVENTS):
+    def check(self, header=HEADER, source=SOURCE, waivers=WAIVERS, events=EVENTS,
+              intraday=INTRADAY, policy=POLICY, obligation=OBLIGATION, stream=STREAM):
         with tempfile.TemporaryDirectory(prefix="pf-lot-hash-check-") as temp:
             root = Path(temp)
             for name, content in [
                 ("include/pineforge/engine.hpp", header),
                 ("include/pineforge/broker_events.hpp", events),
+                ("include/pineforge/compat/pine/intraday_order_budget.hpp", intraday),
+                ("include/pineforge/compat/pine/intraday_cap.hpp", policy),
+                ("include/pineforge/position_close_obligation.hpp", obligation),
                 ("src/engine_state_hash.cpp", source),
+                ("src/engine_stream.cpp", stream),
                 ("scripts/broker_state_hash_waivers.txt", waivers),
             ]:
                 target = root / name
@@ -46,6 +55,29 @@ class PhysicalLotCoverage(unittest.TestCase):
         self.assertEqual(self.check()[0], 0)
         self.assertEqual(len(members(HEADER, "PyramidEntry")), 18)
         self.assertEqual(members(HEADER), members(HEADER, "PendingOrder"))
+
+    def test_layout_and_hash_versions_must_match_v3_contract(self):
+        self.assertIn("engine_script_run_v3", HEADER)
+        self.assertIn('f.s("pineforge-broker-state/v3");', SOURCE)
+        self.assertIn("integer(3); integer(broker_state_hash());", STREAM)
+        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v3", "engine_script_run_v2"))[0], 1)
+        for replacement in ['f.s("pineforge-broker-state/v2");', '',
+                            '// f.s("pineforge-broker-state/v3");']:
+            self.assertEqual(self.check(source=SOURCE.replace(
+                'f.s("pineforge-broker-state/v3");', replacement))[0], 1)
+        for replacement in ["integer(2); integer(broker_state_hash());",
+                            "integer(broker_state_hash());",
+                            "if (false) { integer(3); integer(broker_state_hash()); }"]:
+            self.assertEqual(self.check(stream=STREAM.replace(
+                "integer(3); integer(broker_state_hash());", replacement))[0], 1)
+
+    def test_version_folds_in_unrelated_helpers_do_not_cover_entry_points(self):
+        broker_fold = 'f.s("pineforge-broker-state/v3");'
+        altered = SOURCE.replace(broker_fold, '') + '\nvoid other() { ' + broker_fold + ' }\n'
+        self.assertEqual(self.check(source=altered)[0], 1)
+        stream_fold = "integer(3); integer(broker_state_hash());"
+        altered = STREAM.replace(stream_fold, '') + '\nvoid other() { ' + stream_fold + ' }\n'
+        self.assertEqual(self.check(stream=altered)[0], 1)
 
     def test_each_lot_field_requires_its_own_fold(self):
         # A correct container loop is insufficient if any child is omitted.
@@ -145,6 +177,142 @@ class PhysicalLotCoverage(unittest.TestCase):
         self.assertEqual(self.check(source=SOURCE.replace(fold, "") + "\n" + fold)[0], 1)
         self.assertEqual(self.check(source=SOURCE.replace("f.b(opening_obligations_.pending());", ""))[0], 1)
         self.assertEqual(self.check(source=SOURCE.replace("f.b(receipt->requires_adverse_pass());", ""))[0], 1)
+
+    def test_every_intraday_child_requires_its_own_typed_owned_fold(self):
+        for fold in [
+            "f.i(day->key);",
+            "f.i(transfer->day.key);", "f.u(transfer->close_fill);",
+            "f.i(transfer->source_bar);", "f.u(transfer->inheritor);",
+            "f.u(due->action_id);", "f.i(due->charged_day.key);",
+            "f.i(due->charged_slots);", "f.i(due->trigger_bar);", "f.u(due->trigger_order);",
+            "f.u(request->action_id);", "f.i(request->position_cycle);",
+            "f.i(request->after_bar);", "f.s(request->comment);",
+        ]:
+            for replacement in ["", "// " + fold, fold.replace("f.", "other."),
+                                fold.replace("f.i(", "f.u(") if "f.i(" in fold
+                                else fold.replace("f.u(", "f.i(").replace("f.s(", "f.i("),
+                                "if (false) " + fold]:
+                with self.subTest(fold=fold, replacement=replacement):
+                    self.assertIn(fold, SOURCE)
+                    code, output = self.check(source=SOURCE.replace(fold, replacement))
+                    self.assertEqual(code, 1, output)
+            code, output = self.check(source=SOURCE.replace(fold, "") + "\n" + fold)
+            self.assertEqual(code, 1, output)
+
+    def test_policy_configuration_schema_attachment_and_all_presence_are_explicit(self):
+        cap = "max_intraday_filled_orders_"
+        for fold in [
+            "f.u(compat::pine::IntradayCap::schema_version);",
+            f"f.i(static_cast<int64_t>({cap}.attachment()));",
+            f"f.i({cap}.configuration().limit);",
+            f"f.b({cap}.configuration().skip_noop_market);",
+            f"f.b({cap}.configuration().defer_pooc_close);",
+            f"f.b({cap}.configuration().count_pooc_full_close);",
+            f"f.b({cap}.budget().day().has_value());",
+            f"f.i({cap}.budget().charged_slots());",
+            f"f.b({cap}.budget().latched());",
+            f"f.b({cap}.budget().transfer().has_value());",
+            f"f.b({cap}.due_cause().has_value());",
+            f"f.u({cap}.next_action());",
+            "f.b(position_close_obligation_.pending());",
+        ]:
+            for replacement in ["", "if (false) " + fold, "// " + fold,
+                                fold.replace("f.", "other."),
+                                fold.replace("f.i(", "f.u(") if "f.i(" in fold
+                                else fold.replace("f.u(", "f.i(").replace("f.b(", "f.i(")]:
+                with self.subTest(fold=fold, replacement=replacement):
+                    self.assertIn(fold, SOURCE)
+                    code, output = self.check(source=SOURCE.replace(fold, replacement))
+                    self.assertEqual(code, 1, output)
+            self.assertEqual(self.check(source=SOURCE.replace(fold, "") + "\n" + fold)[0], 1)
+
+    def test_new_intraday_private_storage_requires_classification(self):
+        for input_name, content, owner in [
+            ("intraday", INTRADAY, "IntradayOrderBudget"),
+            ("policy", POLICY, "IntradayCap"),
+            ("obligation", OBLIGATION, "PositionCloseObligation"),
+        ]:
+            with self.subTest(owner=owner):
+                before = "class " + owner + " {"
+                self.assertIn(before, content)
+                altered = content.replace(before, before + "\n    int future_state;")
+                code, output = self.check(**{input_name: altered})
+                self.assertEqual(code, 1, output)
+                self.assertIn(owner, output)
+
+    def test_new_intraday_nested_fields_require_folds(self):
+        for input_name, content, owners in [
+            ("intraday", INTRADAY, ["OrderRiskDay", "CloseQuotaTransfer"]),
+            ("policy", POLICY, ["CapConfiguration", "CloseCause"]),
+            ("obligation", OBLIGATION, ["PositionCloseRequest"]),
+        ]:
+            for owner in owners:
+                with self.subTest(owner=owner):
+                    before = "struct " + owner + " {"
+                    self.assertIn(before, content)
+                    altered = content.replace(before, before + "\n    uint64_t future_owner;")
+                    code, output = self.check(**{input_name: altered})
+                    self.assertEqual(code, 1, output)
+
+    def test_unclassified_intraday_declarations_refuse(self):
+        for input_name, content, owner in [
+            ("intraday", INTRADAY, "CloseQuotaTransfer"),
+            ("policy", POLICY, "CapConfiguration"),
+            ("policy", POLICY, "CloseCause"),
+            ("obligation", OBLIGATION, "PositionCloseRequest"),
+        ]:
+            for declaration in ["int first, second;", "std::vector<double> state;",
+                                "UnknownOwner owner;", "int value() const;"]:
+                with self.subTest(owner=owner, declaration=declaration):
+                    before = "struct " + owner + " {"
+                    altered = content.replace(before, before + "\n" + declaration)
+                    self.assertNotEqual(self.check(**{input_name: altered})[0], 0)
+        altered = INTRADAY.replace("int64_t key;", "uint64_t key;")
+        self.assertNotEqual(altered, INTRADAY)
+        self.assertEqual(self.check(intraday=altered)[0], 1)
+
+    def test_policy_attachment_encoding_schema_and_owner_types_are_classified(self):
+        for before, after in [
+            ("CapAttachment { LegacySource, None }", "CapAttachment { LegacySource, None, Other }"),
+            ("CapAttachment { LegacySource, None }", "CapAttachment { None, LegacySource }"),
+            ("static constexpr uint64_t schema_version", "static constexpr int schema_version"),
+            ("uint64_t next_action_", "int64_t next_action_"),
+            ("CapConfiguration configuration_;", "OtherConfiguration configuration_;"),
+        ]:
+            with self.subTest(mutation=after):
+                self.assertIn(before, POLICY)
+                self.assertEqual(self.check(policy=POLICY.replace(before, after))[0], 1)
+        # Schema bumps are serialized by symbol; changing only the version
+        # remains covered, unlike replacing the fold with a numeric literal.
+        self.assertEqual(self.check(source=SOURCE.replace(
+            "f.u(compat::pine::IntradayCap::schema_version);", "f.u(1);"))[0], 1)
+
+    def test_intraday_optional_bodies_cannot_be_rebound_or_duplicated(self):
+        cap = "max_intraday_filled_orders_"
+        for opening in [
+            f"if (const auto& day = {cap}.budget().day()) {{",
+            f"if (const auto& transfer = {cap}.budget().transfer()) {{",
+            f"if (const auto& due = {cap}.due_cause()) {{",
+            "if (const auto& request = position_close_obligation_.peek()) {",
+        ]:
+            with self.subTest(opening=opening):
+                self.assertIn(opening, SOURCE)
+                self.assertEqual(self.check(source=SOURCE.replace(opening, "if (false) {"))[0], 1)
+                self.assertEqual(self.check(source=SOURCE + "\n" + opening + "}")[0], 1)
+
+    def test_whole_intraday_hash_block_cannot_be_conditional(self):
+        start = SOURCE.index("    f.u(compat::pine::IntradayCap::schema_version);")
+        end = SOURCE.index("\n    // --- Cached net-profit", start)
+        block = SOURCE[start:end]
+        altered = SOURCE[:start] + "if (false) {\n" + block + "\n}\n" + SOURCE[end:]
+        code, output = self.check(source=altered)
+        self.assertEqual(code, 1, output)
+        self.assertIn("unconditional", output)
+
+    def test_causal_policy_and_generic_obligation_cannot_be_waived(self):
+        for owner in ["max_intraday_filled_orders_", "position_close_obligation_"]:
+            with self.subTest(owner=owner):
+                self.assertEqual(self.check(waivers=WAIVERS + f"\n{owner} # no broad waiver\n")[0], 1)
 
 
 if __name__ == "__main__":

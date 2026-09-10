@@ -56,7 +56,6 @@ public:
         commission_type_ = CommissionType::PERCENT;
         commission_value_ = 0.0;
         slippage_ = 0;
-        script_has_strategy_close_ = true;
     }
 
     void set_strategy_override(const std::string& key, const std::string& value) {

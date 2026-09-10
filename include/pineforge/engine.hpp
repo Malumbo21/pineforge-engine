@@ -13,6 +13,7 @@
 #include "na.hpp"
 #include "bar.hpp"
 #include "broker_events.hpp"
+#include "compat/pine/intraday_cap.hpp"
 #include "series.hpp"
 #include "timeframe.hpp"
 #include "magnifier.hpp"
@@ -32,6 +33,9 @@
 // it does not change any public C POD or exported C function signature.
 #define PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1 1
 #define PINEFORGE_HAS_NATIVE_LIVE_V1 1
+// Generated constructors can explicitly select Pine cap compatibility before
+// any host metadata setter. Older engines keep their legacy default behavior.
+#define PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1 1
 
 namespace pineforge {
 
@@ -1096,9 +1100,10 @@ struct StrategyOverrides {
 
 // The C++ subclass contract is internal, unlike pineforge.h's stable C ABI.
 // Changing its layout or vtable requires all generated/native C++ objects to be rebuilt.
-// Version the mangled class name so an object using the old vtable cannot
-// silently link to the new run loop and dispatch the wrong virtual slot.
-inline namespace engine_script_run_v2 {
+// v3 replaces the v2 cap scalars with a Pine policy and a close obligation.
+// Version the mangled class name so a v2 header's member offsets/vtable cannot
+// silently bind out-of-line members of this different object layout.
+inline namespace engine_script_run_v3 {
 class BacktestEngine {
 protected:
     // --- Position state ---
@@ -1305,13 +1310,11 @@ protected:
     // instead close the whole residual.  Keep that alternative default-off so
     // it cannot rewrite otherwise matching trade tapes.
     bool margin_zero_cover_full_liquidation_ = false;
-    int max_intraday_filled_orders_ = 0; // 0 = unlimited
-    // Default-off validation candidates for independently testable intraday-
-    // cap broker semantics.  They ride the existing metadata channel
-    // so corpus execution remains byte-identical unless explicitly enabled.
-    bool intraday_cap_skip_noop_market_fills_ = false;
-    bool intraday_cap_defer_pooc_close_ = false;
-    bool intraday_cap_count_pooc_full_close_fills_ = false;
+    // Temporary Pine source facade: this value IS the sole compatibility
+    // owner, not a mirrored limit/proxy. Existing generated statement-time
+    // assignments explicitly opt in; generated constructors attach before
+    // host metadata. Bare native construction leaves this policy unselected.
+    compat::pine::IntradayCap max_intraday_filled_orders_;
     bool close_entries_rule_any_ = false; // true = "ANY", false = "FIFO" (default)
     // Percentage of margin required to open a long/short position. Default
     // 100 = 1x leverage (no leverage). TradingView's strategy() takes these
@@ -1382,13 +1385,6 @@ protected:
     // declines the reversal, so the revive would otherwise precede the kill.
     int open_margin_slice_bar_ = -1;
 
-    // Legacy codegen compatibility bit. Older and current generated classes
-    // set this when the Pine source contains ``strategy.close`` or
-    // ``strategy.close_all``. Runtime behavior must not depend on it: a
-    // bracket exit can also close a carry source, and unreachable source code
-    // cannot be allowed to change fills. Keep the member until generated
-    // classes no longer write it.
-    bool script_has_strategy_close_ = false;
     int64_t trade_start_time_ = std::numeric_limits<int64_t>::min();
 
     // Cumulative qty of ``strategy.close`` / ``strategy.close_all`` calls
@@ -1762,73 +1758,42 @@ protected:
     int64_t trail_best_before_bar_position_cycle_ = 0;
     uint64_t trail_best_before_bar_fill_seq_ = 0;
 
-    // --- Intraday fill counter ---
-    // Counts every fill processed by ``apply_filled_order_to_state`` on
-    // the current broker day. When the count reaches
-    // ``max_intraday_filled_orders_`` the engine emits TV's synthetic
-    // "Close Position (Max number of filled orders in one day)" exit at
-    // the cap-triggering fill's price and LATCHES (intraday_cap_hit_)
-    // until the broker day rolls over. Once latched, ALL further fills
-    // on that broker day are silently rejected — TV's broker emulator
-    // emits at most one cap-close per broker day (probe 97b: 382
-    // cap-closes across 13 months of data, ~one per day where
-    // the cap fires). Pre-latch the engine recharged the counter
-    // after each cap-cycle, which over-fired cap-closes (3459 engine
-    // vs 1957 TV trades on probe 97b). Pre-fix-fix the engine just
-    // skipped fills past the cap, leaving the position carried open
-    // across day boundaries.
-    int intraday_fill_count_ = 0;
-    int64_t intraday_day_ = -1;   // session day, or legacy chart-date key
-    bool intraday_cap_hit_ = false;  // latched once per broker day
-    // State, not configuration: a POOC MARKET fill reached the cap at the
-    // signal close and its risk-generated flatten is due at the next broker
-    // boundary (the next ordinary bar open).
-    bool intraday_cap_deferred_close_pending_ = false;
-    // An ordinary POOC strategy.close plus one co-queued opposite MARKET is
-    // materialized as two engine operations even when TV reports one reversal
-    // fill.  The close spends the quota immediately; this fresh order identity
-    // may inherit that already-spent slot if it survives every fill-time gate.
-    uint64_t intraday_cap_pooc_close_inheritor_incarnation_ = 0;
+    // Generic synchronous close obligation. Pine quota/cause/beneficiary
+    // state remains exclusively in the compatibility facade above.
+    broker::PositionCloseObligation position_close_obligation_;
 
-    // An explicitly timed symbol session defines the broker's trading day.
-    // Use its unmerged clock: a futures holiday D bar may span two sessions,
-    // while TradingView renews the order budget at each session's reopen.
-    // Continuous/unconfigured sessions retain the validated chart-date clock.
-    int64_t intraday_order_day_key() const {
-        const auto& session = syminfo_.session;
-        if (session.size() >= 9 && session[4] == '-'
-            && hhmm_to_minutes(session.substr(0, 4)) >= 0
-            && hhmm_to_minutes(session.substr(5, 4)) >= 0) {
-            return internal::session_trading_day_index(current_bar_.timestamp,
-                                                       syminfo_.timezone, session);
-        }
-        const BarTime bt = _decompose_bar_time_chart_tz();
-        return bt.dayofmonth * 100 + bt.month;
+    // Temporary legacy adapter: only value facts cross into Pine policy.
+    compat::pine::CapClock pine_cap_clock() const {
+        if (!max_intraday_filled_orders_.needs_clock()) return {};
+        const BarTime bt = compat::pine::IntradayCap::uses_chart_clock(syminfo_.session)
+            ? _decompose_bar_time_chart_tz() : BarTime{};
+        return {current_bar_.timestamp, syminfo_.session, syminfo_.timezone,
+                bt.dayofmonth, bt.month};
     }
-
-    // True iff the intraday cap is currently latched on the CURRENT bar's
-    // broker day. Performs a lazy day-rollover reset so callers outside the
-    // fill path (notably ``strategy_entry`` / ``strategy_order``) see a
-    // consistent view: TV silently drops *order placement* during the
-    // latched window in addition to dropping fills (Pine docs: "all
-    // subsequent orders are blocked until the start of the next trading
-    // day"). Without the placement-time gate, an entry placed during the
-    // latched bar (e.g., bar 04-06 23:45 with arm_long true while the
-    // cap fired earlier on 04-06 07:00) would carry into the next chart-
-    // day and fire on the first new-day bar (04-07 00:00) at a price TV
-    // never reports, fabricating a phantom trade. Probe 97 trades #22..
-    // are the canonical victim — the residual exit-price drift after the
-    // 97a/97b composition fixes was driven by these phantom new-day
-    // entries followed by mismatched cap-close exit prices below.
+    compat::pine::Calculation pine_cap_calculation() const {
+        return {process_orders_on_close_, calc_on_order_fills_, coof_scheduler_active_,
+                bar_magnifier_enabled_, stream_warmup_mode_,
+                (stream_phase_ == StreamPhase::IDLE), !close_entries_rule_any_, bar_index_};
+    }
+    static compat::pine::Side pine_cap_side(PositionSide side) {
+        return side == PositionSide::FLAT ? compat::pine::Side::Flat
+            : side == PositionSide::LONG ? compat::pine::Side::Long
+                                         : compat::pine::Side::Short;
+    }
+    static compat::pine::OrderKind pine_cap_kind(OrderType type) {
+        return type == OrderType::MARKET ? compat::pine::OrderKind::Market
+            : type == OrderType::ENTRY ? compat::pine::OrderKind::Entry
+                                       : compat::pine::OrderKind::Other;
+    }
+    compat::pine::MatchedAttempt pine_cap_attempt(const PendingOrder& order) const {
+        return {pine_cap_kind(order.type), order.incarnation, order.created_bar,
+                order.is_long, pine_cap_side(position_side_), position_entry_count_, pyramiding_};
+    }
+    // Source facade retained for existing native fixtures. RAW placement does
+    // not call this gate; extraction must not add one to that path.
     bool _intraday_cap_currently_latched() {
-        if (max_intraday_filled_orders_ <= 0) return false;
-        const int64_t cur_day = intraday_order_day_key();
-        if (cur_day != intraday_day_) {
-            intraday_day_ = cur_day;
-            intraday_fill_count_ = 0;
-            intraday_cap_hit_ = false;
-        }
-        return intraday_cap_hit_;
+        return max_intraday_filled_orders_.placement(pine_cap_clock())
+            == compat::pine::Placement::Deny;
     }
 
     // --- Cached trade metrics (updated incrementally in execute_market_exit) ---
@@ -2154,7 +2119,7 @@ protected:
             || !account_currency_fx_timestamps_.empty()
             || syminfo_.pointvalue != 1.0 || commission_value_ != 0.0
             || slippage_ != 0 || pyramiding_ < 0 || pyramiding_ > 1
-            || max_intraday_filled_orders_ > 0
+            || max_intraday_filled_orders_.active()
             || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
             || risk_max_cons_loss_days_ > 0 || pending_orders_.size() > 3) {
             return false;
@@ -2200,7 +2165,7 @@ protected:
             || !account_currency_fx_timestamps_.empty()
             || bar_magnifier_enabled_ || stream_warmup_mode_
             || stream_phase_ != StreamPhase::IDLE
-            || max_intraday_filled_orders_ > 0 || risk_max_intraday_loss_ != 0.0
+            || max_intraday_filled_orders_.active() || risk_max_intraday_loss_ != 0.0
             || risk_max_drawdown_ != 0.0 || risk_max_cons_loss_days_ > 0
             || !std::isfinite(fill_price) || !(fill_price > 0.0)) return false;
         if (calc_on_order_fills_) {
@@ -2260,7 +2225,7 @@ protected:
             || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
             || pyramiding_ < 0 || pyramiding_ > 1
             || position_entry_count_ > 1 || pyramid_entries_.size() > 1
-            || max_intraday_filled_orders_ > 0
+            || max_intraday_filled_orders_.active()
             || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
             || risk_max_cons_loss_days_ > 0 || order.incarnation == 0) {
             return false;
@@ -3149,7 +3114,7 @@ protected:
     // Chart-timezone-aware decomposition for the existing loss-day clocks
     // and the continuous/unconfigured-session order-counter fallback. The
     // order counter on an explicitly timed session instead consumes
-    // intraday_order_day_key(), which follows the symbol's trading day.
+    // compat::pine::IntradayCap::risk_day(), which follows the symbol's trading day.
     //
     // Falls back to plain ``_decompose_bar_time()`` (UTC) when no chart
     // timezone has been set, preserving the legacy fast path for
@@ -4526,6 +4491,12 @@ private:
     void fill_trace_section(ReportC* out) const;
 
 public:
+    explicit BacktestEngine(compat::pine::CapAttachment cap_attachment =
+                                compat::pine::CapAttachment::None)
+        : max_intraday_filled_orders_(cap_attachment) {}
+    // Explicit frontend selection, not a generic native risk switch. This
+    // preserves any prior declaration values and does not reset quota/state.
+    void enable_pine_intraday_cap() { max_intraday_filled_orders_.attach(); }
     virtual ~BacktestEngine() = default;
     virtual void on_bar(const Bar& bar) = 0;
 
@@ -4718,7 +4689,7 @@ public:
     // the real values via these setters before run().
     //
     // max_intraday_filled_orders consumes a valid explicit session and this
-    // timezone through intraday_order_day_key(). Other risk-day rules keep
+    // timezone through compat::pine::IntradayCap::risk_day(). Other risk-day rules keep
     // chart_timezone_, as do continuous/unconfigured order-counter clocks;
     // the existing crypto-on-shifted-chart contract therefore remains intact.
     void set_syminfo_timezone(const std::string& tz) { syminfo_.timezone = tz; }
@@ -4828,18 +4799,10 @@ public:
             flat_retained_child_fresh_parent_order_ =
                 std::isfinite(value) && value > 0.0;
         }
-        if (key == "intraday_cap_skip_noop_market_fills") {
-            intraday_cap_skip_noop_market_fills_ =
-                std::isfinite(value) && value > 0.0;
-        }
-        if (key == "intraday_cap_defer_pooc_close") {
-            intraday_cap_defer_pooc_close_ =
-                std::isfinite(value) && value > 0.0;
-        }
-        if (key == "intraday_cap_count_pooc_full_close_fills") {
-            intraday_cap_count_pooc_full_close_fills_ =
-                std::isfinite(value) && value > 0.0;
-        }
+        // Forward through the real base setter used by the C ABI. A selected
+        // frontend owns recognition and numeric validation; no derived shadow
+        // setter or cap-key interpretation belongs in this transport.
+        max_intraday_filled_orders_.metadata(key, value);
         // "qty_step" is the per-instrument lot increment used by the forced-
         // liquidation quantizer. Route it onto the dedicated member so the
         // codegen run(const Bar*, int) path (which never overwrites it) keeps
@@ -5178,5 +5141,5 @@ public:
     void trace(const std::string& name, int value)   { trace(name, static_cast<double>(value)); }
 };
 
-} // inline namespace engine_script_run_v2
+} // inline namespace engine_script_run_v3
 } // namespace pineforge

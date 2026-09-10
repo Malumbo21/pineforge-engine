@@ -228,7 +228,7 @@ void BacktestEngine::process_carried_long_money_before_priced_orders(
         || margin_long_ != 100.0 || syminfo_.pointvalue != 1.0
         || active_account_currency_fx() != 1.0
         || !account_currency_fx_timestamps_.empty()
-        || max_intraday_filled_orders_ > 0
+        || max_intraday_filled_orders_.active()
         || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
         || risk_max_cons_loss_days_ > 0
         || !std::isfinite(bar.open) || !(bar.open > 0.0)
@@ -345,7 +345,7 @@ void BacktestEngine::process_pending_orders(const Bar& bar, bool before_pooc_scr
         && stream_phase_ == StreamPhase::IDLE
         && slippage_ == 0 && commission_value_ == 0.0
         && account_currency_fx_ == 1.0 && account_currency_fx_timestamps_.empty()
-        && max_intraday_filled_orders_ == 0 && risk_max_position_size_ == 0.0
+        && max_intraday_filled_orders_.legacy_limit_is_zero() && risk_max_position_size_ == 0.0
         && risk_direction_ == RiskDirection::BOTH
         && risk_max_intraday_loss_ == 0.0 && risk_max_drawdown_ == 0.0
         && risk_max_cons_loss_days_ == 0;
@@ -741,7 +741,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 || commission_value_ != 0 || slippage_ != 0
                 || account_currency_fx_ != 1
                 || !account_currency_fx_timestamps_.empty()
-                || max_intraday_filled_orders_ > 0
+                || max_intraday_filled_orders_.active()
                 || risk_max_intraday_loss_ != 0 || risk_max_drawdown_ != 0
                 || risk_max_cons_loss_days_ > 0
                 || margin_long_ != 100 || opening_obligations_.pending()
@@ -1201,7 +1201,7 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
         || margin_short_ != 100.0 || syminfo_.pointvalue != 1.0
         || active_account_currency_fx() != 1.0
         || !account_currency_fx_timestamps_.empty()
-        || max_intraday_filled_orders_ > 0
+        || max_intraday_filled_orders_.active()
         || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
         || risk_max_cons_loss_days_ > 0
         || last_margin_call_event_bar_ == bar_index_) {
@@ -1317,7 +1317,7 @@ void BacktestEngine::process_carried_pooc_short_margin_before_script(const Bar& 
         || margin_short_ != 100.0 || syminfo_.pointvalue != 1.0
         || active_account_currency_fx() != 1.0
         || !account_currency_fx_timestamps_.empty()
-        || max_intraday_filled_orders_ > 0
+        || max_intraday_filled_orders_.active()
         || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
         || risk_max_cons_loss_days_ > 0
         || last_margin_call_event_bar_ == bar_index_) {
@@ -1946,7 +1946,7 @@ bool BacktestEngine::pooc_opening_money_scope(const Bar& bar) const {
         || !tv_money_scope(bar.close)
         || bar_magnifier_enabled_ || stream_warmup_mode_
         || stream_phase_ != StreamPhase::IDLE
-        || max_intraday_filled_orders_ > 0 || risk_max_intraday_loss_ != 0.0
+        || max_intraday_filled_orders_.active() || risk_max_intraday_loss_ != 0.0
         || risk_max_drawdown_ != 0.0 || risk_max_cons_loss_days_ > 0) {
         return false;
     }
@@ -2039,7 +2039,7 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
             || pyramid_entries_.front().entry_bar_index >= bar_index_
             || commission_value_ != 0.0
             || (slippage_ != 0 && !slipped_pooc_open)
-            || account_currency_fx_ != 1.0 || max_intraday_filled_orders_ > 0
+            || account_currency_fx_ != 1.0 || max_intraday_filled_orders_.active()
             || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
             || risk_max_cons_loss_days_ > 0) {
             return false;
@@ -2185,7 +2185,7 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
         && commission_type_ == CommissionType::PERCENT
         && commission_value_ == 0.0 && slippage_ == 0
         && pv == 1.0 && fx == 1.0
-        && max_intraday_filled_orders_ == 0
+        && max_intraday_filled_orders_.legacy_limit_is_zero()
         && risk_max_intraday_loss_ == 0.0 && risk_max_drawdown_ == 0.0
         && risk_max_cons_loss_days_ == 0;
     const size_t trades_before = trades_.size();
@@ -3112,7 +3112,7 @@ bool BacktestEngine::pending_flat_market_pair_scope_is_live() const {
         && risk_max_drawdown_ <= 0.0
         && risk_max_intraday_loss_ <= 0.0
         && risk_max_position_size_ <= 0.0
-        && max_intraday_filled_orders_ <= 0
+        && !max_intraday_filled_orders_.active()
         && !risk_halted_;
 }
 
@@ -3146,7 +3146,7 @@ bool BacktestEngine::default_flat_market_gross_scope_is_live()
         && risk_max_drawdown_ <= 0.0
         && risk_max_intraday_loss_ <= 0.0
         && risk_max_position_size_ <= 0.0
-        && max_intraday_filled_orders_ <= 0
+        && !max_intraday_filled_orders_.active()
         && !risk_halted_;
 }
 
@@ -3450,7 +3450,7 @@ void BacktestEngine::apply_pooc_coof_explicit_flat_market_gross_admission() {
         || risk_max_drawdown_ > 0.0
         || risk_max_intraday_loss_ > 0.0
         || risk_max_position_size_ > 0.0
-        || max_intraday_filled_orders_ > 0
+        || max_intraday_filled_orders_.active()
         || risk_halted_) {
         return;
     }
@@ -3888,7 +3888,7 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
         && risk_max_drawdown_ <= 0.0
         && risk_max_intraday_loss_ <= 0.0
         && risk_max_position_size_ <= 0.0
-        && max_intraday_filled_orders_ <= 0
+        && !max_intraday_filled_orders_.active()
         && !risk_halted_
         && (default_qty_type_ == QtyType::FIXED
             || default_qty_type_ == QtyType::PERCENT_OF_EQUITY
@@ -4534,7 +4534,7 @@ bool BacktestEngine::same_bar_market_tx_scope_is_live() const {
         && risk_max_drawdown_ <= 0.0
         && risk_max_intraday_loss_ <= 0.0
         && risk_max_position_size_ <= 0.0
-        && max_intraday_filled_orders_ <= 0
+        && !max_intraday_filled_orders_.active()
         && !risk_halted_;
 }
 
@@ -5306,23 +5306,18 @@ void BacktestEngine::apply_filled_order_to_state(
         std::vector<uint64_t>& retired_incarnations,
         bool flat_dual_stop_pair) {
     PendingOrder matched_order;
-    bool inherits_pooc_close_fill;
+    compat::pine::AttemptOrigin cap_origin;
+    compat::pine::Admission cap_admission;
     // Admission decisions shared with post-dispatch opening ownership. They
     // are fill-local values, independent of the pending vector's lifetime.
     bool admitted_flat_on_frozen_sizing_price = false;
     bool admitted_flat_on_price_gap_band = false;
-    bool will_trigger_cap = false;
     {
     PendingOrder& order = pending_orders_.at(order_index);
-    inherits_pooc_close_fill =
-        intraday_cap_count_pooc_full_close_fills_
-        && order.incarnation != 0
-        && order.incarnation
-               == intraday_cap_pooc_close_inheritor_incarnation_;
+    cap_origin = max_intraday_filled_orders_.origin(
+        pine_cap_clock(), pine_cap_calculation(), order.incarnation, broker_fill_event_seq_);
     auto decline_and_cancel = [&]() {
-        if (inherits_pooc_close_fill) {
-            intraday_cap_pooc_close_inheritor_incarnation_ = 0;
-        }
+        max_intraday_filled_orders_.decline(order.incarnation);
         invalidate_pending_flat_market_pair(order.created_seq);
         retired_incarnations.push_back(order.incarnation);
     };
@@ -5840,7 +5835,7 @@ void BacktestEngine::apply_filled_order_to_state(
         && !process_orders_on_close_ && !calc_on_order_fills_
         && !coof_scheduler_active_ && !bar_magnifier_enabled_
         && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
-        && max_intraday_filled_orders_ == 0
+        && max_intraday_filled_orders_.legacy_limit_is_zero()
         && risk_max_intraday_loss_ == 0 && risk_max_drawdown_ == 0
         && risk_max_cons_loss_days_ == 0
         && std::isfinite(order.sizing_equity) && order.sizing_equity > 0
@@ -6331,82 +6326,14 @@ void BacktestEngine::apply_filled_order_to_state(
         }
     }
 
-    // A same-direction MARKET can reach the fill kernel while the live
-    // position is already at its pyramiding cap (a later-bar reissue, or a
-    // same-tick sibling after an earlier entry opened the position). The
-    // established dispatch consumes it but mutates no position
-    // (add_to_pyramid_market's cap branch); opt-in factor A consumes it here
-    // before risk-cap accounting so an attempt that never filled does not
-    // spend max_intraday_filled_orders quota. Classify against LIVE state at
-    // fill time so close-then-reentry and reversals remain real fills.
-    if (intraday_cap_skip_noop_market_fills_
-        && max_intraday_filled_orders_ > 0
-        && order.type == OrderType::MARKET
-        && position_side_ != PositionSide::FLAT) {
-        const PositionSide requested =
-            order.is_long ? PositionSide::LONG : PositionSide::SHORT;
-        if (position_side_ == requested
-            && position_entry_count_ >= pyramiding_) {
-            decline_and_cancel();
-            return;
-        }
-    }
-
-    // Check max_intraday_filled_orders limit.
-    //
-    // TV's broker emulator (LATCH-TILL-DAY-ROLLOVER semantics):
-    //   1. Track fills on the current broker day. When the Nth fill
-    //      (== max_intraday_filled_orders) lands and the resulting
-    //      position is non-flat, TV synthesises a full close at the
-    //      SAME BAR / SAME FILL PRICE tagged
-    //      "Close Position (Max number of filled orders in one day)".
-    //   2. After the synthetic close fires, a LATCH (intraday_cap_hit_)
-    //      is set. ALL subsequent fills on that broker day are silently
-    //      rejected — TV emits at most one cap-close per broker day.
-    //   3. The latch/counter reset on the unmerged symbol session clock,
-    //      or the existing chart-date fallback for continuous sessions.
-    //
-    // Verified on continuous-session probe97b's chart-day tv_trades.csv:
-    //   - 382 cap-close exits across 13 months of data (~one per
-    //     chart-day where the cap fires). NOT multiple per day.
-    //   - cap-trigger entry + synthetic close share the same timestamp
-    //     and price (close trade carries pnl == 0)
-    //
-    // Two prior bugs:
-    //   - First impl just early-returned when the cap was hit, leaving
-    //     the position carried open across day boundaries (382 cap-
-    //     close exits in TV, 0 in engine).
-    //   - Second impl recharged the counter after each cap-cycle so
-    //     multiple cap-closes fired per chart-day (3459 engine vs
-    //     1957 TV trades on 97b — 43% over-count).
-    if (max_intraday_filled_orders_ > 0) {
-        const int64_t cur_day = intraday_order_day_key();
-        if (cur_day != intraday_day_) {
-            intraday_day_ = cur_day;
-            intraday_fill_count_ = 0;
-            intraday_cap_hit_ = false;  // Reset latch on broker-day rollover.
-        }
-        // A POOC close+opposite-entry reversal is split by the engine into a
-        // close operation followed by a MARKET operation. Factor C counted
-        // the close synchronously, before this order could be rejected or
-        // cancelled. Only the exact surviving incarnation may continue the
-        // same broker event without spending a second slot; all ordinary
-        // orders still obey the latch. Every pre-account admission failure
-        // above clears the inheritance while retaining the real close count.
-        if (intraday_cap_hit_ && !inherits_pooc_close_fill) {
-            // Latched: drop this pending order and skip dispatch.
-            // Removing from pending_orders_ matches TV's behaviour of
-            // silently consuming/rejecting fills past the daily cap.
-            decline_and_cancel();
-            return;
-        }
-        if (inherits_pooc_close_fill) {
-            intraday_cap_pooc_close_inheritor_incarnation_ = 0;
-        } else {
-            intraday_fill_count_++;
-        }
-        will_trigger_cap =
-            (intraday_fill_count_ >= max_intraday_filled_orders_);
+    // The selected compatibility owner decides admission at the established
+    // pre-dispatch checkpoint. This is simulator admission, not ingestion of
+    // an already-observed external execution.
+    cap_admission = max_intraday_filled_orders_.pre_dispatch(
+        pine_cap_clock(), pine_cap_calculation(), pine_cap_attempt(order), broker_fill_event_seq_);
+    if (cap_admission.dispatch == compat::pine::Dispatch::Decline) {
+        decline_and_cancel();
+        return;
     }
 
     retired_incarnations.push_back(order.incarnation);
@@ -6568,16 +6495,9 @@ void BacktestEngine::apply_filled_order_to_state(
         || pyramid_entries_.size() != pyramid_lots_before_fill
         || trades_.size() != trades_before;
 
-    // The POOC close's quota identity can transfer only to the first broker
-    // operation that immediately continues that close as its designated
-    // reversal MARKET. If any other order actually fills first, broker order
-    // has moved on: expire the token before OCA effects and before this fill's
-    // cap close/latch. A matched-but-rejected or zero-effect attempt is not a
-    // broker fill and intentionally leaves the exact inheritor eligible.
-    if (primary_fill_applied && !inherits_pooc_close_fill
-        && intraday_cap_pooc_close_inheritor_incarnation_ != 0) {
-        intraday_cap_pooc_close_inheritor_incarnation_ = 0;
-    }
+    max_intraday_filled_orders_.outcome(
+        primary_fill_applied ? compat::pine::FillOutcome::Committed
+                             : compat::pine::FillOutcome::NoEffect, cap_origin);
 
     // Bounded POOC global-exit growth. Only MARKET adds that were already
     // pending when the one tracking EXIT was armed carry this relation bit.
@@ -6994,96 +6914,29 @@ void BacktestEngine::apply_filled_order_to_state(
     // orders in this iteration are naturally skipped by the flat guard
     // earlier in the inner loop body.
 
-    // max_intraday_filled_orders auto-close: if this fill was the
-    // cap-triggering one and the position is still non-flat after
-    // dispatch (entries leave a position open; exits that flatten
-    // already need no synthetic close), emit TV's synthetic
-    // "Close Position (Max number of filled orders in one day)" exit at
-    // the same fill price, then LATCH so all subsequent fills on this
-    // broker day are silently rejected. TV emits at most one cap-close
-    // per broker day (probe 97b: 382 cap-closes across 13 months,
-    // ~one per day where the cap fires). The latch is reset
-    // only on broker-day rollover (see top of this function).
-    if (will_trigger_cap) {
-        if (position_side_ != PositionSide::FLAT) {
-            // Opt-in factor B is deliberately narrow: an ordinary historical
-            // POOC run, no COOF/magnifier scheduler, and a MARKET created on
-            // this bar.  TradingView accepts that entry at the signal close
-            // but emits the cap flatten at the next broker boundary.  Latch
-            // immediately below; dispatch_bar performs the pending close at
-            // the next bar's open before any other broker work.
-            const bool defer_pooc_market_close =
-                intraday_cap_defer_pooc_close_
-                && process_orders_on_close_
-                && !calc_on_order_fills_
-                && !bar_magnifier_enabled_
-                && !stream_warmup_mode_
-                && stream_phase_ == StreamPhase::IDLE
-                && order.type == OrderType::MARKET
-                && order.created_bar == bar_index_;
-            if (defer_pooc_market_close) {
-                intraday_cap_deferred_close_pending_ = true;
-                intraday_cap_hit_ = true;
-                return;
-            }
-            // TV cap-close exit price empirics (probe 97 stop-entry +
-            // cap composition):
-            //
-            //   When the cap-triggering fill is a STOP entry that fired
-            //   INTRA-bar (stop > bar.open for long, stop < bar.open
-            //   for short), TV's synthetic "Close Position (Max number
-            //   of filled orders in one day)" exit emits at the bar's
-            //   FAVORABLE extreme — bar.high for a long, bar.low for a
-            //   short — not at the entry's stop trigger price. The
-            //   model: TV's broker traces the bar path past the stop
-            //   trigger to the next extreme (continuation through the
-            //   stop direction is the "worst case" assumption Pine uses
-            //   for path resolution), and the cap-close fires at that
-            //   reached extreme. Verified against 152 cap-close trades
-            //   in probe 97: long stop-entry fills with stop > open
-            //   close at bar.high; short stop-entry fills with
-            //   stop < open close at bar.low.
-            //
-            //   When the entry filled AT bar.open (gap-fill: long stop
-            //   <= open, short stop >= open, or a market entry — no
-            //   intra-bar travel was needed to reach the trigger), TV's
-            //   cap-close emits at fill_price = bar.open. Probe 97b
-            //   (market entries only, no stops) confirms 382/382 cap-
-            //   closes at fill_price = entry_price = bar.open.
-            //
-            //   This ONLY applies to ENTRY/MARKET fills that opened the
-            //   position. Other fill types (RAW_ORDER bracket exits,
-            //   EXIT close-deferred orders) reach this path only when
-            //   they themselves flatten — but a flatten leaves
-            //   position_side_ FLAT, so the outer guard already skips
-            //   the synthetic close emit. So we only need the bar-
-            //   extreme adjustment for the entry-fill cases.
-            double cap_close_price = fill_price;
-            const bool entry_kind = (order.type == OrderType::ENTRY ||
-                                     order.type == OrderType::MARKET);
-            if (entry_kind) {
-                if (position_side_ == PositionSide::LONG && fill_price > bar.open) {
-                    cap_close_price = bar.high;
-                } else if (position_side_ == PositionSide::SHORT && fill_price < bar.open) {
-                    cap_close_price = bar.low;
-                }
-            }
-            size_t close_trades_before = trades_.size();
-            PositionSide cap_side_before = position_side_;
-            double cap_qty_before = position_qty_;
-            execute_market_exit(cap_close_price);
-            if (position_side_ != cap_side_before
-                || std::abs(position_qty_ - cap_qty_before) > kQtyEpsilon
-                || trades_.size() != close_trades_before) {
-                ++broker_fill_event_seq_;
-            }
-            for (size_t ti = close_trades_before; ti < trades_.size(); ++ti) {
-                trades_[ti].exit_comment =
-                    "Close Position (Max number of filled orders in one day)";
-                trades_[ti].exit_id = "";
-            }
+    const auto close_decision = max_intraday_filled_orders_.post_dispatch(
+        cap_admission, pine_cap_calculation(), pine_cap_attempt(order),
+        pine_cap_side(position_side_), position_cycle_seq_,
+        {fill_price, bar.open, bar.high, bar.low});
+    if (const auto* next = std::get_if<compat::pine::CloseNextOpen>(&close_decision)) {
+        position_close_obligation_.schedule(next->request);
+        return;
+    }
+    if (const auto* now = std::get_if<compat::pine::CloseNow>(&close_decision)) {
+        const size_t close_trades_before = trades_.size();
+        const PositionSide side_before = position_side_;
+        const double qty_before = position_qty_;
+        execute_market_exit(now->price);
+        if (position_side_ != side_before
+            || std::abs(position_qty_ - qty_before) > kQtyEpsilon
+            || trades_.size() != close_trades_before) {
+            ++broker_fill_event_seq_;
         }
-        intraday_cap_hit_ = true;  // latch — block further fills until day rollover
+        for (size_t ti = close_trades_before; ti < trades_.size(); ++ti) {
+            trades_[ti].exit_comment = now->request.comment;
+            trades_[ti].exit_id = "";
+        }
+        max_intraday_filled_orders_.after_immediate_close_attempt();
     }
 }
 
@@ -7146,7 +6999,7 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
         || margin_long_ != 100 || margin_short_ != 100
         || syminfo_.pointvalue != 1 || account_currency_fx_ != 1
         || !account_currency_fx_timestamps_.empty()
-        || max_intraday_filled_orders_ != 0
+        || !max_intraday_filled_orders_.legacy_limit_is_zero()
         || risk_direction_ != RiskDirection::BOTH
         || risk_max_intraday_loss_ != 0 || risk_max_drawdown_ != 0
         || risk_max_cons_loss_days_ != 0 || risk_max_position_size_ != 0) {
@@ -8287,7 +8140,7 @@ double BacktestEngine::pooc_short_exit_trigger_close(
         && slippage_ == 0 && commission_type_ == CommissionType::PERCENT
         && syminfo_.pointvalue == 1 && account_currency_fx_ == 1
         && account_currency_fx_timestamps_.empty()
-        && max_intraday_filled_orders_ == 0
+        && max_intraday_filled_orders_.legacy_limit_is_zero()
         && risk_max_intraday_loss_ == 0 && risk_max_drawdown_ == 0
         && risk_max_cons_loss_days_ == 0;
     if (!pinned_reissue) return bar.close;

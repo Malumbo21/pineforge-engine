@@ -50,6 +50,7 @@ set(TEST_SOURCES
     test_chart_timezone
     test_intraday_rollover_chart_tz
     test_intraday_cap_auto_close
+    test_pine_cap_boundary
     test_dmi_parity
     test_integration
     test_request_security

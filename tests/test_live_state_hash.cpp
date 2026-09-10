@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 using namespace pineforge;
+namespace pine_cap = pineforge::compat::pine;
 namespace {
 int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { std::fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); ++failures; } } while (0)
@@ -69,6 +70,120 @@ public:
         };
     }
 
+    // Pure literal serialization state; mutable views are confined to this
+    // test and never change the production policy's mutation interface.
+    pine_cap::CapConfiguration& literal_cap_configuration() {
+        return const_cast<pine_cap::CapConfiguration&>(max_intraday_filled_orders_.configuration());
+    }
+    pine_cap::IntradayOrderBudget& literal_budget() {
+        return const_cast<pine_cap::IntradayOrderBudget&>(max_intraday_filled_orders_.budget());
+    }
+    void seed_intraday(pine_cap::CapAttachment attachment = pine_cap::CapAttachment::LegacySource) {
+        max_intraday_filled_orders_ = pine_cap::IntradayCap(attachment);
+        literal_cap_configuration() = {9, false, true, false};
+        // Construct due-cause/action state with the real value transition.
+        max_intraday_filled_orders_.post_dispatch(
+            {pine_cap::Dispatch::Allow, pine_cap::QuotaTrigger{{41}, 1}},
+            {true, false, false, false, false, true, true, 3},
+            {pine_cap::OrderKind::Market, 23, 3, true, pine_cap::Side::Long, 1, 0},
+            pine_cap::Side::Long, 31, {100, 100, 101, 99});
+        literal_budget().count_committed_close({41}, 9, 17, 3, 23);
+        position_close_obligation_.schedule({1, 31, 3, "literal close"});
+    }
+    // Perturb one stored field at a time, including states public lifecycle
+    // transitions cannot create. Seeding/removing several fields together
+    // would conceal a missing child fold. No dispatch uses mutated fixtures.
+    void mutate_literal_transfer(const std::function<void(pine_cap::CloseQuotaTransfer&)>& mutate) {
+        mutate(const_cast<pine_cap::CloseQuotaTransfer&>(*literal_budget().transfer()));
+    }
+    void mutate_literal_due(const std::function<void(pine_cap::CloseCause&)>& mutate) {
+        mutate(const_cast<pine_cap::CloseCause&>(*max_intraday_filled_orders_.due_cause()));
+    }
+    void mutate_literal_request(const std::function<void(broker::PositionCloseRequest&)>& mutate) {
+        auto request = *position_close_obligation_.peek();
+        mutate(request);
+        position_close_obligation_.schedule(request);
+    }
+    static std::vector<Pin> IntradayPins() {
+        return {
+            {"attachment", [](Probe& s) { s.seed_intraday(pine_cap::CapAttachment::None); }},
+            {"configuration.limit", [](Probe& s) { ++s.literal_cap_configuration().limit; }},
+            {"configuration.skip_noop_market", [](Probe& s) {
+                s.literal_cap_configuration().skip_noop_market = true;
+            }},
+            {"configuration.defer_pooc_close", [](Probe& s) {
+                s.literal_cap_configuration().defer_pooc_close = false;
+            }},
+            {"configuration.count_pooc_full_close", [](Probe& s) {
+                s.literal_cap_configuration().count_pooc_full_close = true;
+            }},
+            {"risk_day.presence", [](Probe& s) {
+                const_cast<std::optional<pine_cap::OrderRiskDay>&>(s.literal_budget().day()).reset();
+            }},
+            {"risk_day.key", [](Probe& s) {
+                ++const_cast<pine_cap::OrderRiskDay&>(*s.literal_budget().day()).key;
+            }},
+            {"charged_slots", [](Probe& s) {
+                s.literal_budget().admit_matched_attempt({41}, 9, 3, 99, 17);
+            }},
+            {"latched", [](Probe& s) { s.literal_budget().latch(); }},
+            {"transfer.presence", [](Probe& s) { s.literal_budget().expire_transfer(); }},
+            {"transfer.day.key", [](Probe& s) {
+                s.mutate_literal_transfer([](auto& transfer) { ++transfer.day.key; });
+            }},
+            {"transfer.close_fill", [](Probe& s) {
+                s.mutate_literal_transfer([](auto& transfer) { ++transfer.close_fill; });
+            }},
+            {"transfer.source_bar", [](Probe& s) {
+                s.mutate_literal_transfer([](auto& transfer) { ++transfer.source_bar; });
+            }},
+            {"transfer.inheritor", [](Probe& s) {
+                s.mutate_literal_transfer([](auto& transfer) { ++transfer.inheritor; });
+            }},
+            {"due_cause.presence", [](Probe& s) {
+                const_cast<std::optional<pine_cap::CloseCause>&>(
+                    s.max_intraday_filled_orders_.due_cause()).reset();
+            }},
+            {"due_cause.action_id", [](Probe& s) {
+                s.mutate_literal_due([](auto& due) { ++due.action_id; });
+            }},
+            {"due_cause.charged_day.key", [](Probe& s) {
+                s.mutate_literal_due([](auto& due) { ++due.charged_day.key; });
+            }},
+            {"due_cause.charged_slots", [](Probe& s) {
+                s.mutate_literal_due([](auto& due) { ++due.charged_slots; });
+            }},
+            {"due_cause.trigger_bar", [](Probe& s) {
+                s.mutate_literal_due([](auto& due) { ++due.trigger_bar; });
+            }},
+            {"due_cause.trigger_order", [](Probe& s) {
+                s.mutate_literal_due([](auto& due) { ++due.trigger_order; });
+            }},
+            {"next_action", [](Probe& s) {
+                // Immediate decision advances the action counter without
+                // altering existing due cause, quota or generic obligation.
+                s.max_intraday_filled_orders_.post_dispatch(
+                    {pine_cap::Dispatch::Allow, pine_cap::QuotaTrigger{{41}, 1}},
+                    {false, false, false, false, false, true, true, 3},
+                    {pine_cap::OrderKind::Market, 23, 3, true, pine_cap::Side::Long, 1, 0},
+                    pine_cap::Side::Long, 31, {100, 100, 101, 99});
+            }},
+            {"obligation.presence", [](Probe& s) { s.position_close_obligation_ = {}; }},
+            {"obligation.action_id", [](Probe& s) {
+                s.mutate_literal_request([](auto& request) { ++request.action_id; });
+            }},
+            {"obligation.position_cycle", [](Probe& s) {
+                s.mutate_literal_request([](auto& request) { ++request.position_cycle; });
+            }},
+            {"obligation.after_bar", [](Probe& s) {
+                s.mutate_literal_request([](auto& request) { ++request.after_bar; });
+            }},
+            {"obligation.comment", [](Probe& s) {
+                s.mutate_literal_request([](auto& request) { request.comment += " changed"; });
+            }},
+        };
+    }
+
     static std::vector<Pin> ScalarPins() {
         return {
             // Position core
@@ -115,13 +230,6 @@ public:
             {"trail_best_before_bar_fill_seq_", [](Probe& s) { s.trail_best_before_bar_fill_seq_ += 1; }},
             {"priced_entry_activity_bar_", [](Probe& s) { s.priced_entry_activity_bar_ += 1; }},
             {"priced_entry_filled_this_bar_", [](Probe& s) { s.priced_entry_filled_this_bar_ = !s.priced_entry_filled_this_bar_; }},
-
-            // Intraday fill cap
-            {"intraday_fill_count_", [](Probe& s) { s.intraday_fill_count_ += 1; }},
-            {"intraday_day_", [](Probe& s) { s.intraday_day_ += 1; }},
-            {"intraday_cap_hit_", [](Probe& s) { s.intraday_cap_hit_ = !s.intraday_cap_hit_; }},
-            {"intraday_cap_deferred_close_pending_", [](Probe& s) { s.intraday_cap_deferred_close_pending_ = !s.intraday_cap_deferred_close_pending_; }},
-            {"intraday_cap_pooc_close_inheritor_incarnation_", [](Probe& s) { s.intraday_cap_pooc_close_inheritor_incarnation_ += 1; }},
 
             // Equity / roundoff
             {"net_profit_sum_", [](Probe& s) { s.net_profit_sum_ += 0.5; }},
@@ -517,6 +625,19 @@ int main() {
         p.mutate(s);
         if (s.broker_state_hash() == before) {
             std::fprintf(stderr, "FAIL opening receipt pin %s: hash unchanged\n", p.name);
+            ++failures;
+        }
+    }
+
+    // Pure literal state: each nested cap owner, presence and due field must
+    // affect the hash independently, without running an engine or strategy.
+    for (const auto& p : Probe::IntradayPins()) {
+        Probe s;
+        s.seed_intraday();
+        const uint64_t before = s.broker_state_hash();
+        p.mutate(s);
+        if (s.broker_state_hash() == before) {
+            std::fprintf(stderr, "FAIL intraday ownership pin %s: hash unchanged\n", p.name);
             ++failures;
         }
     }

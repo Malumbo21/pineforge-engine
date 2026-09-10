@@ -1,55 +1,205 @@
 #!/usr/bin/env python3
-"""Link-only check: stale C++ subclass objects must not bind the new vtable.
+"""Compile/link-only checks for the internal generated/native C++ pairing.
 
-Neither linked program is executed. The public C ABI is checked separately.
+Exact base38 headers are a frozen fixture: no Git history or network is needed.
+Every translation unit must compile before expected linker failures are tested.
+Neither a strategy nor any produced executable is run. C ABI checks are separate.
 """
 import argparse
+import gzip
+import hashlib
+import json
 from pathlib import Path
 import subprocess
 import tempfile
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--compiler", required=True)
-    parser.add_argument("--library", required=True)
-    parser.add_argument("--include", required=True)
-    parser.add_argument("--generated-include", required=True)
-    parser.add_argument("--extra-flag", action="append", default=[])
-    args = parser.parse_args()
-    caller = '''
+BASE_COMMIT = "38dc73e5503fe5395458e5f8df2a2ad78054a1ae"
+BASE_ENGINE_SHA256 = "06c937a1ccd31815ca7775268ac699ffdfddb1a1f19de4628b777f37e9a6d193"
+CURRENT_NAMESPACE = "engine_script_run_v3"
+BASE_NAMESPACE = "engine_script_run_v2"
+FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/script_cpp_abi/base38"
+
+
+def entry_diagnostic(lines, namespace, method):
+    # "run" also occurs inside engine_script_run_vN. Match the qualified
+    # method itself, so a missing fill_report cannot masquerade as missing run.
+    owner = "pineforge::" + (namespace + "::" if namespace else "")
+    needle = owner + "BacktestEngine::" + method + "("
+    return next((line for line in lines if needle in line), None)
+
+
+def frozen_headers(destination):
+    """Authenticate and unpack the exact tracked base38 header closure."""
+    manifest = json.loads((FIXTURE / "manifest.json").read_text())
+    if (manifest["source_commit"] != BASE_COMMIT
+            or manifest["internal_namespace"] != BASE_NAMESPACE
+            or manifest["files"]["pineforge/engine.hpp"]["sha256"] != BASE_ENGINE_SHA256):
+        raise RuntimeError("stale-header fixture does not identify the pinned base38 contract")
+    archive = (FIXTURE / "headers.json.gz").read_bytes()
+    if hashlib.sha256(archive).hexdigest() != manifest["archive_sha256"]:
+        raise RuntimeError("stale-header fixture archive digest mismatch")
+    contents = json.loads(gzip.decompress(archive))
+    if contents.keys() != manifest["files"].keys():
+        raise RuntimeError("stale-header fixture file set mismatch")
+    for name, content in contents.items():
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts or relative.parts[0] != "pineforge":
+            raise RuntimeError("invalid stale-header fixture path: " + name)
+        raw = content.encode()
+        blob = b"blob " + str(len(raw)).encode() + b"\0" + raw
+        expected = manifest["files"][name]
+        if (hashlib.sha256(raw).hexdigest() != expected["sha256"]
+                or hashlib.sha1(blob).hexdigest() != expected["git_blob"]):
+            raise RuntimeError("stale-header fixture digest mismatch: " + name)
+        path = destination / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+
+
+def caller(namespace, generated=False):
+    header = f'''#include <pineforge/engine.hpp>
+#include <type_traits>
+static_assert(std::is_same<pineforge::BacktestEngine,
+              pineforge::{namespace}::BacktestEngine>::value,
+              "unexpected internal C++ namespace");
+'''
+    if generated:
+        # Shape of supported codegen c8ffe587 emit_top.py's entry wrappers.
+        # No Pine source is compiled and no GeneratedStrategy is instantiated.
+        return header + '''
+class GeneratedStrategy final : public pineforge::BacktestEngine {
+    void on_bar(const pineforge::Bar&) override {}
+    void prepare_script_run(const pineforge::Bar*, int, bool) override {}
+};
+extern "C" void pairing_generated_run(void* handle, pineforge::Bar* bars,
+                                      int count, pineforge::ReportC* report) {
+    auto* strategy = static_cast<GeneratedStrategy*>(handle);
+    strategy->run(bars, count);
+    strategy->run(bars, count, "", "", false, 4,
+                  pineforge::MagnifierDistribution::ENDPOINTS);
+    strategy->fill_report(report);
+}
+int main(int argc, char** argv) {
+    pairing_generated_run(argv, nullptr, argc, nullptr);
+    return 0;
+}
+'''
+    return header + '''
+int main(int argc, char** argv) {
+    auto* strategy = reinterpret_cast<pineforge::BacktestEngine*>(argv);
+    strategy->run(nullptr, argc);
+    strategy->run(nullptr, argc, "", "", {}, pineforge::SymInfo{});
+    strategy->fill_report(nullptr);
+    return 0;
+}
+'''
+
+
+# Only old entry-point symbols, compiled against the exact frozen old header.
+# This is a linker control, NOT a historical runtime or economic simulation.
+BASE_SYMBOL_CONTROL = '''#include <pineforge/engine.hpp>
+namespace pineforge { namespace engine_script_run_v2 {
+void BacktestEngine::run(const Bar*, int) {}
+void BacktestEngine::run(const Bar*, int, const std::string&, const std::string&,
+                        bool, int, MagnifierDistribution) {}
+void BacktestEngine::run(const Bar*, int, const std::string&, const std::string&,
+                        const std::unordered_map<std::string, std::string>&,
+                        const SymInfo&, const StrategyOverrides*, bool, int,
+                        MagnifierDistribution) {}
+void BacktestEngine::fill_report(ReportC*) const {}
+}}
+'''
+LEGACY_CALLER = '''namespace pineforge {
+struct Bar;
+class BacktestEngine { public: void run(const Bar*, int); };
+}
 int main(int argc, char** argv) {
     auto* strategy = reinterpret_cast<pineforge::BacktestEngine*>(argv);
     strategy->run(nullptr, argc);
     return 0;
 }
 '''
-    current = '#include <pineforge/engine.hpp>\n' + caller
-    legacy = '''namespace pineforge {
-struct Bar;
-class BacktestEngine { public: void run(const Bar*, int); };
-}
-''' + caller
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--compiler", required=True)
+    parser.add_argument("--library", required=True)
+    parser.add_argument("--include", required=True)
+    parser.add_argument("--generated-include", required=True)
+    parser.add_argument("--extra-flag", action="append", default=[])
+    args = parser.parse_args()
+    # Literal diagnostic controls guard the link-failure parser itself.
+    for namespace in (BASE_NAMESPACE, CURRENT_NAMESPACE):
+        report_only = [f"undefined pineforge::{namespace}::BacktestEngine::fill_report(pineforge::ReportC*) const"]
+        if (entry_diagnostic(report_only, namespace, "run") is not None
+                or entry_diagnostic(report_only, namespace, "fill_report") is None):
+            raise RuntimeError("link diagnostics confuse namespace and method names")
+    print("qualified-method diagnostic controls passed")
     with tempfile.TemporaryDirectory(prefix="pf-script-cpp-abi-") as temporary:
         root = Path(temporary)
-        def link(name, source):
+        old_include = root / "base38/include"
+        frozen_headers(old_include)
+        common = [args.compiler, "-std=c++17", "-O0", *args.extra_flag]
+
+        def compile_object(name, source, include):
             path = root / (name + ".cpp")
             path.write_text(source)
-            return subprocess.run(
-                [args.compiler, "-std=c++17", "-O0", "-I", args.include,
-                 "-I", args.generated_include, *args.extra_flag, str(path),
-                 args.library, "-pthread", "-o", str(root / name)],
+            obj = root / (name + ".o")
+            compiled = subprocess.run(
+                [*common, "-I", str(include), "-I", args.generated_include,
+                 "-c", str(path), "-o", str(obj)],
                 capture_output=True, text=True, timeout=60,
             )
-        fresh = link("current", current)
-        if fresh.returncode:
-            raise RuntimeError("current C++ contract failed to link:\n" + fresh.stderr)
-        stale = link("legacy", legacy)
-        if stale.returncode == 0:
-            raise RuntimeError("legacy unversioned C++ run symbol still links to the new runtime")
-        if "undefined" not in stale.stderr.lower() or "BacktestEngine" not in stale.stderr:
-            raise RuntimeError("legacy link failed for an unexpected reason:\n" + stale.stderr)
-    print("current C++ contract links; stale object rejected; no executable run")
+            if compiled.returncode:
+                raise RuntimeError(name + " failed to compile (not a pairing rejection):\n"
+                                   + compiled.stderr)
+            return obj
+
+        current_native = compile_object("current_native", caller(CURRENT_NAMESPACE), args.include)
+        current_generated = compile_object("current_generated", caller(CURRENT_NAMESPACE, True), args.include)
+        stale_native = compile_object("base38_native", caller(BASE_NAMESPACE), old_include)
+        stale_generated = compile_object("base38_generated", caller(BASE_NAMESPACE, True), old_include)
+        old_symbols = compile_object("base38_symbol_control", BASE_SYMBOL_CONTROL, old_include)
+        legacy = compile_object("legacy_unversioned", LEGACY_CALLER, old_include)
+
+        def link(name, obj, runtime, missing_namespace=None):
+            linked = subprocess.run(
+                [*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if missing_namespace is None:
+                if linked.returncode:
+                    raise RuntimeError(name + " positive control failed to link:\n" + linked.stderr)
+                print(name + ": linked (not executed)")
+                return
+            if not linked.returncode:
+                raise RuntimeError(name + " stale C++ pairing unexpectedly linked")
+            # Require the missing engine entry symbol, not an arbitrary linker
+            # failure (missing library, compiler flags, unrelated dependency).
+            required_methods = ("run", "fill_report") if missing_namespace else ("run",)
+            entries = {method: entry_diagnostic(linked.stderr.splitlines(), missing_namespace, method)
+                       for method in required_methods}
+            if ("undefined" not in linked.stderr.lower()
+                    or any(line is None for line in entries.values())):
+                raise RuntimeError(name + " failed for an unexpected reason:\n" + linked.stderr)
+            print(name + ": rejected missing pineforge::"
+                  + (missing_namespace + "::" if missing_namespace else "")
+                  + "BacktestEngine entry symbols")
+            for method in required_methods:
+                print("  " + entries[method].strip())
+
+        link("current_native_to_current", current_native, args.library)
+        link("current_generated_to_current", current_generated, args.library)
+        link("base38_native_to_v2_symbol_control", stale_native, old_symbols)
+        link("base38_generated_to_v2_symbol_control", stale_generated, old_symbols)
+        link("base38_native_to_current", stale_native, args.library, BASE_NAMESPACE)
+        link("base38_generated_to_current", stale_generated, args.library, BASE_NAMESPACE)
+        link("current_native_to_v2_symbol_control", current_native, old_symbols, CURRENT_NAMESPACE)
+        link("current_generated_to_v2_symbol_control", current_generated, old_symbols, CURRENT_NAMESPACE)
+        link("unversioned_to_current", legacy, args.library, "")
+    print("6 translation units compiled; 4 positive links; 5 rejected links; no executable run")
 
 
 if __name__ == "__main__":

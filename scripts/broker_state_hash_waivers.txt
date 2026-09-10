@@ -18,14 +18,10 @@ default_qty_value_            # config: strategy(default_qty_value=...)
 flat_retained_child_fresh_parent_order_  # config: explicit A/B ordering override
 historical_security_lookahead_projection_  # config: opt-in request.security selector
 initial_capital_              # config: strategy(initial_capital=...)
-intraday_cap_count_pooc_full_close_fills_  # config: opt-in intraday-cap oracle candidate
-intraday_cap_defer_pooc_close_             # config: opt-in intraday-cap oracle candidate
-intraday_cap_skip_noop_market_fills_       # config: opt-in intraday-cap oracle candidate
 margin_call_enabled_          # config: set_margin_call_enabled toggle
 margin_long_                  # config: strategy(margin_long=...)
 margin_short_                 # config: strategy(margin_short=...)
 margin_zero_cover_full_liquidation_  # config: opt-in margin-call oracle candidate
-max_intraday_filled_orders_   # config: strategy(max_intraday_filled_orders=...)
 path_order_mode_              # config: set_path_order(), persistent op-set selector
 probe_suppress_tail_logic_    # config: set_probe_suppress_tail_logic(), persistent selector
 process_orders_on_close_      # config: strategy(process_orders_on_close=...)
@@ -40,7 +36,6 @@ risk_max_drawdown_is_pct_       # config: companion unit selector for risk_max_d
 risk_max_intraday_loss_         # config: strategy.risk.max_intraday_loss(...)
 risk_max_intraday_loss_is_pct_  # config: companion unit selector for risk_max_intraday_loss_
 risk_max_position_size_         # config: strategy.risk.max_position_size(...)
-script_has_strategy_close_    # codegen compatibility bit; doc: "Runtime behavior must not depend on it"
 security_range_start_na_warmup_  # config: opt-in HTF warmup selector
 security_range_start_ms_      # config: injected HTF warmup range-start epoch
 slippage_                     # config: strategy(slippage=...)

@@ -1702,50 +1702,19 @@ void BacktestEngine::flush_active_same_bar_close(
         || trades_.size() != trades_before;
     if (close_filled) {
         ++broker_fill_event_seq_;
-        // This custom broker fill bypasses apply_filled_order_to_state, but
-        // TradingView's max_intraday_filled_orders counts filled closes too.
-        if (intraday_cap_count_pooc_full_close_fills_
-            && process_orders_on_close_
-            && !calc_on_order_fills_
-            && !coof_scheduler_active_
-            && !bar_magnifier_enabled_
-            && !stream_warmup_mode_
-            && stream_phase_ == StreamPhase::IDLE
-            && !close_entries_rule_any_
-            && closes_full_position
-            && max_intraday_filled_orders_ > 0) {
-            // Transfer the already-spent slot to the earliest co-queued
-            // opposite MARKET order if one survives to fill-time admission.
-            const PendingOrder* inheritor = nullptr;
+        // A custom committed close bypasses the matched-order dispatcher.
+        // Pass value records; Pine policy owns scope and beneficiary choice.
+        const auto context = pine_cap_calculation();
+        if (max_intraday_filled_orders_.direct_close_routing(context, closes_full_position)
+                == compat::pine::DirectCloseRouting::Observe) {
+            std::vector<compat::pine::ContinuationCandidate> candidates;
+            candidates.reserve(pending_orders_.size());
             for (const PendingOrder& pending : pending_orders_) {
-                if (pending.type != OrderType::MARKET
-                    || pending.created_bar != bar_index_
-                    || pending.is_long
-                           == (side_before == PositionSide::LONG)) {
-                    continue;
-                }
-                if (inheritor == nullptr
-                    || pending.created_seq < inheritor->created_seq) {
-                    inheritor = &pending;
-                }
+                candidates.push_back({pine_cap_kind(pending.type), pending.created_bar,
+                    pending.is_long, pending.created_seq, pending.incarnation});
             }
-            intraday_cap_pooc_close_inheritor_incarnation_ =
-                inheritor == nullptr ? 0 : inheritor->incarnation;
-
-            const int64_t cur_day = intraday_order_day_key();
-            if (cur_day != intraday_day_) {
-                intraday_day_ = cur_day;
-                intraday_fill_count_ = 0;
-                intraday_cap_hit_ = false;
-            }
-            if (!intraday_cap_hit_) {
-                ++intraday_fill_count_;
-                if (intraday_fill_count_ >= max_intraday_filled_orders_) {
-                    // The close already left the position flat, so no
-                    // synthetic risk close is needed; only latch the day.
-                    intraday_cap_hit_ = true;
-                }
-            }
+            max_intraday_filled_orders_.committed_close(pine_cap_clock(), context,
+                pine_cap_side(side_before), broker_fill_event_seq_, candidates);
         }
         if (coof_scheduler_active_ && coof_direct_fill_events_remaining_ > 0) {
             --coof_direct_fill_events_remaining_;

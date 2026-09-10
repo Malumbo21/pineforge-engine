@@ -19,7 +19,9 @@ Nested physical lots are checked separately: every PyramidEntry member must
 have its type-appropriate f.<fold>(e.<name>) inside the pyramid_entries_ loop,
 or a justified pyramid_entry.<name> waiver. Merely hashing the container name,
 mentioning a member, or hashing it outside its owning loop does not cover it.
-Both member lists use the same fail-closed named-struct parser."""
+Both member lists use the same fail-closed named-struct parser. Intraday quota
+owners, continuations and due closes likewise require every nested field and
+optional-presence discriminator in their owning hash block, without waivers."""
 from __future__ import annotations
 import re, sys
 from pathlib import Path
@@ -173,7 +175,8 @@ def _class_fields(src: str, name: str) -> dict[str, str]:
         if ch == "{":
             prefix = statement.strip()
             nested = re.match(r"(?:struct|class)\s+\w+$", prefix)
-            method = "(" in prefix and "=" not in prefix.split("(", 1)[0]
+            method = "(" in prefix and ("=" not in prefix.split("(", 1)[0]
+                                        or "operator=" in prefix.split("(", 1)[0])
             if not nested and not method:
                 raise ValueError(f"{name}: unclassified braced declaration {prefix!r}")
             depth = 1
@@ -189,7 +192,7 @@ def _class_fields(src: str, name: str) -> dict[str, str]:
             decl = " ".join(statement.split())
             statement = ""
             if decl and not decl.startswith("using "):
-                match = re.fullmatch(r"([\w:<>]+)\s+(\w+)(?:\s*=\s*[^,]+)?", decl)
+                match = re.fullmatch(r"((?:(?:static|constexpr|const)\s+)*[\w:<>]+)\s+(\w+)(?:\s*=\s*[^,]+)?", decl)
                 if not match or match[2] in fields:
                     raise ValueError(f"{name}: unclassified data declaration {decl!r}")
                 fields[match[2]] = match[1]
@@ -244,6 +247,124 @@ def _opening_coverage(events: str, src: str) -> None:
         raise ValueError("opening receipt presence fold must precede its body")
 
 
+def _intraday_coverage(policy: str, budget: str, obligation: str, src: str) -> None:
+    """No waivers: serialize the policy, quota and generic obligation owners.
+
+    Reflect every stored child, but exclude value inputs and decision records:
+    those are ephemeral call arguments, not persistent engine state. Class
+    storage and enum/schema encodings fail closed when their shape changes.
+    """
+    policy, budget, obligation = map(_strip_cpp_comments, (policy, budget, obligation))
+    for source, name, expected in [
+        (policy, "IntradayCap", {
+            "schema_version": "static constexpr uint64_t",
+            "attachment_": "CapAttachment", "configuration_": "CapConfiguration",
+            "budget_": "IntradayOrderBudget", "due_cause_": "std::optional<CloseCause>",
+            "next_action_": "uint64_t"}),
+        (budget, "IntradayOrderBudget", {
+            "day_": "std::optional<OrderRiskDay>", "charged_slots_": "int",
+            "latched_": "bool", "transfer_": "std::optional<CloseQuotaTransfer>"}),
+        (obligation, "PositionCloseObligation", {
+            "due_": "std::optional<PositionCloseRequest>"}),
+    ]:
+        if _class_fields(source, name) != expected:
+            raise ValueError(f"{name} fields changed; classify every field in the hash contract")
+    attachment = _one_braced_body(policy, r"enum\s+class\s+CapAttachment\s*\{", "CapAttachment")
+    if [x.strip() for x in attachment.split(",")] != ["LegacySource", "None"]:
+        raise ValueError("CapAttachment alternatives changed; update the hash encoding")
+
+    children = {name: struct_members(source, name) for source, names in [
+        (policy, ("CapConfiguration", "CloseCause")),
+        (budget, ("OrderRiskDay", "CloseQuotaTransfer")),
+        (obligation, ("PositionCloseRequest",)),
+    ] for name in names}
+
+    def folds(name: str, expression: str) -> list[tuple[str, str]]:
+        result = []
+        for cpp_type, member in children[name]:
+            value = expression + member
+            if cpp_type == "OrderRiskDay":
+                if name == "OrderRiskDay":
+                    raise ValueError("OrderRiskDay cannot recursively own itself")
+                result.extend(folds(cpp_type, value + "."))
+            else:
+                fold = PYRAMID_FOLD.get(cpp_type)
+                if fold is None:
+                    raise ValueError(f"{name}.{member}: unclassified causal type {cpp_type}")
+                result.append((value, f"f.{fold}({value});"))
+        return result
+
+    cap = "max_intraday_filled_orders_"
+    pieces = ["f.u(compat::pine::IntradayCap::schema_version);",
+              f"f.i(static_cast<int64_t>({cap}.attachment()));"]
+    pieces.extend(fold for _member, fold in folds("CapConfiguration", cap + ".configuration()."))
+    for label, presence, opening, name, expression in [
+        ("risk day", f"f.b({cap}.budget().day().has_value());",
+         f"if (const auto& day = {cap}.budget().day()) {{", "OrderRiskDay", "day->"),
+        ("close quota transfer", f"f.b({cap}.budget().transfer().has_value());",
+         f"if (const auto& transfer = {cap}.budget().transfer()) {{",
+         "CloseQuotaTransfer", "transfer->"),
+        ("due cap cause", f"f.b({cap}.due_cause().has_value());",
+         f"if (const auto& due = {cap}.due_cause()) {{", "CloseCause", "due->"),
+        ("position close obligation", "f.b(position_close_obligation_.pending());",
+         "if (const auto& request = position_close_obligation_.peek()) {",
+         "PositionCloseRequest", "request->"),
+    ]:
+        body = _one_braced_body(src, re.escape(opening), label + " hash")
+        compact_body = re.sub(r"\s+", "", body)
+        expected_folds = folds(name, expression)
+        for member, fold in expected_folds:
+            if fold not in compact_body:
+                raise ValueError(f"{name}.{member} missing its typed fold in the {label} body")
+        expected_body = "".join(fold for _member, fold in expected_folds)
+        if compact_body != expected_body:
+            raise ValueError(f"{label} folds must cover every child unconditionally in declaration order")
+        pieces.extend([presence, opening, expected_body, "}"])
+        if name == "OrderRiskDay":
+            pieces.extend([f"f.i({cap}.budget().charged_slots());",
+                           f"f.b({cap}.budget().latched());"])
+        if name == "CloseCause":
+            pieces.append(f"f.u({cap}.next_action());")
+
+    # The entire block must be consecutive and unconditional at function
+    # scope: a mention, wrong type, foreign owner or conditional fold fails.
+    hash_body = _one_braced_body(src,
+        r"uint64_t\s+BacktestEngine::broker_state_hash\(\)\s+const\s*\{", "broker hash")
+    compact_hash = re.sub(r"\s+", "", hash_body)
+    block = re.sub(r"\s+", "", "".join(pieces))
+    if compact_hash.count(block) != 1:
+        raise ValueError("intraday hash requires every typed configuration/state fold beside its owning body")
+    prefix = compact_hash[:compact_hash.index(block)]
+    if prefix.count("{") != prefix.count("}") or (prefix and prefix[-1] not in ";}"):
+        raise ValueError("intraday hash block must be unconditional at broker_state_hash function scope")
+
+
+def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
+    """The v3 layout and serialized-state contracts must advance together.
+
+    Pin the actual hash entry points, rather than accepting a version string
+    mentioned in a comment or an unrelated helper. Public C ABI versions have
+    a separate contract and are not changed by this internal epoch.
+    """
+    header = _strip_cpp_comments(header)
+    namespaces = re.findall(r"inline\s+namespace\s+(engine_script_run_v\d+)\s*\{", header)
+    if namespaces != ["engine_script_run_v3"]:
+        raise ValueError("BacktestEngine layout requires internal namespace engine_script_run_v3")
+    broker = _one_braced_body(source,
+        r"uint64_t\s+BacktestEngine::broker_state_hash\(\)\s+const\s*\{", "broker hash")
+    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v3"\);', broker):
+        raise ValueError("broker hash must start with pineforge-broker-state/v3")
+    stream_body = _one_braced_body(_strip_cpp_comments(stream),
+        r"uint64_t\s+BacktestEngine::stream_state_hash\(\)\s+const\s*\{", "stream hash")
+    compact = re.sub(r"\s+", "", stream_body)
+    fold = "integer(3);integer(broker_state_hash());"
+    if compact.count(fold) != 1:
+        raise ValueError("stream hash requires version 3 followed by the broker hash")
+    prefix = compact[:compact.index(fold)]
+    if prefix.count("{") != prefix.count("}") or (prefix and prefix[-1] not in ";}"):
+        raise ValueError("stream version fold must be unconditional at function scope")
+
+
 def main(root: Path = ROOT) -> int:
     hpp = (root / "include/pineforge/engine.hpp").read_text(encoding="utf-8")
     regions = _regions(hpp)
@@ -252,12 +373,21 @@ def main(root: Path = ROOT) -> int:
     src_raw = (root / "src/engine_state_hash.cpp").read_text(encoding="utf-8")
     src = _strip_cpp_comments(src_raw)
     try:
+        _runtime_version_coverage(hpp, src, (root / "src/engine_stream.cpp").read_text())
         _opening_coverage((root / "include/pineforge/broker_events.hpp").read_text(), src)
+        _intraday_coverage(
+            (root / "include/pineforge/compat/pine/intraday_cap.hpp").read_text(),
+            (root / "include/pineforge/compat/pine/intraday_order_budget.hpp").read_text(),
+            (root / "include/pineforge/position_close_obligation.hpp").read_text(), src)
     except (ValueError, OSError) as exc:
         print(f"check_broker_state_hash_coverage: {exc}", file=sys.stderr)
         return 1
 
     all_waivers = _load_waivers(root / "scripts/broker_state_hash_waivers.txt")
+    if {"max_intraday_filled_orders_", "position_close_obligation_"} & all_waivers.keys():
+        print("check_broker_state_hash_coverage: Pine cap and generic close owners cannot be waived",
+              file=sys.stderr)
+        return 1
     waivers = {k: v for k, v in all_waivers.items()
                if not k.startswith((PENDING_WAIVER_PREFIX, PYRAMID_WAIVER_PREFIX))}
     po_waivers = {k[len(PENDING_WAIVER_PREFIX):]: v

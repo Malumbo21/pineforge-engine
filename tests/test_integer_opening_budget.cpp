@@ -31,7 +31,6 @@ public:
         default_qty_type_ = QtyType::PERCENT_OF_EQUITY;
         default_qty_value_ = percent;
         margin_long_ = margin_short_ = 100;
-        script_has_strategy_close_ = true;
         pyramiding_ = 1;
         qty_step_ = syminfo_.pointvalue = 1;
         set_syminfo_mintick(.01);
