@@ -737,6 +737,7 @@ void BacktestEngine::emit_close_trade(const PyramidEntry& pe, double close_qty,
 // every full-close path (execute_market_exit) and by partial-exit settlement
 // when the FIFO loop drained the position.
 void BacktestEngine::reset_position_state_to_flat() {
+    unbind_exit_activations();
     position_side_ = PositionSide::FLAT;
     position_cycle_seq_ = 0;
     position_entry_price_ = 0.0;
@@ -798,6 +799,26 @@ void BacktestEngine::settle_position_after_partial_exit(
 }
 
 
+// Exposure transitions resolve activation once. Matchers never refresh a
+// deadline from whichever position happens to be current at read time.
+void BacktestEngine::bind_exit_activation(PendingOrder& order) {
+    if (order.type != OrderType::EXIT) return;
+    if (position_side_ == PositionSide::FLAT || position_cycle_seq_ <= 0) {
+        order.leg_activation.unbind();
+        return;
+    }
+    order.leg_activation.bind(order.pine_exit_activation.resolve(
+        position_cycle_seq_, position_open_bar_));
+}
+void BacktestEngine::bind_retained_exit_activations() {
+    for (auto& order : pending_orders_) bind_exit_activation(order);
+}
+void BacktestEngine::unbind_exit_activations() {
+    for (auto& order : pending_orders_) {
+        if (order.type == OrderType::EXIT) order.leg_activation.unbind();
+    }
+}
+
 // Establish a fresh position at fill_price/qty after a transition from FLAT
 // or a same-bar close. Resets all per-position state and seeds the first
 // pyramid entry. Used by every entry path that opens a brand-new position
@@ -831,6 +852,7 @@ void BacktestEngine::open_fresh_position(PositionSide requested, double fill_pri
     if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
     id_unclosed_qty_[id] += qty;
     cycle_filled_entry_ids_.insert(id);
+    bind_retained_exit_activations();
 }
 
 

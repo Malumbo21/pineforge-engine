@@ -16,7 +16,7 @@ import tempfile
 
 BASE_COMMIT = "38dc73e5503fe5395458e5f8df2a2ad78054a1ae"
 BASE_ENGINE_SHA256 = "06c937a1ccd31815ca7775268ac699ffdfddb1a1f19de4628b777f37e9a6d193"
-CURRENT_NAMESPACE = "engine_script_run_v5"
+CURRENT_NAMESPACE = "engine_script_run_v6"
 BASE_NAMESPACE = "engine_script_run_v2"
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/script_cpp_abi/base38"
 
@@ -150,6 +150,10 @@ def main():
         frozen_headers(prior_include, FIXTURE.parent / "basec45",
                        "c45cf5a4d0e67a2ac098d9066977e1fa21c408a9", "engine_script_run_v4",
                        "3b4e2937a9b5f275dd119144373b1bf15e433092009500092cd32ea34963b293")
+        activation_include = root / "base149/include"
+        frozen_headers(activation_include, FIXTURE.parent / "base149",
+                       "149f77ce16ef84c6da77e67d812bf8fa88e51cde", "engine_script_run_v5",
+                       "5ba773889d947e4fdab3995cc55f22f88ab037a86e0ad4016a126d297ce82eed")
         common = [args.compiler, "-std=c++17", "-O0", *args.extra_flag]
 
         def compile_object(name, source, include):
@@ -204,6 +208,13 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
         prior_priority = compile_object("basec45_pending_priority", priority_caller, prior_include)
         prior_priority_symbols = compile_object("basec45_pending_priority_symbols", priority_symbols, prior_include)
 
+        activation_native = compile_object("base149_native", caller("engine_script_run_v5"), activation_include)
+        activation_generated = compile_object("base149_generated", caller("engine_script_run_v5", True), activation_include)
+        activation_symbols = compile_object("base149_symbol_control",
+            BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v5"), activation_include)
+        activation_priority = compile_object("base149_pending_priority", priority_caller, activation_include)
+        activation_priority_symbols = compile_object("base149_pending_priority_symbols", priority_symbols, activation_include)
+
         def link(name, obj, runtime, missing_namespace=None):
             linked = subprocess.run(
                 [*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
@@ -253,10 +264,19 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
         link("current_generated_to_v4_symbol_control", current_generated, prior_symbols, CURRENT_NAMESPACE)
         link("current_pending_priority_to_current", current_priority, args.library)
         link("basec45_pending_priority_to_v4_symbols", prior_priority, prior_priority_symbols)
+        link("base149_native_to_v5_symbol_control", activation_native, activation_symbols)
+        link("base149_generated_to_v5_symbol_control", activation_generated, activation_symbols)
+        link("base149_native_to_current", activation_native, args.library, "engine_script_run_v5")
+        link("base149_generated_to_current", activation_generated, args.library, "engine_script_run_v5")
+        link("current_native_to_v5_symbol_control", current_native, activation_symbols, CURRENT_NAMESPACE)
+        link("current_generated_to_v5_symbol_control", current_generated, activation_symbols, CURRENT_NAMESPACE)
+        link("base149_pending_priority_to_v5_symbols", activation_priority, activation_priority_symbols)
         for name, obj, runtime, expected in [
+            ("base149_pending_priority_to_current", activation_priority, args.library, "pineforge::engine_script_run_v5::PendingOrder"),
+            ("current_pending_priority_to_v5_symbols", current_priority, activation_priority_symbols, "pineforge::engine_script_run_v6::PendingOrder"),
             ("basec45_pending_priority_to_current", prior_priority, args.library, "pineforge::PendingOrder"),
             ("current_pending_priority_to_v4_symbols", current_priority, prior_priority_symbols,
-             "pineforge::engine_script_run_v5::PendingOrder"),
+             "pineforge::engine_script_run_v6::PendingOrder"),
         ]:
             result = subprocess.run([*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
                                     capture_output=True, text=True, timeout=60)
@@ -264,7 +284,7 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
                     or "OrderPriority::select(" not in result.stderr or expected not in result.stderr):
                 raise RuntimeError(name + " did not reject the expected PendingOrder type: " + result.stderr)
             print(name + ": rejected stale standalone PendingOrder argument type (not executed)")
-    print("15 translation units compiled; 10 positive links; 15 rejected links; no executable run")
+    print("20 translation units compiled; 13 positive links; 21 rejected links; no executable run")
 
 
 if __name__ == "__main__":

@@ -683,11 +683,13 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                     const bool lower = raw == chart_bar->low && tick < raw;
                     const bool long_position = position_side_ == PositionSide::LONG;
                     const bool stop_touch = std::isfinite(order.stop_price)
+                        && order.leg_activation.stop_ready(position_cycle_seq_, bar_index_)
                         && ((!long_position && upper && raw < order.stop_price
                              && order.stop_price <= tick)
                             || (long_position && lower && tick <= order.stop_price
                                 && order.stop_price < raw));
                     const bool limit_touch = std::isfinite(order.limit_price)
+                        && order.leg_activation.limit_ready(position_cycle_seq_, bar_index_)
                         && ((long_position && upper && raw < order.limit_price
                              && order.limit_price <= tick)
                             || (!long_position && lower && tick <= order.limit_price
@@ -2298,7 +2300,9 @@ void BacktestEngine::revive_position_brackets_after_margin_call_partial(
             ? o.qty_percent >= 100.0 - internal::kFullPercentEps
             : (!o.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
                || o.qty >= position_qty_ - kQtyEpsilon);
+        // Revival restores the leg, but cannot advance its activation bound.
         if (!full_pct || std::isnan(revive_stop)
+            || !o.leg_activation.stop_ready(position_cycle_seq_, bar_index_)
             || !std::isfinite(mc_price)) continue;
         const bool mk = (position_side_ == PositionSide::SHORT)
             ? (revive_stop <= mc_price)
@@ -3072,10 +3076,10 @@ void BacktestEngine::sort_exit_siblings_by_path_fill(const Bar& bar) {
             bool is_ent_bar = (position_open_bar_ == bar_index_);
             double ma = exit_order_earliest_path_metric_no_trail(
                 trigger_bar, high_first, a, position_side_, is_ent_bar,
-                position_entry_price_);
+                position_entry_price_, position_cycle_seq_, bar_index_);
             double mb = exit_order_earliest_path_metric_no_trail(
                 trigger_bar, high_first, b, position_side_, is_ent_bar,
-                position_entry_price_);
+                position_entry_price_, position_cycle_seq_, bar_index_);
             const double inf = std::numeric_limits<double>::infinity();
             const double eps = kPathPosEps;
             if (ma < inf && mb < inf) {
@@ -4113,19 +4117,15 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 }
 
                 bool exit_style = order_is_exit_style(o, position_side_);
-                const bool suppress_entry_bar_leg =
-                    exit_style && position_open_bar_ == bar_index_;
                 // Round 9 family X: a dormant bracket's stop / limit legs
                 // are dead (finding-311 leg-scoped) — only its trail leg
                 // can still fill, on the path.
                 bool has_stop = !std::isnan(o.stop_price)
                     && !o.dormant_bracket
-                    && !(suppress_entry_bar_leg
-                         && o.coof_suppress_stop_on_entry_bar);
+                    && (!exit_style || o.leg_activation.stop_ready(position_cycle_seq_, bar_index_));
                 bool has_limit = !std::isnan(o.limit_price)
                     && !o.dormant_bracket
-                    && !(suppress_entry_bar_leg
-                         && o.coof_suppress_limit_on_entry_bar);
+                    && (!exit_style || o.leg_activation.limit_ready(position_cycle_seq_, bar_index_));
                 bool has_trail = !std::isnan(o.trail_points) || !std::isnan(o.trail_price);
 
                 if (o.type == OrderType::MARKET
@@ -4646,10 +4646,14 @@ bool BacktestEngine::prearmed_market_parent_bracket_gaps_at_open(
     // try_exit_open_gap_fill's resting-bracket precedence (trail, stop,
     // limit) for the same open-gap event on a later bar.
     const bool live_long = position_side_ == PositionSide::LONG;
+    // Apply readiness before precedence so a held stop cannot hide a ready
+    // limit or acquire a fill merely because an independent trail is present.
     const bool stop_gapped = std::isfinite(order.stop_price)
+        && order.leg_activation.stop_ready(position_cycle_seq_, bar_index_)
         && (live_long ? bar.open <= order.stop_price
                       : bar.open >= order.stop_price);
     const bool limit_marketable = std::isfinite(order.limit_price)
+        && order.leg_activation.limit_ready(position_cycle_seq_, bar_index_)
         && (live_long ? bar.open >= order.limit_price
                       : bar.open <= order.limit_price);
     if (!stop_gapped && !limit_marketable) return false;
@@ -7779,6 +7783,7 @@ void BacktestEngine::apply_raw_order_fill(PendingOrder& order, double fill_price
         if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
         id_unclosed_qty_[order.id] += qty;
         cycle_filled_entry_ids_.insert(order.id);
+        bind_retained_exit_activations();
         if (!std::isnan(order.stop_price) || !std::isnan(order.limit_price)) {
             set_entry_fill_excursion_masks(pyramid_entries_.back(), current_bar_, fill_price);
         }
@@ -8483,10 +8488,10 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
         std::unordered_set<std::string>& pass0_opposing_skip_ids) {
     bool exit_style = order_is_exit_style(order, position_side_);
     bool is_entry_bar = (exit_style && position_open_bar_ == bar_index_);
-    const bool suppress_stop =
-        is_entry_bar && order.coof_suppress_stop_on_entry_bar;
-    const bool suppress_limit =
-        is_entry_bar && order.coof_suppress_limit_on_entry_bar;
+    const bool suppress_stop = exit_style
+        && !order.leg_activation.stop_ready(position_cycle_seq_, bar_index_);
+    const bool suppress_limit = exit_style
+        && !order.leg_activation.limit_ready(position_cycle_seq_, bar_index_);
     // Round 9 family X (finding-311 is leg-scoped): a bracket killed by a
     // declined reversal reaches this kernel only for its live TRAIL leg;
     // its stop and limit legs stay dead until REVIVE-A/B.

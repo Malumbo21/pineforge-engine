@@ -1108,10 +1108,10 @@ double exit_order_earliest_path_metric_no_trail(
     const PendingOrder& order,
     PositionSide position_side,
     bool is_entry_bar,
-    double position_entry_price) {
+    double position_entry_price, int64_t position_cycle, int64_t bar_index) {
     return exit_order_earliest_path_metric_no_trail(
         bar, bar_path_uses_high_first(bar), order, position_side,
-        is_entry_bar, position_entry_price);
+        is_entry_bar, position_entry_price, position_cycle, bar_index);
 }
 
 double exit_order_earliest_path_metric_no_trail(
@@ -1120,7 +1120,7 @@ double exit_order_earliest_path_metric_no_trail(
     const PendingOrder& order,
     PositionSide position_side,
     bool is_entry_bar,
-    double position_entry_price) {
+    double position_entry_price, int64_t position_cycle, int64_t bar_index) {
     if (order.type != OrderType::EXIT) {
         return std::numeric_limits<double>::infinity();
     }
@@ -1129,15 +1129,14 @@ double exit_order_earliest_path_metric_no_trail(
     }
 
     const bool is_long = (position_side == PositionSide::LONG);
-    // COOF entry-bar suppression is leg-scoped. A wrong-side leg is dormant
-    // only for the creation/entry bar; a correctly-sided sibling must retain
-    // its real path coordinate so sibling ordering cannot hide its fill.
+    // The owner transition resolved each leg's lower-bound coordinate. An
+    // unavailable leg cannot hide its independently ready sibling's path.
     const double stop_price =
-        is_entry_bar && order.coof_suppress_stop_on_entry_bar
+        !order.leg_activation.stop_ready(position_cycle, bar_index)
             ? std::numeric_limits<double>::quiet_NaN()
             : order.stop_price;
     const double limit_price =
-        is_entry_bar && order.coof_suppress_limit_on_entry_bar
+        !order.leg_activation.limit_ready(position_cycle, bar_index)
             ? std::numeric_limits<double>::quiet_NaN()
             : order.limit_price;
     if (std::isnan(stop_price) && std::isnan(limit_price)) {

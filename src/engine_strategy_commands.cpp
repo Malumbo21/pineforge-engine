@@ -2171,75 +2171,27 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
         order.birth, has_trail_request);
     // Later-open trailing permission is derived by the Pine policy from the
     // immutable physical origin. It never rewrites that origin.
-    // A priced exit born after a later fill at the SAME O is already held by
-    // the KI-67 cascade gate for its in-flight leg 0. The pinned exception is
-    // LIMIT-only: a marketable limit may resume at W1. A marketable stop keeps
-    // the established whole-entry-bar suppression (including M1).
-    const bool later_same_open_priced_exit_on_entry_bar =
-        !bar_magnifier_enabled_ && compat::pine::historical_cascade_reach(order)
-        && coof_recalc_after_first_open_fill_
-        && coof_cascade_recalc_leg_ == 0
-        && position_open_bar_ == bar_index_
-        && (!std::isnan(stop_price) || !std::isnan(limit_price))
-        && std::isnan(trail_points) && std::isnan(trail_price);
-    bool stop_marketable_at_coof_cursor = false;
-    bool limit_marketable_at_coof_cursor = false;
-    bool later_same_open_marketable_limit = false;
-    if (coof_fill_recalc_active_ && coof_scheduler_active_
-        && std::isfinite(coof_cursor_price_)
-        && position_side_ != PositionSide::FLAT
-        && position_open_bar_ == bar_index_) {
-        const bool closing_long = position_side_ == PositionSide::LONG;
-        stop_marketable_at_coof_cursor = !std::isnan(stop_price)
-            && (closing_long ? coof_cursor_price_ <= stop_price
-                             : coof_cursor_price_ >= stop_price);
-        limit_marketable_at_coof_cursor = !std::isnan(limit_price)
-            && (closing_long ? coof_cursor_price_ >= limit_price
-                             : coof_cursor_price_ <= limit_price);
-        later_same_open_marketable_limit =
-            later_same_open_priced_exit_on_entry_bar
-            && limit_marketable_at_coof_cursor;
-        // Round15 F/EUR JOAT pins: a fresh MARKET long at W1=H arms a
-        // marketable full limit, waits through H->L, and takes its later L->C
-        // recross at the exact level. It neither fills at placement nor gets
-        // a new waypoint-gap permission. Keep KI-67's existing leg gate.
-        // This first patch covers only a limit strictly inside H/L with no
-        // reachable stop competitor and the actual opening's first callback.
-        const bool first_high_market_limit_recross =
-            !bar_magnifier_enabled_ && !process_orders_on_close_
-            && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
-            && compat::pine::historical_cascade_reach(order) && !coof_hist_is_segment_
-            && coof_at_extreme_waypoint_ && coof_hist_path_index_ == 1
-            && coof_cascade_recalc_leg_ == 1
-            && coof_market_entry_recalc_incarnation_ != 0
-            && coof_market_entry_recalc_fill_seq_ == broker_fill_event_seq_
-            && position_side_ == PositionSide::LONG
-            && position_entry_count_ == 1 && pyramiding_ == 0
-            && pyramid_entries_.size() == 1
-            && pyramid_entries_.front().entry_incarnation
-                == coof_market_entry_recalc_incarnation_
-            && !from_entry.empty()
-            && from_entry == pyramid_entries_.front().entry_id
-            && !is_partial && std::isfinite(reserved_qty)
-            && std::abs(reserved_qty - position_qty_) <= kQtyEpsilon
-            && pending_orders_.empty() && oca_name.empty()
-            && !has_trail_request && slippage_ == 0
-            && syminfo_.pointvalue == 1 && account_currency_fx_ == 1
-            && account_currency_fx_timestamps_.empty()
-            && limit_marketable_at_coof_cursor
-            && internal::bar_path_uses_high_first(current_bar_)
-            && coof_cursor_price_ == bar_fill_price(current_bar_.high)
-            && current_bar_.low < order.limit_price
-            && order.limit_price < current_bar_.high
-            && (std::isnan(order.stop_price)
-                || order.stop_price < current_bar_.low);
-        order.coof_suppress_stop_on_entry_bar =
-            stop_marketable_at_coof_cursor;
-        order.coof_suppress_limit_on_entry_bar =
-            limit_marketable_at_coof_cursor
-            && !later_same_open_marketable_limit
-            && !first_high_market_limit_recross;
-    }
+    const std::string no_entry_id;
+    const auto& first_entry_id = pyramid_entries_.empty()
+        ? no_entry_id : pyramid_entries_.front().entry_id;
+    const uint64_t first_entry_incarnation = pyramid_entries_.empty()
+        ? 0 : pyramid_entries_.front().entry_incarnation;
+    order.pine_exit_activation = compat::pine::select_exit_activation(
+        order, stop_price, limit_price,
+        {current_bar_, position_side_, position_cycle_seq_, bar_index_,
+         position_open_bar_, position_entry_count_, position_qty_, pyramiding_,
+         pyramid_entries_.size(), first_entry_id, first_entry_incarnation,
+         coof_fill_recalc_active_, coof_scheduler_active_, coof_cursor_price_,
+         coof_recalc_after_first_open_fill_, coof_cascade_recalc_leg_,
+         coof_hist_is_segment_, coof_at_extreme_waypoint_, coof_hist_path_index_,
+         coof_market_entry_recalc_incarnation_, coof_market_entry_recalc_fill_seq_,
+         broker_fill_event_seq_, bar_magnifier_enabled_, process_orders_on_close_,
+         stream_warmup_mode_, stream_phase_ == StreamPhase::IDLE,
+         pending_orders_.empty(), slippage_, syminfo_.pointvalue, account_currency_fx_,
+         account_currency_fx_timestamps_.empty(), bar_fill_price(current_bar_.high)});
+    const bool later_same_open_marketable_limit =
+        order.pine_exit_activation.continues_at_later_open();
+    bind_exit_activation(order);
     // KI-67 exit cascade (Model S). Record this mid-bar cascade exit's in-flight
     // leg so the historical dispatch gate can hold it on that leg's remainder,
     // exact-fill it on subsequent legs, and gap-fill it at the in-flight leg-end
@@ -2890,6 +2842,7 @@ uint64_t BacktestEngine::queue_deferred_close_order(
     // against E2 can reserve 2 against new E4). Do not fabricate an original
     // Pine percentage, or an exposure-coverage receipt before that binding.
     order.quantity_request.request(QuantityIntent::units(qty_to_close));
+    bind_exit_activation(order);
     order.oca_name = "";
     order.oca_type = 0;
     order.created_bar = bar_index_;

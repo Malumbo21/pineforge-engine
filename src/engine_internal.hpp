@@ -376,14 +376,14 @@ double exit_order_earliest_path_metric_no_trail(
     const PendingOrder& order,
     PositionSide position_side,
     bool is_entry_bar,
-    double position_entry_price);
+    double position_entry_price, int64_t position_cycle = 0, int64_t bar_index = 0);
 double exit_order_earliest_path_metric_no_trail(
     const Bar& bar,
     bool high_first,
     const PendingOrder& order,
     PositionSide position_side,
     bool is_entry_bar,
-    double position_entry_price);
+    double position_entry_price, int64_t position_cycle = 0, int64_t bar_index = 0);
 
 
 // design-stop-tick-rounding: `tick_bar` is the bar the STOP / LIMIT legs are

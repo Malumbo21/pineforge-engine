@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "include/pineforge/engine.hpp").read_text()
 QUANTITY = (ROOT / "include/pineforge/quantity_intent.hpp").read_text()
 EVENTS = (ROOT / "include/pineforge/broker_events.hpp").read_text()
+ACTIVATION = (ROOT / "include/pineforge/leg_activation.hpp").read_text()
+EXIT_POLICY = (ROOT / "include/pineforge/compat/pine/exit_activation.hpp").read_text()
 BIRTH = (ROOT / "include/pineforge/order_birth.hpp").read_text()
 INTRADAY = (ROOT / "include/pineforge/compat/pine/intraday_order_budget.hpp").read_text()
 POLICY = (ROOT / "include/pineforge/compat/pine/intraday_cap.hpp").read_text()
@@ -28,7 +30,7 @@ WAIVERS = (ROOT / "scripts/broker_state_hash_waivers.txt").read_text()
 
 class PhysicalLotCoverage(unittest.TestCase):
     def check(self, header=HEADER, source=SOURCE, waivers=WAIVERS, events=EVENTS,
-              intraday=INTRADAY, policy=POLICY, obligation=OBLIGATION, stream=STREAM, quantity=QUANTITY, birth=BIRTH):
+              intraday=INTRADAY, policy=POLICY, obligation=OBLIGATION, stream=STREAM, quantity=QUANTITY, birth=BIRTH, activation=ACTIVATION, exit_policy=EXIT_POLICY):
         with tempfile.TemporaryDirectory(prefix="pf-lot-hash-check-") as temp:
             root = Path(temp)
             for name, content in [
@@ -36,6 +38,8 @@ class PhysicalLotCoverage(unittest.TestCase):
                 ("include/pineforge/broker_events.hpp", events),
                 ("include/pineforge/quantity_intent.hpp", quantity),
                 ("include/pineforge/order_birth.hpp", birth),
+                ("include/pineforge/leg_activation.hpp", activation),
+                ("include/pineforge/compat/pine/exit_activation.hpp", exit_policy),
                 ("include/pineforge/compat/pine/intraday_order_budget.hpp", intraday),
                 ("include/pineforge/compat/pine/intraday_cap.hpp", policy),
                 ("include/pineforge/position_close_obligation.hpp", obligation),
@@ -54,6 +58,16 @@ class PhysicalLotCoverage(unittest.TestCase):
                     code = exc.code if isinstance(exc.code, int) else 2
                     output.write(str(exc.code))
             return code, output.getvalue()
+
+    def test_exit_activation_has_complete_unconditional_coverage(self):
+        for fold in ["f.b(o.leg_activation.bounds().has_value());", "f.i(bounds->position_cycle);",
+                     "f.i(bounds->stop_first_bar);", "f.i(bounds->limit_first_bar);",
+                     "f.b(o.pine_exit_activation.evidence().has_value());", "f.d(evidence->stop_level);",
+                     "f.d(evidence->limit_level);", "f.i(evidence->direction);",
+                     "f.u(continuation->observed_fill_sequence);", "f.b(evidence->limit_continuation.has_value());"]:
+            with self.subTest(fold=fold): self.assertEqual(self.check(source=SOURCE.replace(fold,""))[0],1)
+        self.assertEqual(self.check(activation=ACTIVATION.replace("int64_t limit_first_bar;", "int64_t limit_first_bar; int64_t hidden;"))[0],1)
+        self.assertEqual(self.check(exit_policy=EXIT_POLICY.replace("double cursor_price;", "double cursor_price; double hidden;"))[0],1)
 
     def test_actual_source_and_named_parser(self):
         self.assertEqual(self.check()[0], 0)
@@ -85,26 +99,26 @@ class PhysicalLotCoverage(unittest.TestCase):
                 self.assertIn(old, QUANTITY)
                 self.assertEqual(self.check(quantity=QUANTITY.replace(old, new))[0], 1)
 
-    def test_layout_and_hash_versions_must_match_v5_contract(self):
-        self.assertIn("engine_script_run_v5", HEADER)
-        self.assertIn('f.s("pineforge-broker-state/v5");', SOURCE)
-        self.assertIn("integer(5); integer(broker_state_hash());", STREAM)
-        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v5", "engine_script_run_v2"))[0], 1)
+    def test_layout_and_hash_versions_must_match_v6_contract(self):
+        self.assertIn("engine_script_run_v6", HEADER)
+        self.assertIn('f.s("pineforge-broker-state/v6");', SOURCE)
+        self.assertIn("integer(6); integer(broker_state_hash());", STREAM)
+        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v6", "engine_script_run_v2"))[0], 1)
         for replacement in ['f.s("pineforge-broker-state/v2");', '',
-                            '// f.s("pineforge-broker-state/v5");']:
+                            '// f.s("pineforge-broker-state/v6");']:
             self.assertEqual(self.check(source=SOURCE.replace(
-                'f.s("pineforge-broker-state/v5");', replacement))[0], 1)
+                'f.s("pineforge-broker-state/v6");', replacement))[0], 1)
         for replacement in ["integer(2); integer(broker_state_hash());",
                             "integer(broker_state_hash());",
-                            "if (false) { integer(5); integer(broker_state_hash()); }"]:
+                            "if (false) { integer(6); integer(broker_state_hash()); }"]:
             self.assertEqual(self.check(stream=STREAM.replace(
-                "integer(5); integer(broker_state_hash());", replacement))[0], 1)
+                "integer(6); integer(broker_state_hash());", replacement))[0], 1)
 
     def test_version_folds_in_unrelated_helpers_do_not_cover_entry_points(self):
-        broker_fold = 'f.s("pineforge-broker-state/v5");'
+        broker_fold = 'f.s("pineforge-broker-state/v6");'
         altered = SOURCE.replace(broker_fold, '') + '\nvoid other() { ' + broker_fold + ' }\n'
         self.assertEqual(self.check(source=altered)[0], 1)
-        stream_fold = "integer(5); integer(broker_state_hash());"
+        stream_fold = "integer(6); integer(broker_state_hash());"
         altered = STREAM.replace(stream_fold, '') + '\nvoid other() { ' + stream_fold + ' }\n'
         self.assertEqual(self.check(stream=altered)[0], 1)
 

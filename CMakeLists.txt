@@ -79,6 +79,7 @@ endif()
 add_library(pineforge STATIC
     src/c_abi.cpp
     src/compat/pine/order_birth.cpp
+    src/compat/pine/exit_activation.cpp
     src/compat/pine/order_priority.cpp
     src/engine_aux_security.cpp
     src/engine_fills.cpp

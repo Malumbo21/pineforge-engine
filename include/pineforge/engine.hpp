@@ -14,6 +14,8 @@
 #include "bar.hpp"
 #include "broker_events.hpp"
 #include "quantity_intent.hpp"
+#include "leg_activation.hpp"
+#include "compat/pine/exit_activation.hpp"
 #include "order_birth.hpp"
 #include "compat/pine/order_birth.hpp"
 #include "compat/pine/intraday_cap.hpp"
@@ -404,7 +406,7 @@ enum class ShortSeedCollisionRole : uint8_t {
 
 // PendingOrder crosses out-of-line helper boundaries independently of the
 // engine class, so its changed layout must carry the same internal epoch.
-inline namespace engine_script_run_v5 {
+inline namespace engine_script_run_v6 {
 struct PendingOrder {
     std::string id;
     std::string from_entry;    // for exit orders
@@ -459,14 +461,10 @@ struct PendingOrder {
     // fires, later bars—and later COOF scheduler segments on the same bar—
     // evaluate only the live limit leg until the order fills or is replaced.
     bool stop_limit_activated = false;
-    // A stop/limit leg emitted by a COOF recalc on the position's entry bar
-    // cannot consume the fill cursor that caused that recalc when the leg is
-    // already marketable there. Suppression is deliberately per-leg: the
-    // other, correctly-sided bracket leg remains live on the remaining path.
-    // Both bits expire automatically once bar_index_ advances, so an unfilled
-    // suppressed leg carries into the next bar as an ordinary order.
-    bool coof_suppress_stop_on_entry_bar = false;
-    bool coof_suppress_limit_on_entry_bar = false;
+    // Concrete activation bounds belong to the currently bound exposure cycle.
+    // Pine placement evidence is retained separately for explicit rebinding.
+    ExitLegActivation leg_activation;
+    PineExitActivationPolicy pine_exit_activation;
     // Immutable evaluation/fill origin, captured once for this incarnation.
     // Historical extreme-only/trailing permissions live in compat::pine.
     OrderBirth birth;
@@ -1035,7 +1033,7 @@ struct PendingOrder {
         ShortSeedCollisionRole::NONE;
 };
 
- } // inline namespace engine_script_run_v5 (PendingOrder)
+ } // inline namespace engine_script_run_v6 (PendingOrder)
 
 // default_qty_type constants (matches TradingView)
 enum class QtyType { FIXED = 0, PERCENT_OF_EQUITY = 1, CASH = 2 };
@@ -1090,10 +1088,10 @@ struct StrategyOverrides {
 
 // The C++ subclass contract is internal, unlike pineforge.h's stable C ABI.
 // Changing its layout or vtable requires all generated/native C++ objects to be rebuilt.
-// v5 integrates typed quantity, replacement identity and causal order birth.
+// v6 adds explicit owner-bound exit-leg activation and Pine placement evidence.
 // Version the mangled class name so older headers' member offsets/vtable cannot
 // silently bind out-of-line members of this different object layout.
-inline namespace engine_script_run_v5 {
+inline namespace engine_script_run_v6 {
 class BacktestEngine {
 protected:
     // --- Position state ---
@@ -4321,6 +4319,9 @@ private:
                                             double fill_price, double explicit_qty,
                                             int explicit_qty_type,
                                             uint64_t entry_incarnation);
+    void bind_exit_activation(PendingOrder& order);
+    void bind_retained_exit_activations();
+    void unbind_exit_activations();
     void open_fresh_position(PositionSide requested, double fill_price,
                              double qty, const std::string& id,
                              uint64_t entry_incarnation);
@@ -5128,5 +5129,5 @@ public:
     void trace(const std::string& name, int value)   { trace(name, static_cast<double>(value)); }
 };
 
-} // inline namespace engine_script_run_v5
+} // inline namespace engine_script_run_v6
 } // namespace pineforge

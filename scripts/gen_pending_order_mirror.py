@@ -61,6 +61,8 @@ TYPE_MAP: dict[str, tuple[str, str]] = {
 # Public v1 is append-only. Removed native fields survive only as one-way
 # deprecated output projections at their original offsets.
 LEGACY_OUTPUTS = {
+    "coof_suppress_stop_on_entry_bar": "src.pine_exit_activation.holds_stop() ? 1 : 0",
+    "coof_suppress_limit_on_entry_bar": "src.pine_exit_activation.holds_limit() ? 1 : 0",
     "created_during_coof_recalc": "src.birth.from_fill() ? 1 : 0",
     "coof_born_at_close_recalc": "src.birth.at_terminal_fill() ? 1 : 0",
     "coof_born_mid_bar": "compat::pine::historical_cascade_reach(src) ? 1 : 0",
@@ -71,6 +73,24 @@ LEGACY_OUTPUTS = {
     "full_percent_exit_request": "src.quantity_request.requests_all() ? 1 : 0",
 }
 COMPOSITE_MAP = {
+    "ExitLegActivation": [
+        ("owner_cycle", "int64_t", "src.{m}.bounds() ? src.{m}.bounds()->position_cycle : 0"),
+        ("present", "uint8_t", "src.{m}.bounds().has_value() ? 1 : 0"),
+        ("stop_first_bar", "int64_t", "src.{m}.bounds() ? src.{m}.bounds()->stop_first_bar : 0"),
+        ("limit_first_bar", "int64_t", "src.{m}.bounds() ? src.{m}.bounds()->limit_first_bar : 0"),
+    ],
+    "PineExitActivationPolicy": [
+        ("owner_cycle_at_birth", "int64_t", "src.{m}.evidence() ? src.{m}.evidence()->position_cycle : 0"),
+        ("present", "uint8_t", "src.{m}.evidence().has_value() ? 1 : 0"),
+        ("entry_bar_at_birth", "int32_t", "src.{m}.evidence() ? src.{m}.evidence()->entry_bar : 0"),
+        ("direction_at_birth", "int32_t", "src.{m}.evidence() ? src.{m}.evidence()->direction : 0"),
+        ("cursor_price_at_birth", "double", "src.{m}.evidence() ? src.{m}.evidence()->cursor_price : 0.0"),
+        ("stop_level_at_birth", "double", "src.{m}.evidence() ? src.{m}.evidence()->stop_level : 0.0"),
+        ("limit_level_at_birth", "double", "src.{m}.evidence() ? src.{m}.evidence()->limit_level : 0.0"),
+        ("limit_continuation_present", "uint8_t", "src.{m}.evidence() && src.{m}.evidence()->limit_continuation ? 1 : 0"),
+        ("limit_continuation_cause", "int32_t", "src.{m}.evidence() && src.{m}.evidence()->limit_continuation ? static_cast<int32_t>(src.{m}.evidence()->limit_continuation->cause) : 0"),
+        ("limit_continuation_fill", "uint64_t", "src.{m}.evidence() && src.{m}.evidence()->limit_continuation ? src.{m}.evidence()->limit_continuation->observed_fill_sequence : 0"),
+    ],
     "QuantityRequest": [
         ("intent_kind", "uint64_t", "src.{m}.intent() ? static_cast<uint64_t>(src.{m}.intent()->kind()) + 1 : 0"),
         ("intent_units", "double", "src.{m}.intent() && src.{m}.intent()->kind() == QuantityIntent::Kind::Units ? src.{m}.intent()->units() : 0.0"),
@@ -218,7 +238,12 @@ def generate() -> tuple[str, str]:
         if name not in LEGACY_OUTPUTS and native.get(name) != kind:
             _fail(f"public v1 prefix member {name} needs an explicit derived projection")
     prefix_names = {name for _, name in prefix}
-    ordered = prefix + [(kind, name) for kind, name in mirrored if name not in prefix_names]
+    # Preserve the full 149f77c extension as well as the original c45 prefix.
+    existing_extension = ["replaced_order_incarnation", "birth", "pine_birth_reach", "quantity_request"]
+    tail = [(native[name], name) for name in existing_extension]
+    tail += [(kind, name) for kind, name in mirrored
+             if name not in prefix_names and name not in existing_extension]
+    ordered = prefix + tail
     for t, m in ordered:
         if m in LEGACY_OUTPUTS:
             ct = TYPE_MAP[t][0]

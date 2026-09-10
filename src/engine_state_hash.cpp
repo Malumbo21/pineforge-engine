@@ -86,9 +86,9 @@ void hash_str_set(Fnv& f, const std::unordered_set<std::string>& s) {
 
 uint64_t BacktestEngine::broker_state_hash() const {
     Fnv f;
-    // v5 hashes typed request/reservation, generic predecessor and immutable birth.
+    // v6 includes resolved exit-leg owner/coordinates and immutable Pine placement evidence.
     // It is a serialization boundary, independent of the public C ABI version.
-    f.s("pineforge-broker-state/v5");
+    f.s("pineforge-broker-state/v6");
 
     // --- Position core ---
     f.i(static_cast<int64_t>(position_side_));
@@ -246,8 +246,19 @@ uint64_t BacktestEngine::broker_state_hash() const {
         f.u(o.named_cancel_surviving_exit_incarnation);
         // calc_on_order_fills birth provenance and per-leg suppression
         // (decide which waypoints / legs the order may fill at).
-        f.b(o.coof_suppress_stop_on_entry_bar);
-        f.b(o.coof_suppress_limit_on_entry_bar);
+        f.b(o.leg_activation.bounds().has_value());
+        if (const auto& bounds = o.leg_activation.bounds()) {
+            f.i(bounds->position_cycle); f.i(bounds->stop_first_bar); f.i(bounds->limit_first_bar);
+        }
+        f.b(o.pine_exit_activation.evidence().has_value());
+        if (const auto& evidence = o.pine_exit_activation.evidence()) {
+            f.i(evidence->position_cycle); f.i(evidence->entry_bar); f.i(evidence->direction);
+            f.d(evidence->cursor_price); f.d(evidence->stop_level); f.d(evidence->limit_level);
+            f.b(evidence->limit_continuation.has_value());
+            if (const auto& continuation = evidence->limit_continuation) {
+                f.i(static_cast<int64_t>(continuation->cause)); f.u(continuation->observed_fill_sequence);
+            }
+        }
         f.i(static_cast<int64_t>(o.birth.cause()));
         f.i(o.birth.bar());
         f.i(o.birth.timestamp());

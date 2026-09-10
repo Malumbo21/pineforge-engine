@@ -58,8 +58,8 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->recreated_after_named_cancelled_entry_incarnation = src.recreated_after_named_cancelled_entry_incarnation;
     out->named_cancel_surviving_exit_incarnation = src.named_cancel_surviving_exit_incarnation;
     out->stop_limit_activated = src.stop_limit_activated ? 1 : 0;
-    out->coof_suppress_stop_on_entry_bar = src.coof_suppress_stop_on_entry_bar ? 1 : 0;
-    out->coof_suppress_limit_on_entry_bar = src.coof_suppress_limit_on_entry_bar ? 1 : 0;
+    out->coof_suppress_stop_on_entry_bar = src.pine_exit_activation.holds_stop() ? 1 : 0;
+    out->coof_suppress_limit_on_entry_bar = src.pine_exit_activation.holds_limit() ? 1 : 0;
     out->created_during_coof_recalc = src.birth.from_fill() ? 1 : 0;
     out->coof_born_at_close_recalc = src.birth.at_terminal_fill() ? 1 : 0;
     out->coof_born_mid_bar = compat::pine::historical_cascade_reach(src) ? 1 : 0;
@@ -150,6 +150,20 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->quantity_reservation_present = src.quantity_request.reservation().has_value() ? 1 : 0;
     out->quantity_reservation_units = src.quantity_request.reservation() ? src.quantity_request.reservation()->units : 0.0;
     out->quantity_reservation_basis_units = src.quantity_request.reservation() ? src.quantity_request.reservation()->basis_units : 0.0;
+    out->leg_activation_owner_cycle = src.leg_activation.bounds() ? src.leg_activation.bounds()->position_cycle : 0;
+    out->leg_activation_present = src.leg_activation.bounds().has_value() ? 1 : 0;
+    out->leg_activation_stop_first_bar = src.leg_activation.bounds() ? src.leg_activation.bounds()->stop_first_bar : 0;
+    out->leg_activation_limit_first_bar = src.leg_activation.bounds() ? src.leg_activation.bounds()->limit_first_bar : 0;
+    out->pine_exit_activation_owner_cycle_at_birth = src.pine_exit_activation.evidence() ? src.pine_exit_activation.evidence()->position_cycle : 0;
+    out->pine_exit_activation_present = src.pine_exit_activation.evidence().has_value() ? 1 : 0;
+    out->pine_exit_activation_entry_bar_at_birth = src.pine_exit_activation.evidence() ? src.pine_exit_activation.evidence()->entry_bar : 0;
+    out->pine_exit_activation_direction_at_birth = src.pine_exit_activation.evidence() ? src.pine_exit_activation.evidence()->direction : 0;
+    out->pine_exit_activation_cursor_price_at_birth = src.pine_exit_activation.evidence() ? src.pine_exit_activation.evidence()->cursor_price : 0.0;
+    out->pine_exit_activation_stop_level_at_birth = src.pine_exit_activation.evidence() ? src.pine_exit_activation.evidence()->stop_level : 0.0;
+    out->pine_exit_activation_limit_level_at_birth = src.pine_exit_activation.evidence() ? src.pine_exit_activation.evidence()->limit_level : 0.0;
+    out->pine_exit_activation_limit_continuation_present = src.pine_exit_activation.evidence() && src.pine_exit_activation.evidence()->limit_continuation ? 1 : 0;
+    out->pine_exit_activation_limit_continuation_cause = src.pine_exit_activation.evidence() && src.pine_exit_activation.evidence()->limit_continuation ? static_cast<int32_t>(src.pine_exit_activation.evidence()->limit_continuation->cause) : 0;
+    out->pine_exit_activation_limit_continuation_fill = src.pine_exit_activation.evidence() && src.pine_exit_activation.evidence()->limit_continuation ? src.pine_exit_activation.evidence()->limit_continuation->observed_fill_sequence : 0;
 }
 
 namespace {
@@ -287,6 +301,20 @@ const pf_field_desc_t kLayout[] = {
     PF_PO_FIELD(quantity_reservation_present, "uint8_t"),
     PF_PO_FIELD(quantity_reservation_units, "double"),
     PF_PO_FIELD(quantity_reservation_basis_units, "double"),
+    PF_PO_FIELD(leg_activation_owner_cycle, "int64_t"),
+    PF_PO_FIELD(leg_activation_present, "uint8_t"),
+    PF_PO_FIELD(leg_activation_stop_first_bar, "int64_t"),
+    PF_PO_FIELD(leg_activation_limit_first_bar, "int64_t"),
+    PF_PO_FIELD(pine_exit_activation_owner_cycle_at_birth, "int64_t"),
+    PF_PO_FIELD(pine_exit_activation_present, "uint8_t"),
+    PF_PO_FIELD(pine_exit_activation_entry_bar_at_birth, "int32_t"),
+    PF_PO_FIELD(pine_exit_activation_direction_at_birth, "int32_t"),
+    PF_PO_FIELD(pine_exit_activation_cursor_price_at_birth, "double"),
+    PF_PO_FIELD(pine_exit_activation_stop_level_at_birth, "double"),
+    PF_PO_FIELD(pine_exit_activation_limit_level_at_birth, "double"),
+    PF_PO_FIELD(pine_exit_activation_limit_continuation_present, "uint8_t"),
+    PF_PO_FIELD(pine_exit_activation_limit_continuation_cause, "int32_t"),
+    PF_PO_FIELD(pine_exit_activation_limit_continuation_fill, "uint64_t"),
 };
 
 #undef PF_PO_FIELD

@@ -166,7 +166,7 @@ def _class_fields(src: str, name: str) -> dict[str, str]:
     remaining data declaration must be one TYPE NAME; adding a new field is
     visible even when its name has no trailing underscore.
     """
-    body = _one_braced_body(src, rf"\bclass\s+{name}\s*\{{", name)
+    body = _one_braced_body(src, rf"\b(?:class|struct)\s+{name}\s*\{{", name)
     fields = {}
     statement = ""
     i = 0
@@ -193,6 +193,8 @@ def _class_fields(src: str, name: str) -> dict[str, str]:
             statement = ""
             if re.fullmatch(re.escape(name) + r"\(\)\s*=\s*default", decl):
                 continue
+            if re.fullmatch(r"(?:bool|ExitLegActivationBounds)\s+\w+\([^;{}]*\)\s+const", decl):
+                continue  # declared read-only value query, never a stored field
             if decl and not decl.startswith("using "):
                 match = re.fullmatch(r"((?:(?:static|constexpr|const)\s+)*[\w:<>]+)\s+(\w+)(?:\s*=\s*[^,]+)?", decl)
                 if not match or match[2] in fields:
@@ -411,8 +413,44 @@ def _birth_coverage(header: str, source: str) -> None:
         raise ValueError("birth facts must be unconditionally hashed at order-loop scope")
 
 
+def _exit_activation_coverage(activation: str, policy: str, source: str) -> None:
+    activation = _strip_cpp_comments(activation)
+    policy = _strip_cpp_comments(policy)
+    expected = [
+        (activation, "ExitLegActivation", {"bounds_": "std::optional<ExitLegActivationBounds>"}),
+        (activation, "ExitLegActivationBounds", {"position_cycle": "int64_t", "stop_first_bar": "int64_t", "limit_first_bar": "int64_t"}),
+        (policy, "ExitActivationPolicy", {"evidence_": "std::optional<ExitPlacementEvidence>"}),
+        (policy, "ExitPlacementEvidence", {"position_cycle": "int64_t", "entry_bar": "int", "direction": "int", "cursor_price": "double", "stop_level": "double", "limit_level": "double", "limit_continuation": "std::optional<LimitContinuation>"}),
+        (policy, "LimitContinuation", {"cause": "LimitContinuationCause", "observed_fill_sequence": "uint64_t"}),
+    ]
+    for text, name, fields in expected:
+        if _class_fields(text, name) != fields:
+            raise ValueError(name + " activation fields changed; every value must be hashed")
+    loop = _collection_loop_body(source, "pending_orders_", "o")
+    expected = """f.b(o.leg_activation.bounds().has_value());
+        if (const auto& bounds = o.leg_activation.bounds()) {
+            f.i(bounds->position_cycle); f.i(bounds->stop_first_bar); f.i(bounds->limit_first_bar);
+        }
+        f.b(o.pine_exit_activation.evidence().has_value());
+        if (const auto& evidence = o.pine_exit_activation.evidence()) {
+            f.i(evidence->position_cycle); f.i(evidence->entry_bar); f.i(evidence->direction);
+            f.d(evidence->cursor_price); f.d(evidence->stop_level); f.d(evidence->limit_level);
+            f.b(evidence->limit_continuation.has_value());
+            if (const auto& continuation = evidence->limit_continuation) {
+                f.i(static_cast<int64_t>(continuation->cause)); f.u(continuation->observed_fill_sequence);
+            }
+        }"""
+    compact = re.sub(r"\s+", "", loop)
+    folded = re.sub(r"\s+", "", expected)
+    if compact.count(folded) != 1:
+        raise ValueError("exit activation needs every nested fact and optional discriminator")
+    prefix = compact[:compact.index(folded)]
+    if prefix.count("{") != prefix.count("}"):
+        raise ValueError("exit activation hash block must be unconditional")
+
+
 def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
-    """The v5 layout and serialized-state contracts must advance together.
+    """The v6 layout and serialized-state contracts must advance together.
 
     Pin the actual hash entry points, rather than accepting a version string
     mentioned in a comment or an unrelated helper. Public C ABI versions have
@@ -420,18 +458,18 @@ def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
     """
     header = _strip_cpp_comments(header)
     namespaces = re.findall(r"inline\s+namespace\s+(engine_script_run_v\d+)\s*\{", header)
-    if namespaces != ["engine_script_run_v5", "engine_script_run_v5"]:
-        raise ValueError("PendingOrder and BacktestEngine layouts require internal namespace engine_script_run_v5")
+    if namespaces != ["engine_script_run_v6", "engine_script_run_v6"]:
+        raise ValueError("PendingOrder and BacktestEngine layouts require internal namespace engine_script_run_v6")
     broker = _one_braced_body(source,
         r"uint64_t\s+BacktestEngine::broker_state_hash\(\)\s+const\s*\{", "broker hash")
-    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v5"\);', broker):
-        raise ValueError("broker hash must start with pineforge-broker-state/v5")
+    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v6"\);', broker):
+        raise ValueError("broker hash must start with pineforge-broker-state/v6")
     stream_body = _one_braced_body(_strip_cpp_comments(stream),
         r"uint64_t\s+BacktestEngine::stream_state_hash\(\)\s+const\s*\{", "stream hash")
     compact = re.sub(r"\s+", "", stream_body)
-    fold = "integer(5);integer(broker_state_hash());"
+    fold = "integer(6);integer(broker_state_hash());"
     if compact.count(fold) != 1:
-        raise ValueError("stream hash requires version 5 followed by the broker hash")
+        raise ValueError("stream hash requires version 6 followed by the broker hash")
     prefix = compact[:compact.index(fold)]
     if prefix.count("{") != prefix.count("}") or (prefix and prefix[-1] not in ";}"):
         raise ValueError("stream version fold must be unconditional at function scope")
@@ -447,6 +485,8 @@ def main(root: Path = ROOT) -> int:
     try:
         _runtime_version_coverage(hpp, src, (root / "src/engine_stream.cpp").read_text())
         _birth_coverage((root / "include/pineforge/order_birth.hpp").read_text(), src)
+        _exit_activation_coverage((root / "include/pineforge/leg_activation.hpp").read_text(),
+            (root / "include/pineforge/compat/pine/exit_activation.hpp").read_text(), src)
         _opening_coverage((root / "include/pineforge/broker_events.hpp").read_text(), src)
         _quantity_request_coverage((root / "include/pineforge/quantity_intent.hpp").read_text(), src)
         _intraday_coverage(

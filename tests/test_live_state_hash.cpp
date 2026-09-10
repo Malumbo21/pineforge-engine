@@ -402,13 +402,12 @@ public:
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].declined_by_replaced_short_market = !s.pending_orders_[0].declined_by_replaced_short_market;
             }},
-            {"pending_orders_[].coof_suppress_stop_on_entry_bar", [](Probe& s) {
-                if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].coof_suppress_stop_on_entry_bar = !s.pending_orders_[0].coof_suppress_stop_on_entry_bar;
+            {"pending_orders_[].leg_activation", [](Probe& s) {
+                if (!s.pending_orders_.empty()) s.pending_orders_[0].leg_activation.bind({1,2,3});
             }},
-            {"pending_orders_[].coof_suppress_limit_on_entry_bar", [](Probe& s) {
-                if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].coof_suppress_limit_on_entry_bar = !s.pending_orders_[0].coof_suppress_limit_on_entry_bar;
+            {"pending_orders_[].pine_exit_activation", [](Probe& s) {
+                if (!s.pending_orders_.empty()) s.pending_orders_[0].pine_exit_activation =
+                    PineExitActivationPolicy({1,0,1,100,110,90,std::nullopt});
             }},
             {"pending_orders_[].birth.fill_origin", [](Probe& s) {
                 if (!s.pending_orders_.empty())

@@ -1,4 +1,6 @@
 set(TEST_SOURCES
+    test_exit_leg_activation
+    test_exit_activation_routes
     test_pending_order_core
     test_pending_quantity_intent
     test_bulk_preflight
