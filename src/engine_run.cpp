@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <deque>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -17,6 +18,23 @@ namespace pineforge {
 using namespace internal;
 
 namespace {
+// A callback owns its origin, not an engine clone. Nesting and exceptions restore
+// the previous owner; copying an engine cannot inherit a live callback token.
+thread_local const BacktestEngine* birth_context_owner = nullptr;
+thread_local std::optional<OrderBirth> birth_context;
+class ScopedBirthContext {
+public:
+    ScopedBirthContext(const BacktestEngine* owner, const OrderBirth& birth)
+        : previous_owner_(birth_context_owner), previous_(birth_context) {
+        birth_context_owner = owner; birth_context = birth;
+    }
+    ~ScopedBirthContext() {
+        birth_context_owner = previous_owner_; birth_context = previous_;
+    }
+private:
+    const BacktestEngine* previous_owner_;
+    std::optional<OrderBirth> previous_;
+};
 [[noreturn]] void reject_chart_bar(int index, const char* rule) {
     throw std::invalid_argument("chart bar[" + std::to_string(index) + "]." + rule);
 }
@@ -134,7 +152,15 @@ double BacktestEngine::active_account_currency_fx() const {
 // cross-engine contamination and leakage between chart and request.security
 // evaluation. The latter installs its own scope around every security
 // evaluator dispatch and restores the prior thread-local value on return.
+OrderBirth BacktestEngine::capture_order_birth() const {
+    if (birth_context_owner == this && birth_context) return *birth_context;
+    return OrderBirth::direct_command(bar_index_, current_bar_.timestamp);
+}
+
 void BacktestEngine::invoke_chart_on_bar(const Bar& bar) {
+    const OrderBirth origin = birth_context_owner == this && birth_context
+        ? *birth_context : OrderBirth::chart_evaluation(bar_index_, bar.timestamp);
+    ScopedBirthContext origin_scope(this, origin);
     process_short_margin_before_script(bar);
     struct ChartEmaNaWarmupScope {
         bool previous;
@@ -360,9 +386,7 @@ uint64_t BacktestEngine::execute_coof_script_body(
         const Bar& script_bar,
         double broker_cursor_price,
         bool cursor_is_bar_point,
-        bool is_fill_recalc,
-        bool cursor_is_bar_close,
-        bool recalc_at_bar_open,
+        const OrderBirth& evaluation_origin,
         uint64_t direct_fill_event_budget,
         bool opening_money_prefix) {
     restore_coof_script_state();
@@ -389,16 +413,18 @@ uint64_t BacktestEngine::execute_coof_script_body(
     }
 
     coof_scheduler_active_ = true;
-    coof_fill_recalc_active_ = is_fill_recalc;
-    coof_cursor_is_bar_close_ = cursor_is_bar_close;
+    coof_fill_recalc_active_ = evaluation_origin.from_fill();
+    coof_cursor_is_bar_close_ = evaluation_origin.from_fill()
+        ? evaluation_origin.cursor().terminal_point() : true;
     // KI-67: only the first fill event at O owns "bar-open" provenance and
     // places standard orders. A later fill at the same O, like a fill at any
     // segment/extreme/close point, is mid-bar and places cascade orders.
-    coof_recalc_at_bar_open_ = is_fill_recalc && recalc_at_bar_open;
+    coof_recalc_at_bar_open_ = compat::pine::first_open_fill_evaluation(evaluation_origin);
     coof_cursor_price_ = broker_cursor_price;
     coof_cursor_is_bar_point_ = cursor_is_bar_point;
     coof_direct_fill_events_remaining_ = direct_fill_event_budget;
     const uint64_t before = broker_fill_event_seq_;
+    ScopedBirthContext origin_scope(this, evaluation_origin);
     invoke_chart_on_bar(current_bar_);
     if (process_orders_on_close_) {
         // A same-bar close batch is a broker fill at the current monotonic
@@ -416,43 +442,49 @@ uint64_t BacktestEngine::execute_coof_script_body(
 }
 
 uint64_t BacktestEngine::run_coof_recalc_chain(
-        const Bar& script_bar,
-        double broker_cursor_price,
-        bool cursor_is_bar_point,
-        bool cursor_is_bar_close,
-        bool recalc_at_bar_open,
-        uint64_t triggering_events,
-        uint64_t max_events,
-        uint64_t events_already,
-        bool grouped_stop_recalc,
-        uint64_t market_entry_incarnation,
+        const Bar& script_bar, double broker_cursor_price,
+        bool cursor_is_bar_point, BirthCursor cursor,
+        uint64_t& evaluation_ordinal, uint64_t triggering_events,
+        uint64_t max_events, uint64_t events_already,
+        bool grouped_stop_recalc, uint64_t market_entry_incarnation,
         bool opening_money_prefix) {
+    // Bind callbacks to the actual simulator events that scheduled them. Direct
+    // fills append their exact sequence interval to this FIFO; a later callback
+    // never borrows the newest global sequence as its alleged triggering fill.
+    using Interval = std::pair<uint64_t, uint64_t>;
+    std::deque<Interval> pending;
+    auto append_events = [&](uint64_t first, uint64_t last, bool grouped) {
+        if (first == 0 || last < first) throw std::logic_error("invalid callback fill interval");
+        if (grouped) pending.emplace_back(first, last);
+        else for (uint64_t seq = first;; ++seq) {
+            pending.emplace_back(seq, seq);
+            if (seq == last) break;
+        }
+    };
+    if (triggering_events > broker_fill_event_seq_)
+        throw std::logic_error("callback interval exceeds committed fills");
+    if (triggering_events > 0)
+        append_events(broker_fill_event_seq_ - triggering_events + 1,
+                      broker_fill_event_seq_, grouped_stop_recalc);
     uint64_t total_events = triggering_events;
-    uint64_t pending_recalcs = grouped_stop_recalc ? 1 : triggering_events;
     uint64_t handled = 0;
-    while (pending_recalcs > 0 && events_already + handled < max_events) {
-        --pending_recalcs;
-        ++handled;
+    while (!pending.empty() && events_already + handled < max_events) {
+        const auto trigger = pending.front(); pending.pop_front(); ++handled;
+        const auto origin = OrderBirth::fill_evaluation(
+            bar_index_, script_bar.timestamp, cursor, broker_cursor_price,
+            trigger.first, trigger.second, ++evaluation_ordinal);
         const uint64_t used = events_already + total_events;
-        const uint64_t direct_budget =
-            used < max_events ? max_events - used : 0;
-        // Only the first fill event at O owns bar-open provenance. A direct or
-        // separately-dispatched later fill at that same O is a KI-67 cascade
-        // recalc whose remaining path starts on leg 0 (O->W1).
-        const bool first_open_fill_recalc =
-            recalc_at_bar_open && events_already == 0 && handled == 1;
-        coof_recalc_after_first_open_fill_ =
-            recalc_at_bar_open && !first_open_fill_recalc;
-        coof_market_entry_recalc_incarnation_ =
-            handled == 1 ? market_entry_incarnation : 0;
+        const uint64_t direct_budget = used < max_events ? max_events - used : 0;
+        coof_recalc_after_first_open_fill_ = cursor.first_point()
+            && !compat::pine::first_open_fill_evaluation(origin);
+        coof_market_entry_recalc_incarnation_ = handled == 1 ? market_entry_incarnation : 0;
         coof_market_entry_recalc_fill_seq_ = broker_fill_event_seq_;
+        const uint64_t before = broker_fill_event_seq_;
         const uint64_t direct = execute_coof_script_body(
             script_bar, broker_cursor_price, cursor_is_bar_point,
-            /*is_fill_recalc=*/true,
-            cursor_is_bar_close, first_open_fill_recalc,
-            direct_budget, opening_money_prefix);
+            origin, direct_budget, opening_money_prefix);
         total_events += direct;
-        pending_recalcs += direct;
+        if (direct > 0) append_events(before + 1, broker_fill_event_seq_, false);
     }
     return total_events;
 }
@@ -495,6 +527,7 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
     constexpr uint64_t kNoFillEventBudget = std::numeric_limits<uint64_t>::max();
     constexpr int kCoofLoopGuard = 1 << 20;
     uint64_t fill_events = 0;
+    uint64_t evaluation_ordinal = 0;
     int exit_closed_from_bar = -1;
     uint64_t exit_closed_from_incarnation = 0;
     bool exit_closed_was_long = false;
@@ -540,8 +573,8 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
             coof_cascade_recalc_leg_ = 0;
             fill_events += run_coof_recalc_chain(
                 script_bar, cursor, /*cursor_is_bar_point=*/true,
-                /*cursor_is_bar_close=*/false, /*recalc_at_bar_open=*/true,
-                broker_fill_event_seq_ - before, kNoFillEventBudget, 0,
+                BirthCursor::point(BirthCursorDomain::HistoricalPath, 0, 4),
+                evaluation_ordinal, broker_fill_event_seq_ - before, kNoFillEventBudget, 0,
                 /*grouped_stop_recalc=*/false, /*market_entry_incarnation=*/0,
                 /*opening_money_prefix=*/true);
             // The ordinary O exception permits just the first follow-up
@@ -551,7 +584,7 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
     }
 
     auto consume_fill = [&](const CoofFillResult& fill,
-                            bool cursor_is_close,
+                            BirthCursor birth_cursor,
                             bool filled_at_bar_open_point) {
         const uint64_t before = fill_events;
         const bool chart_tick_touch = std::isfinite(fill.chart_waypoint_price);
@@ -559,11 +592,10 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
         cursor_is_bar_point = chart_tick_touch;
         // The recalc chain receives O-point provenance, but only its first fill
         // event is classified as bar-open. A later fill at the same O is a
-        // leg-0 cascade (PendingOrder::coof_born_mid_bar).
+        // leg-0 cascade (the Pine historical cascade permission).
         fill_events += run_coof_recalc_chain(
-            script_bar, fill.fill_price, /*cursor_is_bar_point=*/false, cursor_is_close,
-            filled_at_bar_open_point,
-            fill.fill_events, kNoFillEventBudget, fill_events,
+            script_bar, fill.fill_price, /*cursor_is_bar_point=*/false,
+            birth_cursor, evaluation_ordinal, fill.fill_events, kNoFillEventBudget, fill_events,
             fill.grouped_stop_recalc, fill.market_entry_incarnation);
         // The carried order's open fill triggers one execution at O, and the
         // order born in that first execution may also fill at O. Every later
@@ -576,7 +608,6 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
     int loop_guard = 0;
     while (++loop_guard <= kCoofLoopGuard) {
         if (evaluate_current_point) {
-            const bool cursor_is_close = next_waypoint >= 4;
             // Cascade orders fill only AT an extreme waypoint (W1 = next_waypoint
             // 2, W2 = next_waypoint 3); the O point (1) and the C point (>=4) do
             // not admit them.
@@ -598,7 +629,7 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
                 // i.e. leg (next_waypoint-1) — the leg the loop traverses next.
                 coof_cascade_recalc_leg_ = next_waypoint - 1;
                 consume_fill(
-                    fill, cursor_is_close,
+                    fill, BirthCursor::point(BirthCursorDomain::HistoricalPath, next_waypoint - 1, 4),
                     /*filled_at_bar_open_point=*/next_waypoint == 1);
                 continue;
             }
@@ -627,15 +658,15 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
         if (fill.filled) {
             const bool reached_target =
                 std::abs(fill.fill_price - target) <= kSegmentDenomEps;
-            const bool cursor_is_close = next_waypoint == 3
-                && reached_target;
             // A fill mid-leg leaves the in-flight leg at (next_waypoint-1); a fill
             // that reaches the leg-end waypoint (path[next_waypoint]) advances to
             // the NEXT leg (next_waypoint) — the loop's ++next_waypoint below.
             coof_cascade_recalc_leg_ =
                 reached_target ? next_waypoint : (next_waypoint - 1);
             consume_fill(
-                fill, cursor_is_close,
+                fill, reached_target
+                    ? BirthCursor::point(BirthCursorDomain::HistoricalPath, next_waypoint, 4)
+                    : BirthCursor::segment(BirthCursorDomain::HistoricalPath, next_waypoint - 1, 4),
                 /*filled_at_bar_open_point=*/false);
             // H/L/C itself has been consumed by this priced fill. Only O has
             // the same-point two-fill exception; a market order born in the
@@ -673,8 +704,8 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
     cursor = path[3];
     cursor_is_bar_point = true;
     uint64_t direct = execute_coof_script_body(
-        script_bar, cursor, cursor_is_bar_point, /*is_fill_recalc=*/false,
-        /*cursor_is_bar_close=*/true, /*recalc_at_bar_open=*/false,
+        script_bar, cursor, cursor_is_bar_point,
+        OrderBirth::chart_evaluation(bar_index_, script_bar.timestamp),
         kNoFillEventBudget);
     // C is the terminal historical tick. Direct fills produced by this
     // ordinary-close execution are real broker fills, but do not trigger
@@ -720,8 +751,8 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
     if (margin_events > 0) {
         fill_events += run_coof_recalc_chain(
             script_bar, cursor, cursor_is_bar_point,
-            /*cursor_is_bar_close=*/true,
-            /*recalc_at_bar_open=*/false, margin_events,
+            BirthCursor::point(BirthCursorDomain::HistoricalPath, 3, 4),
+            evaluation_ordinal, margin_events,
             kNoFillEventBudget, fill_events);
     }
 
@@ -1328,6 +1359,7 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
     // actual lower-timeframe broker ticks supplied by the magnifier.
     const uint64_t max_fill_events = static_cast<uint64_t>(ticks.size());
     uint64_t fill_events = 0;
+    uint64_t evaluation_ordinal = 0;
     int exit_closed_from_bar = -1;
     uint64_t exit_closed_from_incarnation = 0;
     bool exit_closed_was_long = false;
@@ -1346,25 +1378,23 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
     bool evaluate_current_point = true;
 
     auto consume_fill = [&](const CoofFillResult& fill,
-                            bool cursor_is_close,
+                            BirthCursor birth_cursor,
                             bool filled_at_first_tick) {
         const uint64_t before = fill_events;
         cursor = fill.fill_price;
         cursor_is_bar_point = false;
-        // Magnifier path: coof_born_mid_bar is inert here (the cascade gate is
+        // Magnifier path: historical cascade permission is inert here (the cascade gate is
         // guarded by !bar_magnifier_enabled_), but keep provenance consistent —
         // a first-tick fill is the magnifier analogue of a bar-open recalc.
         fill_events += run_coof_recalc_chain(
-            script_bar, cursor, cursor_is_bar_point, cursor_is_close,
-            filled_at_first_tick,
-            fill.fill_events, max_fill_events, fill_events);
+            script_bar, cursor, cursor_is_bar_point, birth_cursor,
+            evaluation_ordinal, fill.fill_events, max_fill_events, fill_events);
         evaluate_current_point = filled_at_first_tick
             && before == 0 && fill_events == 1;
     };
 
     while (fill_events < max_fill_events) {
         if (evaluate_current_point) {
-            const bool cursor_is_close = next_tick >= ticks.size();
             Bar point = coof_point_bar(script_bar, cursor);
             point.timestamp = cursor_ts;
             current_bar_ = point;
@@ -1374,7 +1404,8 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
                 exit_closed_was_long);
             if (fill.filled) {
                 consume_fill(
-                    fill, cursor_is_close,
+                    fill, BirthCursor::point(BirthCursorDomain::MagnifierTicks,
+                        static_cast<int>(next_tick) - 1, static_cast<int>(ticks.size())),
                     /*filled_at_first_tick=*/next_tick == 1);
                 continue;
             }
@@ -1409,10 +1440,12 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
             cursor_ts = target.timestamp;
             const bool reached_target =
                 std::abs(fill.fill_price - target.price) <= kSegmentDenomEps;
-            const bool cursor_is_close = next_tick + 1 == ticks.size()
-                && reached_target;
             consume_fill(
-                fill, cursor_is_close,
+                fill, reached_target
+                    ? BirthCursor::point(BirthCursorDomain::MagnifierTicks,
+                        static_cast<int>(next_tick), static_cast<int>(ticks.size()))
+                    : BirthCursor::segment(BirthCursorDomain::MagnifierTicks,
+                        static_cast<int>(next_tick) - 1, static_cast<int>(ticks.size())),
                 /*filled_at_first_tick=*/false);
             // The real lower-TF endpoint is already consumed. Do not replay
             // a market-enabled point at the same H/L/C tick; O remains the
@@ -1431,8 +1464,8 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
     cursor = ticks.back().price;
     cursor_is_bar_point = true;
     uint64_t direct = execute_coof_script_body(
-        script_bar, cursor, cursor_is_bar_point, /*is_fill_recalc=*/false,
-        /*cursor_is_bar_close=*/true, /*recalc_at_bar_open=*/false,
+        script_bar, cursor, cursor_is_bar_point,
+        OrderBirth::chart_evaluation(bar_index_, script_bar.timestamp),
         fill_events < max_fill_events ? max_fill_events - fill_events : 0);
     commit_coof_script_state();
     // The last real lower-TF close is also terminal: count direct fills but do
@@ -1465,8 +1498,9 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
     if (margin_events > 0 && fill_events < max_fill_events) {
         fill_events += run_coof_recalc_chain(
             script_bar, cursor, cursor_is_bar_point,
-            /*cursor_is_bar_close=*/true,
-            /*recalc_at_bar_open=*/false, margin_events,
+            BirthCursor::point(BirthCursorDomain::MagnifierTicks,
+                               static_cast<int>(ticks.size()) - 1, static_cast<int>(ticks.size())),
+            evaluation_ordinal, margin_events,
             max_fill_events, fill_events);
     }
 

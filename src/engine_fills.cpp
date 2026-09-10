@@ -534,7 +534,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
         traversed.low = std::min(bar.open, cursor_price);
         traversed.close = cursor_price;
         for (PendingOrder& pending : pending_orders_) {
-            if (pending.coof_born_at_close_recalc
+            if (pending.birth.at_terminal_fill()
                 && pending.created_bar == bar_index_) {
                 continue;
             }
@@ -598,7 +598,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             // its own tick model and is scoped out.
             coof_cascade_force_wp_gap_ = false;
             if (!bar_magnifier_enabled_ && coof_scheduler_active_
-                && order.coof_born_mid_bar
+                && compat::pine::historical_cascade_reach(order)
                 && order.created_bar == bar_index_) {
                 // Model S governs only PRICED (stop/limit, non-trail)
                 // strategy.exit cascade orders — the class the probe pinned.
@@ -665,8 +665,8 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 && position_open_bar_ >= 0 && position_open_bar_ < bar_index_
                 && position_entry_count_ == 1 && pyramid_entries_.size() == 1
                 && pyramiding_ == 0 && order.type == OrderType::EXIT
-                && order.created_bar < bar_index_ && !order.requested_partial
-                && order.created_while_in_position && !order.dormant_bracket
+                && order.created_bar < bar_index_ && !order.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
+                && (order.created_position_side != PositionSide::FLAT) && !order.dormant_bracket
                 && !order.from_entry.empty()
                 && order.from_entry == pyramid_entries_.front().entry_id
                 && std::isnan(order.trail_points) && std::isnan(order.trail_price)
@@ -798,7 +798,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             // siblings, invalidating references into the pending-order vector.
             const bool fresh_coof_market_entry =
                 pending_orders_[order_index].type == OrderType::MARKET
-                && pending_orders_[order_index].created_during_coof_recalc
+                && pending_orders_[order_index].birth.from_fill()
                 && pending_orders_[order_index].created_bar == bar_index_
                 && side_before_fill == PositionSide::FLAT;
             const uint64_t opening_incarnation = candidate.order.incarnation;
@@ -1226,9 +1226,8 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
             double pending_touch = 0.0;
             if (order.created_bar >= bar_index_
                 || order.created_position_side != PositionSide::FLAT
-                || order.created_while_in_position
                 || order.created_after_position_close_in_bar
-                || order.created_during_coof_recalc
+                || order.birth.from_fill()
                 || !std::isfinite(order.stop_price)
                 || !std::isnan(order.limit_price)
                 || order.stop_limit_activated
@@ -2226,7 +2225,7 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
             && pending.created_position_side == PositionSide::LONG
             && pending.created_position_cycle_seq == close_mc_cycle
             && !pending.created_after_position_close_in_bar
-            && !pending.created_during_coof_recalc
+            && !pending.birth.from_fill()
             && pending.tv_carry_qty == qty
             && std::isfinite(pending.frozen_default_qty)) {
             pending.signal_close_mc_bar = bar_index_;
@@ -2297,7 +2296,7 @@ void BacktestEngine::revive_position_brackets_after_margin_call_partial(
         // remainder next bar @214.68.
         const bool full_pct = std::isnan(o.qty)
             ? o.qty_percent >= 100.0 - internal::kFullPercentEps
-            : (!o.requested_partial
+            : (!o.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
                || o.qty >= position_qty_ - kQtyEpsilon);
         if (!full_pct || std::isnan(revive_stop)
             || !std::isfinite(mc_price)) continue;
@@ -3262,9 +3261,9 @@ void BacktestEngine::finalize_default_flat_market_gross_admission() {
             && std::isnan(other.trail_points)
             && std::isnan(other.trail_price)
             && std::isnan(other.trail_offset)
-            && !other.created_during_coof_recalc
-            && !other.coof_born_at_close_recalc
-            && !other.coof_born_mid_bar;
+            && !other.birth.from_fill()
+            && !other.birth.at_terminal_fill()
+            && !compat::pine::historical_cascade_reach(other);
         if (!same_bar_market_close) {
             consume_source_tombstones();
             return;
@@ -3297,10 +3296,10 @@ void BacktestEngine::finalize_default_flat_market_gross_admission() {
             && order.created_bar == source_bar
             && order.incarnation > 0
             && order.created_seq > 0
-            && !order.created_by_same_id_replacement
-            && !order.created_during_coof_recalc
-            && !order.coof_born_at_close_recalc
-            && !order.coof_born_mid_bar
+            && (order.replaced_order_incarnation == 0)
+            && !order.birth.from_fill()
+            && !order.birth.at_terminal_fill()
+            && !compat::pine::historical_cascade_reach(order)
             && std::isfinite(order.sizing_equity)
             && order.sizing_equity > 0.0
             && std::isfinite(order.sizing_mark)
@@ -3469,12 +3468,12 @@ void BacktestEngine::apply_pooc_coof_explicit_flat_market_gross_admission() {
             && order.oca_name.empty()
             && order.created_bar == bar_index_
             && order.incarnation > 0
-            && !order.created_by_same_id_replacement
+            && (order.replaced_order_incarnation == 0)
             && order.created_position_side == PositionSide::FLAT
             && !order.created_after_position_close_in_bar
-            && !order.created_during_coof_recalc
-            && !order.coof_born_at_close_recalc
-            && !order.coof_born_mid_bar
+            && !order.birth.from_fill()
+            && !order.birth.at_terminal_fill()
+            && !compat::pine::historical_cascade_reach(order)
             && std::isfinite(order.explicit_placement_equity)
             && order.explicit_placement_equity > 0.0
             && std::isfinite(order.explicit_slipped_signal_close)
@@ -3758,7 +3757,7 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && !order.id.empty()
                 && order.created_position_side == PositionSide::FLAT
                 && order.created_bar < bar_index_
-                && !order.created_during_coof_recalc
+                && !order.birth.from_fill()
                 && std::isfinite(order.limit_price)
                 && std::isnan(order.stop_price)
                 && std::isnan(order.trail_points)
@@ -3793,9 +3792,8 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
             // parent filled AT the open already shared the open phase.
             const bool exact_relative_child =
                 order.type == OrderType::EXIT
-                && !order.created_while_in_position
                 && order.created_position_side == PositionSide::FLAT
-                && !order.created_during_coof_recalc
+                && !order.birth.from_fill()
                 && exit_children_by_parent[order.from_entry] == 1
                 && order.created_bar >= parent->second.created_bar
                 && parent->second.created_seq < order.created_seq
@@ -3871,13 +3869,12 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
             return order.created_bar == source_bar
                 && source_bar + 1 == bar_index_
                 && order.created_position_side == PositionSide::SHORT
-                && !order.created_by_same_id_replacement
-                && order.replaced_exit_order_incarnation == 0
+                && (order.replaced_order_incarnation == 0)
                 && order.recreated_after_named_cancelled_entry_incarnation == 0
                 && order.named_cancel_surviving_exit_incarnation == 0
-                && !order.created_during_coof_recalc
-                && !order.coof_born_at_close_recalc
-                && !order.coof_born_mid_bar
+                && !order.birth.from_fill()
+                && !order.birth.at_terminal_fill()
+                && !compat::pine::historical_cascade_reach(order)
                 && order.oca_name.empty()
                 && order.oca_type == 0;
         };
@@ -3912,8 +3909,7 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && std::isnan(order.trail_offset)
                 && std::isnan(order.profit_ticks)
                 && std::isnan(order.loss_ticks)
-                && !order.created_after_position_close_in_bar
-                && !order.created_while_in_position;
+                && !order.created_after_position_close_in_bar;
         };
         const auto exact_full_fifo_close_short =
             [&](const PendingOrder& order, const std::string& held_id) {
@@ -3921,8 +3917,8 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && order.id == "__close__" + held_id
                 && order.from_entry.empty()
                 && !order.is_long
-                && order.created_while_in_position
-                && !order.requested_partial
+                && (order.created_position_side != PositionSide::FLAT)
+                && !order.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
                 && std::isnan(order.qty)
                 && std::abs(order.qty_percent - 100.0) <= kFullPercentEps
                 && std::isnan(order.limit_price)
@@ -4614,8 +4610,8 @@ bool BacktestEngine::prearmed_market_parent_bracket_gaps_at_open(
         || order.type != OrderType::EXIT
         || order.from_entry.empty()
         || order.created_bar != bar_index_ - 1
-        || order.created_during_coof_recalc
-        || order.requested_partial
+        || order.birth.from_fill()
+        || order.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
         || order.qty_percent < 100.0 - kFullPercentEps
         || (!std::isfinite(order.stop_price)
             && !std::isfinite(order.limit_price))) {
@@ -5772,7 +5768,7 @@ void BacktestEngine::apply_filled_order_to_state(
         && position_side_ == PositionSide::FLAT
         && (order.created_position_side == PositionSide::FLAT
             || order.created_after_position_close_in_bar)
-        && !order.created_by_same_id_replacement
+        && (order.replaced_order_incarnation == 0)
         && order.created_bar == bar_index_ - 1 && sole_opening_after_closes()
         && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
         && default_qty_value_ == 100
@@ -5846,7 +5842,7 @@ void BacktestEngine::apply_filled_order_to_state(
             && !process_orders_on_close_ && !calc_on_order_fills_
             && !bar_magnifier_enabled_ && !coof_scheduler_active_
             && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
-            && !order.created_during_coof_recalc
+            && !order.birth.from_fill()
             && !order.created_after_position_close_in_bar
             && std::isfinite(order.sizing_equity)
             && std::isfinite(order.frozen_default_qty)
@@ -6181,7 +6177,7 @@ void BacktestEngine::apply_filled_order_to_state(
                 && position_side_ == PositionSide::FLAT
                 && order.created_position_side == PositionSide::FLAT
                 && !order.created_after_position_close_in_bar
-                && !order.created_by_same_id_replacement
+                && (order.replaced_order_incarnation == 0)
                 // FIXED/no-fee orders carry the transaction marker even
                 // when no sibling exists. Exclude an expanded transaction,
                 // not an otherwise-unused default sizing declaration.
@@ -6387,7 +6383,7 @@ void BacktestEngine::apply_filled_order_to_state(
                     || child.created_bar != order.created_bar
                     || child.suppress_as_declined_reversal_close
                     || !actionable
-                    || child.requested_partial
+                    || child.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
                     || !std::isnan(child.qty)
                     || qp < 100.0 - kFullPercentEps) {
                     continue;
@@ -6486,8 +6482,8 @@ void BacktestEngine::apply_filled_order_to_state(
             && order.created_bar == bar_index_
             && order.created_position_side == PositionSide::FLAT
             && !order.created_after_position_close_in_bar
-            && !order.created_during_coof_recalc
-            && !order.created_by_same_id_replacement
+            && !order.birth.from_fill()
+            && (order.replaced_order_incarnation == 0)
             && order.oca_name.empty() && order.oca_type == 0
             && position_side_before_fill == PositionSide::FLAT
             && order.incarnation != 0 && pyramid_entries_.size() == 1
@@ -6519,8 +6515,7 @@ void BacktestEngine::apply_filled_order_to_state(
             && !process_orders_on_close_ && !calc_on_order_fills_
             && !bar_magnifier_enabled_ && !coof_scheduler_active_
             && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
-            && !order.created_during_coof_recalc
-            && !order.created_while_in_position
+            && !order.birth.from_fill()
             && !order.created_after_position_close_in_bar
             && order.created_position_side == PositionSide::FLAT
             && order.created_bar < bar_index_
@@ -6635,7 +6630,7 @@ void BacktestEngine::apply_filled_order_to_state(
             && !bar_magnifier_enabled_
             && !stream_warmup_mode_
             && stream_phase_ == StreamPhase::IDLE
-            && !order.created_during_coof_recalc
+            && !order.birth.from_fill()
             && order.created_bar < bar_index_
             && order.oca_name.empty()
             && order.oca_type == 0;
@@ -6680,7 +6675,7 @@ void BacktestEngine::apply_filled_order_to_state(
             && !bar_magnifier_enabled_
             && !stream_warmup_mode_
             && stream_phase_ == StreamPhase::IDLE
-            && !order.created_during_coof_recalc
+            && !order.birth.from_fill()
             && order.created_bar < bar_index_
             && order.oca_name.empty()
             && order.oca_type == 0;
@@ -6923,12 +6918,12 @@ static void set_entry_fill_excursion_masks(PyramidEntry& pe, const Bar& bar,
 bool BacktestEngine::replaced_percent_short_market_is_live(
         const PendingOrder& order) const {
     if (order.type != OrderType::MARKET || order.is_long
-        || !order.created_by_same_id_replacement
+        || (order.replaced_order_incarnation == 0)
         || order.replaced_default_market_incarnation == 0
         || !std::isnan(order.qty) || order.qty_type >= 0
         || order.affordability_close_only || order.sbmt_member
         || order.created_bar != bar_index_ - 1
-        || order.created_during_coof_recalc
+        || order.birth.from_fill()
         || order.created_after_position_close_in_bar
         || order.created_position_side != PositionSide::LONG
         || position_side_ != PositionSide::LONG
@@ -6963,7 +6958,7 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
                 || std::isfinite(other.limit_price)
                 || std::isfinite(other.profit_ticks)
                 || std::isfinite(other.loss_ticks);
-            if (other.from_entry.empty() || other.requested_partial
+            if (other.from_entry.empty() || other.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
                 || !std::isnan(other.qty) || other.qty_percent != 100
                 || !bracket || other.suppress_as_declined_reversal_close
                 || !other.oca_name.empty()
@@ -7213,7 +7208,7 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
     // intrabar retrace price. See apply_entry_order_fill's matching guard.
     bool same_bar_close_fill = process_orders_on_close_
         && order.created_bar == bar_index_
-        && !order.created_during_coof_recalc;
+        && !order.birth.from_fill();
     if (!same_bar_close_fill) {
         if (position_side_ == PositionSide::LONG)
             trail_best_price_ = std::max(trail_best_price_, bar.high);
@@ -7364,7 +7359,7 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
         // the bar's close (a POOC entry created and filled this same bar).
         bool same_bar_close_fill = process_orders_on_close_
             && order.created_bar == bar_index_
-            && !order.created_during_coof_recalc;
+            && !order.birth.from_fill();
         if (!same_bar_close_fill) {
             if (position_side_ == PositionSide::LONG)
                 trail_best_price_ = std::max(trail_best_price_, bar.high);
@@ -7637,7 +7632,7 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
     // Consuming the id on the FIRST leg's fill would make the surviving sibling
     // unre-issuable while the position is still open. Mark the id consumed only
     // when the last leg carrying it is gone.
-    if (order.requested_partial && trades_.size() > trades_before_exit) {
+    if (order.quantity_request.is_partial(kFullQtyEps, kFullPercentEps) && trades_.size() > trades_before_exit) {
         bool sibling_leg_still_live = false;
         for (const PendingOrder& sibling : pending_orders_) {
             if (sibling.type != OrderType::EXIT) continue;
@@ -7748,7 +7743,7 @@ void BacktestEngine::reconcile_deferred_layered_exits(
         // to flatten the whole position. Mirrors the live-armed normalization
         // at engine_strategy_commands.cpp (reserved_qty_out / live_pos * 100).
         if (live_pos > kQtyEpsilon) o.qty_percent = (res / live_pos) * 100.0;
-        o.requested_partial = res < live_pos - kFullQtyEps;
+        o.quantity_request.reserve(res, live_pos);
         reserved += res;
     }
 }
@@ -8075,14 +8070,13 @@ double BacktestEngine::pooc_short_exit_trigger_close(
         && position_entry_count_ == 1 && pyramiding_ == 0
         && pyramid_entries_.size() == 1
         && order.type == OrderType::EXIT && !order.is_long
-        && order.created_bar == bar_index_ && !order.created_during_coof_recalc
-        && order.created_by_same_id_replacement
-        && order.replaced_exit_order_incarnation != 0
-        && order.created_while_in_position && !order.dormant_bracket
+        && order.created_bar == bar_index_ && !order.birth.from_fill()
+        && (order.replaced_order_incarnation != 0)
+        && (order.created_position_side != PositionSide::FLAT) && !order.dormant_bracket
         && !order.from_entry.empty()
         && order.from_entry == pyramid_entries_.front().entry_id
-        && order.full_percent_exit_request
-        && !order.requested_partial && order.qty_percent == 100.0
+        && order.quantity_request.requests_all()
+        && !order.quantity_request.is_partial(kFullQtyEps, kFullPercentEps) && order.qty_percent == 100.0
         && std::isfinite(order.qty)
         && std::abs(order.qty - position_qty_) <= kQtyEpsilon
         && order.oca_name.empty()
@@ -8183,7 +8177,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     // point and expires unless a later ordinary-close execution reissues it;
     // carrying it creates Delta's spurious out-of-session lifecycle.
     if (calc_on_order_fills_ && coof_scheduler_active_
-        && order.coof_born_at_close_recalc) {
+        && order.birth.at_terminal_fill()) {
         if (order.created_bar == bar_index_) {
             return OrderEligibility::Skip;
         }
@@ -8198,7 +8192,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
 
     bool stale_close_order_for_new_position =
         order.type == OrderType::EXIT
-        && order.created_while_in_position
+        && (order.created_position_side != PositionSide::FLAT)
         && order.id.rfind("__close__", 0) == 0
         && position_side_ != PositionSide::FLAT
         && position_open_bar_ > order.created_bar
@@ -8212,7 +8206,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     // was open. This prevents old strategy.exit brackets from leaking into
     // future positions after a market close/reversal.
     if (order.type == OrderType::EXIT && position_side_ == PositionSide::FLAT) {
-        return order.created_while_in_position
+        return (order.created_position_side != PositionSide::FLAT)
             ? OrderEligibility::Remove
             : OrderEligibility::Skip;
     }
@@ -8228,7 +8222,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     // touched together — TV emits both as separate trades).
     const bool coof_fill_recalc_entry =
         calc_on_order_fills_ && coof_scheduler_active_
-        && order.created_during_coof_recalc
+        && order.birth.from_fill()
         && order.created_bar == bar_index_;
     if (priced_entry_filled_this_bar_ && order.type == OrderType::ENTRY
         && !coof_fill_recalc_entry) {
@@ -8368,7 +8362,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     // from the next bar on. See evaluate_fill_price's has_limit/has_stop
     // branches for the matching same-bar fill-price rules.
     if (process_orders_on_close_ && order.created_bar == bar_index_
-        && !order.created_during_coof_recalc) {
+        && !order.birth.from_fill()) {
         bool has_stop_or_trail = !std::isnan(order.stop_price)
                                  || !std::isnan(order.trail_points)
                                  || !std::isnan(order.trail_price);
@@ -8464,7 +8458,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
                 order, broker_trigger_bar(bar));
         if (!prearmed_market_gap && !bar_magnifier_enabled_
             && !(calc_on_order_fills_ && coof_scheduler_active_
-                 && order.created_during_coof_recalc)) {
+                 && order.birth.from_fill())) {
             double ep = position_entry_price_;
             if (position_side_ == PositionSide::LONG) {
                 if (!std::isnan(order.stop_price) && order.stop_price > ep) return OrderEligibility::Skip;
@@ -8555,7 +8549,7 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
 
     bool exit_same_bar_reissue = exit_style && !has_trail
         && process_orders_on_close_ && order.created_bar == bar_index_
-        && !order.created_during_coof_recalc;
+        && !order.birth.from_fill();
     if (!should_fill && exit_same_bar_reissue && (has_stop || has_limit)) {
         // A mid-trade exit re-issue (e.g. a break-even stop moved by a
         // time-gated block) that's already marketable against THIS bar's
@@ -8599,7 +8593,7 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
         if (is_entry_bar
             && order.type == OrderType::EXIT
             && !order.from_entry.empty()
-            && !order.created_while_in_position
+            && (order.created_position_side == PositionSide::FLAT)
             && std::isnan(order.trail_points)
             && std::isnan(order.trail_price)
             && !bar_magnifier_enabled_
@@ -8767,7 +8761,7 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
     } else if (!should_fill && has_limit) {
         // Entry limit order
         if (process_orders_on_close_ && order.created_bar == bar_index_
-            && !order.created_during_coof_recalc) {
+            && !order.birth.from_fill()) {
             // Same-bar pure-limit entry (see classify_order_eligibility's
             // matching carve-out): TV evaluates it against THIS bar's
             // close (the moment it was placed), not the bar's full

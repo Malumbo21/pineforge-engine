@@ -15,7 +15,9 @@ from gen_pending_order_mirror import members
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "include/pineforge/engine.hpp").read_text()
+QUANTITY = (ROOT / "include/pineforge/quantity_intent.hpp").read_text()
 EVENTS = (ROOT / "include/pineforge/broker_events.hpp").read_text()
+BIRTH = (ROOT / "include/pineforge/order_birth.hpp").read_text()
 INTRADAY = (ROOT / "include/pineforge/compat/pine/intraday_order_budget.hpp").read_text()
 POLICY = (ROOT / "include/pineforge/compat/pine/intraday_cap.hpp").read_text()
 OBLIGATION = (ROOT / "include/pineforge/position_close_obligation.hpp").read_text()
@@ -26,12 +28,14 @@ WAIVERS = (ROOT / "scripts/broker_state_hash_waivers.txt").read_text()
 
 class PhysicalLotCoverage(unittest.TestCase):
     def check(self, header=HEADER, source=SOURCE, waivers=WAIVERS, events=EVENTS,
-              intraday=INTRADAY, policy=POLICY, obligation=OBLIGATION, stream=STREAM):
+              intraday=INTRADAY, policy=POLICY, obligation=OBLIGATION, stream=STREAM, quantity=QUANTITY, birth=BIRTH):
         with tempfile.TemporaryDirectory(prefix="pf-lot-hash-check-") as temp:
             root = Path(temp)
             for name, content in [
                 ("include/pineforge/engine.hpp", header),
                 ("include/pineforge/broker_events.hpp", events),
+                ("include/pineforge/quantity_intent.hpp", quantity),
+                ("include/pineforge/order_birth.hpp", birth),
                 ("include/pineforge/compat/pine/intraday_order_budget.hpp", intraday),
                 ("include/pineforge/compat/pine/intraday_cap.hpp", policy),
                 ("include/pineforge/position_close_obligation.hpp", obligation),
@@ -56,26 +60,51 @@ class PhysicalLotCoverage(unittest.TestCase):
         self.assertEqual(len(members(HEADER, "PyramidEntry")), 18)
         self.assertEqual(members(HEADER), members(HEADER, "PendingOrder"))
 
-    def test_layout_and_hash_versions_must_match_v4_contract(self):
-        self.assertIn("engine_script_run_v4", HEADER)
-        self.assertIn('f.s("pineforge-broker-state/v4");', SOURCE)
-        self.assertIn("integer(4); integer(broker_state_hash());", STREAM)
-        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v4", "engine_script_run_v2"))[0], 1)
+    def test_quantity_request_presence_and_every_value_are_hashed(self):
+        for fold in ["f.b(o.quantity_request.intent().has_value());",
+                     "f.i(static_cast<int64_t>(intent->kind()));",
+                     "f.d(intent->units());", "f.d(intent->numerator());",
+                     "f.d(intent->denominator());",
+                     "f.b(o.quantity_request.reservation().has_value());",
+                     "f.d(reservation->units);", "f.d(reservation->basis_units);"]:
+            with self.subTest(fold=fold):
+                self.assertIn(fold, SOURCE)
+                self.assertEqual(self.check(source=SOURCE.replace(fold, ""))[0], 1)
+        self.assertEqual(self.check(waivers=WAIVERS +
+            "\npending_order.quantity_request # attempted omission\n")[0], 1)
+
+    def test_quantity_model_additions_and_variant_drift_fail_closed(self):
+        for old, new in [
+            ("struct Units { double amount; };", "struct Units { double amount; double extra; };"),
+            ("double basis_units;", "double basis_units; double extra;"),
+            ("Units, Fraction, All", "Units, All, Fraction"),
+            ("Value value_;", "Value value_; double extra_;"),
+            ("std::optional<QuantityIntent> intent_;", "std::optional<QuantityIntent> intent_; double extra_;"),
+        ]:
+            with self.subTest(old=old):
+                self.assertIn(old, QUANTITY)
+                self.assertEqual(self.check(quantity=QUANTITY.replace(old, new))[0], 1)
+
+    def test_layout_and_hash_versions_must_match_v5_contract(self):
+        self.assertIn("engine_script_run_v5", HEADER)
+        self.assertIn('f.s("pineforge-broker-state/v5");', SOURCE)
+        self.assertIn("integer(5); integer(broker_state_hash());", STREAM)
+        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v5", "engine_script_run_v2"))[0], 1)
         for replacement in ['f.s("pineforge-broker-state/v2");', '',
-                            '// f.s("pineforge-broker-state/v4");']:
+                            '// f.s("pineforge-broker-state/v5");']:
             self.assertEqual(self.check(source=SOURCE.replace(
-                'f.s("pineforge-broker-state/v4");', replacement))[0], 1)
+                'f.s("pineforge-broker-state/v5");', replacement))[0], 1)
         for replacement in ["integer(2); integer(broker_state_hash());",
                             "integer(broker_state_hash());",
-                            "if (false) { integer(4); integer(broker_state_hash()); }"]:
+                            "if (false) { integer(5); integer(broker_state_hash()); }"]:
             self.assertEqual(self.check(stream=STREAM.replace(
-                "integer(4); integer(broker_state_hash());", replacement))[0], 1)
+                "integer(5); integer(broker_state_hash());", replacement))[0], 1)
 
     def test_version_folds_in_unrelated_helpers_do_not_cover_entry_points(self):
-        broker_fold = 'f.s("pineforge-broker-state/v4");'
+        broker_fold = 'f.s("pineforge-broker-state/v5");'
         altered = SOURCE.replace(broker_fold, '') + '\nvoid other() { ' + broker_fold + ' }\n'
         self.assertEqual(self.check(source=altered)[0], 1)
-        stream_fold = "integer(4); integer(broker_state_hash());"
+        stream_fold = "integer(5); integer(broker_state_hash());"
         altered = STREAM.replace(stream_fold, '') + '\nvoid other() { ' + stream_fold + ' }\n'
         self.assertEqual(self.check(stream=altered)[0], 1)
 
@@ -132,6 +161,20 @@ class PhysicalLotCoverage(unittest.TestCase):
             with self.subTest(declaration=declaration):
                 header = HEADER.replace("struct PyramidEntry {", "struct PyramidEntry {\n    " + declaration)
                 self.assertNotEqual(self.check(header=header)[0], 0)
+
+    def test_complete_birth_hash_block_cannot_be_conditional(self):
+        start = SOURCE.index("        f.i(static_cast<int64_t>(o.birth.cause()));")
+        end = SOURCE.index("        f.i(static_cast<int64_t>(o.pine_birth_reach));", start)
+        end += len("        f.i(static_cast<int64_t>(o.pine_birth_reach));")
+        block = SOURCE[start:end]
+        self.assertEqual(self.check(source=SOURCE[:start] + "if (false) {\n" + block + "\n}" + SOURCE[end:])[0], 1)
+
+    def test_birth_fields_and_nested_cursor_cannot_escape_hash_coverage(self):
+        for fold in ["f.u(o.birth.first_fill());", "f.i(o.birth.cursor().index());",
+                     "f.i(static_cast<int64_t>(o.pine_birth_reach));"]:
+            self.assertNotEqual(self.check(source=SOURCE.replace(fold, ""))[0], 0)
+        altered = BIRTH.replace("    int count_ = 0;", "    int count_ = 0;\n    int hidden_cursor_fact = 0;")
+        self.assertNotEqual(self.check(birth=altered)[0], 0)
 
     def test_pending_order_coverage_still_refuses_omission(self):
         source = SOURCE.replace("f.d(o.stop_price);", "")

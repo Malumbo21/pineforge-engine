@@ -311,8 +311,10 @@ public:
             pyramid_entries_[0].ordinary_stop_open = false;
             pyramid_entries_[0].ordinary_market_open = true;
             break;
-        case 15: pending.created_during_coof_recalc = true; break;
-        case 16: pending.created_while_in_position = true; break;
+        case 15: pending.birth = OrderBirth::fill_evaluation(0, 0, BirthCursor::point(BirthCursorDomain::HistoricalPath, 0, 4), 100.0, 1, 1, 1); break;
+        // A position-bound EXIT is distinct from the flat-born pending STOP.
+        case 16: pending.type = OrderType::EXIT;
+                 pending.created_position_side = PositionSide::SHORT; break;
         case 17: pending_orders_.push_back(pending); break;
         default: break;
         }

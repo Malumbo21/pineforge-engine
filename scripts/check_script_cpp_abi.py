@@ -16,7 +16,7 @@ import tempfile
 
 BASE_COMMIT = "38dc73e5503fe5395458e5f8df2a2ad78054a1ae"
 BASE_ENGINE_SHA256 = "06c937a1ccd31815ca7775268ac699ffdfddb1a1f19de4628b777f37e9a6d193"
-CURRENT_NAMESPACE = "engine_script_run_v4"
+CURRENT_NAMESPACE = "engine_script_run_v5"
 BASE_NAMESPACE = "engine_script_run_v2"
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/script_cpp_abi/base38"
 
@@ -146,6 +146,10 @@ def main():
         frozen_headers(cap_include, FIXTURE.parent / "basef864",
                        "f864be590931ba08c8df5af983b33b2c29be9c67", "engine_script_run_v3",
                        "54b35fffaa163a31467f8ba883e44e02f013a37216b558dfe3a4f28fbbe84dc2")
+        prior_include = root / "basec45/include"
+        frozen_headers(prior_include, FIXTURE.parent / "basec45",
+                       "c45cf5a4d0e67a2ac098d9066977e1fa21c408a9", "engine_script_run_v4",
+                       "3b4e2937a9b5f275dd119144373b1bf15e433092009500092cd32ea34963b293")
         common = [args.compiler, "-std=c++17", "-O0", *args.extra_flag]
 
         def compile_object(name, source, include):
@@ -173,6 +177,32 @@ def main():
         cap_generated = compile_object("basef864_generated", caller("engine_script_run_v3", True), cap_include)
         cap_symbols = compile_object("basef864_symbol_control",
             BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v3"), cap_include)
+
+        prior_native = compile_object("basec45_native", caller("engine_script_run_v4"), prior_include)
+        prior_generated = compile_object("basec45_generated", caller("engine_script_run_v4", True), prior_include)
+        prior_symbols = compile_object("basec45_symbol_control",
+            BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v4"), prior_include)
+
+        priority_caller = """#include <pineforge/engine.hpp>
+#include <pineforge/compat/pine/order_priority.hpp>
+int main() {
+    pineforge::compat::pine::OrderPriority policy;
+    policy.attach();
+    pineforge::compat::pine::OrderPriorityContext context{};
+    std::vector<pineforge::PendingOrder> orders(2);
+    return policy.select(context, orders).has_value() ? 1 : 0;
+}
+"""
+        priority_symbols = """#include <pineforge/engine.hpp>
+#include <pineforge/compat/pine/order_priority.hpp>
+namespace pineforge::compat::pine {
+std::optional<broker::OrderPriorityDecision> OrderPriority::select(
+    const OrderPriorityContext&, const std::vector<PendingOrder>&) const { return std::nullopt; }
+}
+"""
+        current_priority = compile_object("current_pending_priority", priority_caller, args.include)
+        prior_priority = compile_object("basec45_pending_priority", priority_caller, prior_include)
+        prior_priority_symbols = compile_object("basec45_pending_priority_symbols", priority_symbols, prior_include)
 
         def link(name, obj, runtime, missing_namespace=None):
             linked = subprocess.run(
@@ -215,7 +245,26 @@ def main():
         link("basef864_generated_to_current", cap_generated, args.library, "engine_script_run_v3")
         link("current_native_to_v3_symbol_control", current_native, cap_symbols, CURRENT_NAMESPACE)
         link("current_generated_to_v3_symbol_control", current_generated, cap_symbols, CURRENT_NAMESPACE)
-    print("9 translation units compiled; 6 positive links; 9 rejected links; no executable run")
+        link("basec45_native_to_v4_symbol_control", prior_native, prior_symbols)
+        link("basec45_generated_to_v4_symbol_control", prior_generated, prior_symbols)
+        link("basec45_native_to_current", prior_native, args.library, "engine_script_run_v4")
+        link("basec45_generated_to_current", prior_generated, args.library, "engine_script_run_v4")
+        link("current_native_to_v4_symbol_control", current_native, prior_symbols, CURRENT_NAMESPACE)
+        link("current_generated_to_v4_symbol_control", current_generated, prior_symbols, CURRENT_NAMESPACE)
+        link("current_pending_priority_to_current", current_priority, args.library)
+        link("basec45_pending_priority_to_v4_symbols", prior_priority, prior_priority_symbols)
+        for name, obj, runtime, expected in [
+            ("basec45_pending_priority_to_current", prior_priority, args.library, "pineforge::PendingOrder"),
+            ("current_pending_priority_to_v4_symbols", current_priority, prior_priority_symbols,
+             "pineforge::engine_script_run_v5::PendingOrder"),
+        ]:
+            result = subprocess.run([*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
+                                    capture_output=True, text=True, timeout=60)
+            if (result.returncode == 0 or "undefined" not in result.stderr.lower()
+                    or "OrderPriority::select(" not in result.stderr or expected not in result.stderr):
+                raise RuntimeError(name + " did not reject the expected PendingOrder type: " + result.stderr)
+            print(name + ": rejected stale standalone PendingOrder argument type (not executed)")
+    print("15 translation units compiled; 10 positive links; 15 rejected links; no executable run")
 
 
 if __name__ == "__main__":

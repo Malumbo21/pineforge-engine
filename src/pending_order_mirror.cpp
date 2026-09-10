@@ -51,18 +51,18 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->created_bar = (int32_t)src.created_bar;
     out->created_seq = src.created_seq;
     out->incarnation = src.incarnation;
-    out->created_by_same_id_replacement = src.created_by_same_id_replacement ? 1 : 0;
+    out->created_by_same_id_replacement = src.type != OrderType::RAW_ORDER && src.replaced_order_incarnation != 0 ? 1 : 0;
     out->replaced_default_market_incarnation = src.replaced_default_market_incarnation;
     out->declined_by_replaced_short_market = src.declined_by_replaced_short_market ? 1 : 0;
-    out->replaced_exit_order_incarnation = src.replaced_exit_order_incarnation;
+    out->replaced_exit_order_incarnation = src.type == OrderType::EXIT ? src.replaced_order_incarnation : 0;
     out->recreated_after_named_cancelled_entry_incarnation = src.recreated_after_named_cancelled_entry_incarnation;
     out->named_cancel_surviving_exit_incarnation = src.named_cancel_surviving_exit_incarnation;
     out->stop_limit_activated = src.stop_limit_activated ? 1 : 0;
     out->coof_suppress_stop_on_entry_bar = src.coof_suppress_stop_on_entry_bar ? 1 : 0;
     out->coof_suppress_limit_on_entry_bar = src.coof_suppress_limit_on_entry_bar ? 1 : 0;
-    out->created_during_coof_recalc = src.created_during_coof_recalc ? 1 : 0;
-    out->coof_born_at_close_recalc = src.coof_born_at_close_recalc ? 1 : 0;
-    out->coof_born_mid_bar = src.coof_born_mid_bar ? 1 : 0;
+    out->created_during_coof_recalc = src.birth.from_fill() ? 1 : 0;
+    out->coof_born_at_close_recalc = src.birth.at_terminal_fill() ? 1 : 0;
+    out->coof_born_mid_bar = compat::pine::historical_cascade_reach(src) ? 1 : 0;
     out->coof_cascade_seg_i = (int32_t)src.coof_cascade_seg_i;
     out->coof_cascade_inflight_fires = src.coof_cascade_inflight_fires ? 1 : 0;
     out->created_position_side = (int32_t)src.created_position_side;
@@ -106,12 +106,12 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->signal_close_mc_fill_seq = src.signal_close_mc_fill_seq;
     out->signal_close_mc_remaining_qty = src.signal_close_mc_remaining_qty;
     copy_str(src.comment, out->comment, &out->comment_truncated, &out->comment_hash64);
-    out->requested_partial = src.requested_partial ? 1 : 0;
-    out->full_percent_exit_request = src.full_percent_exit_request ? 1 : 0;
+    out->requested_partial = src.quantity_request.is_partial(1e-9, 1e-9) ? 1 : 0;
+    out->full_percent_exit_request = src.quantity_request.requests_all() ? 1 : 0;
     out->pooc_global_full_exit_dynamic_qty = src.pooc_global_full_exit_dynamic_qty ? 1 : 0;
     out->pooc_global_full_exit_tracks_bound_adds = src.pooc_global_full_exit_tracks_bound_adds ? 1 : 0;
     out->pooc_global_full_exit_bound_add = src.pooc_global_full_exit_bound_add ? 1 : 0;
-    out->created_while_in_position = src.created_while_in_position ? 1 : 0;
+    out->created_while_in_position = src.type == OrderType::EXIT && src.created_position_side != PositionSide::FLAT ? 1 : 0;
     out->sbmt_member = src.sbmt_member ? 1 : 0;
     out->sbmt_own_qty = src.sbmt_own_qty;
     out->sbmt_tx_qty = src.sbmt_tx_qty;
@@ -130,6 +130,26 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->suppressed_close_consumed_ledger_qty = src.suppressed_close_consumed_ledger_qty;
     out->suppressed_close_retired_ledger_qty = src.suppressed_close_retired_ledger_qty;
     out->short_seed_collision_role = (int32_t)src.short_seed_collision_role;
+    out->replaced_order_incarnation = src.replaced_order_incarnation;
+    out->birth_timestamp = src.birth.timestamp();
+    out->birth_cause = (int32_t)src.birth.cause();
+    out->birth_bar = src.birth.bar();
+    out->birth_cursor_domain = (int32_t)src.birth.cursor().domain();
+    out->birth_cursor_position = (int32_t)src.birth.cursor().position();
+    out->birth_cursor_index = src.birth.cursor().index();
+    out->birth_cursor_count = src.birth.cursor().count();
+    out->birth_cursor_price = src.birth.cursor_price();
+    out->birth_first_fill = src.birth.first_fill();
+    out->birth_last_fill = src.birth.last_fill();
+    out->birth_evaluation_ordinal = src.birth.evaluation_ordinal();
+    out->pine_birth_reach = (int32_t)src.pine_birth_reach;
+    out->quantity_intent_kind = src.quantity_request.intent() ? static_cast<uint64_t>(src.quantity_request.intent()->kind()) + 1 : 0;
+    out->quantity_intent_units = src.quantity_request.intent() && src.quantity_request.intent()->kind() == QuantityIntent::Kind::Units ? src.quantity_request.intent()->units() : 0.0;
+    out->quantity_intent_numerator = src.quantity_request.intent() && src.quantity_request.intent()->kind() == QuantityIntent::Kind::Fraction ? src.quantity_request.intent()->numerator() : 0.0;
+    out->quantity_intent_denominator = src.quantity_request.intent() && src.quantity_request.intent()->kind() == QuantityIntent::Kind::Fraction ? src.quantity_request.intent()->denominator() : 0.0;
+    out->quantity_reservation_present = src.quantity_request.reservation().has_value() ? 1 : 0;
+    out->quantity_reservation_units = src.quantity_request.reservation() ? src.quantity_request.reservation()->units : 0.0;
+    out->quantity_reservation_basis_units = src.quantity_request.reservation() ? src.quantity_request.reservation()->basis_units : 0.0;
 }
 
 namespace {
@@ -247,6 +267,26 @@ const pf_field_desc_t kLayout[] = {
     PF_PO_FIELD(suppressed_close_consumed_ledger_qty, "double"),
     PF_PO_FIELD(suppressed_close_retired_ledger_qty, "double"),
     PF_PO_FIELD(short_seed_collision_role, "int32_t"),
+    PF_PO_FIELD(replaced_order_incarnation, "uint64_t"),
+    PF_PO_FIELD(birth_timestamp, "int64_t"),
+    PF_PO_FIELD(birth_cause, "int32_t"),
+    PF_PO_FIELD(birth_bar, "int32_t"),
+    PF_PO_FIELD(birth_cursor_domain, "int32_t"),
+    PF_PO_FIELD(birth_cursor_position, "int32_t"),
+    PF_PO_FIELD(birth_cursor_index, "int32_t"),
+    PF_PO_FIELD(birth_cursor_count, "int32_t"),
+    PF_PO_FIELD(birth_cursor_price, "double"),
+    PF_PO_FIELD(birth_first_fill, "uint64_t"),
+    PF_PO_FIELD(birth_last_fill, "uint64_t"),
+    PF_PO_FIELD(birth_evaluation_ordinal, "uint64_t"),
+    PF_PO_FIELD(pine_birth_reach, "int32_t"),
+    PF_PO_FIELD(quantity_intent_kind, "uint64_t"),
+    PF_PO_FIELD(quantity_intent_units, "double"),
+    PF_PO_FIELD(quantity_intent_numerator, "double"),
+    PF_PO_FIELD(quantity_intent_denominator, "double"),
+    PF_PO_FIELD(quantity_reservation_present, "uint8_t"),
+    PF_PO_FIELD(quantity_reservation_units, "double"),
+    PF_PO_FIELD(quantity_reservation_basis_units, "double"),
 };
 
 #undef PF_PO_FIELD

@@ -1,4 +1,6 @@
 set(TEST_SOURCES
+    test_pending_order_core
+    test_pending_quantity_intent
     test_bulk_preflight
     test_opening_obligation
     test_high_value_price_admission
@@ -78,6 +80,8 @@ set(TEST_SOURCES
     test_engine_risk
     test_strategy_oca
     test_pending_order_identity
+    test_pending_placement_receipts
+    test_order_birth_provenance
     test_oca_raw_pyramid_add
     test_strategy_pyramiding
     test_pyramiding_count_partial_drain

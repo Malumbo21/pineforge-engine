@@ -86,9 +86,9 @@ void hash_str_set(Fnv& f, const std::unordered_set<std::string>& s) {
 
 uint64_t BacktestEngine::broker_state_hash() const {
     Fnv f;
-    // v4 adds explicit Pine order-priority attachment and configuration.
+    // v5 hashes typed request/reservation, generic predecessor and immutable birth.
     // It is a serialization boundary, independent of the public C ABI version.
-    f.s("pineforge-broker-state/v4");
+    f.s("pineforge-broker-state/v5");
 
     // --- Position core ---
     f.i(static_cast<int64_t>(position_side_));
@@ -191,7 +191,18 @@ uint64_t BacktestEngine::broker_state_hash() const {
         f.b(o.over_pyramiding_cap_at_placement);
         f.b(o.affordability_close_only);
         f.i(static_cast<int64_t>(o.created_position_cycle_seq));
-        f.b(o.requested_partial); f.b(o.full_percent_exit_request);
+        f.b(o.quantity_request.intent().has_value());
+        if (const auto& intent = o.quantity_request.intent()) {
+            f.i(static_cast<int64_t>(intent->kind()));
+            if (intent->kind() == QuantityIntent::Kind::Units) f.d(intent->units());
+            else if (intent->kind() == QuantityIntent::Kind::Fraction) {
+                f.d(intent->numerator()); f.d(intent->denominator());
+            }
+        }
+        f.b(o.quantity_request.reservation().has_value());
+        if (const auto& reservation = o.quantity_request.reservation()) {
+            f.d(reservation->units); f.d(reservation->basis_units);
+        }
         // Round-14 signal-close-margin-call receipt (cross-bar: compared
         // against broker_fill_event_seq_ on the bar AFTER the one it was
         // stamped on).
@@ -223,25 +234,32 @@ uint64_t BacktestEngine::broker_state_hash() const {
         // Placement-side position/close provenance.
         f.i(static_cast<int64_t>(o.created_position_side));
         f.b(o.created_after_position_close_in_bar);
-        f.b(o.created_while_in_position);
         // Round-14 rounded-signal-cost decline receipt + its remaining qty.
         f.b(o.rounded_signal_cost_close_only);
         f.d(o.signal_close_mc_remaining_qty);
         // Same-id replacement / named-cancel recreate provenance
         // (clean-room two-call rules fail closed on these).
-        f.b(o.created_by_same_id_replacement);
+        f.u(o.replaced_order_incarnation);
         f.u(o.replaced_default_market_incarnation);
         f.b(o.declined_by_replaced_short_market);
-        f.u(o.replaced_exit_order_incarnation);
         f.u(o.recreated_after_named_cancelled_entry_incarnation);
         f.u(o.named_cancel_surviving_exit_incarnation);
         // calc_on_order_fills birth provenance and per-leg suppression
         // (decide which waypoints / legs the order may fill at).
         f.b(o.coof_suppress_stop_on_entry_bar);
         f.b(o.coof_suppress_limit_on_entry_bar);
-        f.b(o.created_during_coof_recalc);
-        f.b(o.coof_born_at_close_recalc);
-        f.b(o.coof_born_mid_bar);
+        f.i(static_cast<int64_t>(o.birth.cause()));
+        f.i(o.birth.bar());
+        f.i(o.birth.timestamp());
+        f.i(static_cast<int64_t>(o.birth.cursor().domain()));
+        f.i(static_cast<int64_t>(o.birth.cursor().position()));
+        f.i(o.birth.cursor().index());
+        f.i(o.birth.cursor().count());
+        f.d(o.birth.cursor_price());
+        f.u(o.birth.first_fill());
+        f.u(o.birth.last_fill());
+        f.u(o.birth.evaluation_ordinal());
+        f.i(static_cast<int64_t>(o.pine_birth_reach));
         f.i(static_cast<int64_t>(o.coof_cascade_seg_i));
         f.b(o.coof_cascade_inflight_fires);
         // Deferred close_all same-id stop preservation token.

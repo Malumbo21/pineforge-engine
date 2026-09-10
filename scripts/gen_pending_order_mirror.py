@@ -30,6 +30,7 @@ imported by scripts/check_broker_state_hash_coverage.py (``members()``).
 from __future__ import annotations
 
 import re
+import json
 import sys
 from pathlib import Path
 
@@ -55,6 +56,45 @@ TYPE_MAP: dict[str, tuple[str, str]] = {
     "OrderType": ("int32_t", "(int32_t)src.{m}"),
     "PositionSide": ("int32_t", "(int32_t)src.{m}"),
     "ShortSeedCollisionRole": ("int32_t", "(int32_t)src.{m}"),
+    "PineHistoricalBirthReach": ("int32_t", "(int32_t)src.{m}"),
+}
+# Public v1 is append-only. Removed native fields survive only as one-way
+# deprecated output projections at their original offsets.
+LEGACY_OUTPUTS = {
+    "created_during_coof_recalc": "src.birth.from_fill() ? 1 : 0",
+    "coof_born_at_close_recalc": "src.birth.at_terminal_fill() ? 1 : 0",
+    "coof_born_mid_bar": "compat::pine::historical_cascade_reach(src) ? 1 : 0",
+    "created_by_same_id_replacement": "src.type != OrderType::RAW_ORDER && src.replaced_order_incarnation != 0 ? 1 : 0",
+    "replaced_exit_order_incarnation": "src.type == OrderType::EXIT ? src.replaced_order_incarnation : 0",
+    "created_while_in_position": "src.type == OrderType::EXIT && src.created_position_side != PositionSide::FLAT ? 1 : 0",
+    "requested_partial": "src.quantity_request.is_partial(1e-9, 1e-9) ? 1 : 0",
+    "full_percent_exit_request": "src.quantity_request.requests_all() ? 1 : 0",
+}
+COMPOSITE_MAP = {
+    "QuantityRequest": [
+        ("intent_kind", "uint64_t", "src.{m}.intent() ? static_cast<uint64_t>(src.{m}.intent()->kind()) + 1 : 0"),
+        ("intent_units", "double", "src.{m}.intent() && src.{m}.intent()->kind() == QuantityIntent::Kind::Units ? src.{m}.intent()->units() : 0.0"),
+        ("intent_numerator", "double", "src.{m}.intent() && src.{m}.intent()->kind() == QuantityIntent::Kind::Fraction ? src.{m}.intent()->numerator() : 0.0"),
+        ("intent_denominator", "double", "src.{m}.intent() && src.{m}.intent()->kind() == QuantityIntent::Kind::Fraction ? src.{m}.intent()->denominator() : 0.0"),
+        ("reservation_present", "uint8_t", "src.{m}.reservation().has_value() ? 1 : 0"),
+        ("reservation_units", "double", "src.{m}.reservation() ? src.{m}.reservation()->units : 0.0"),
+        ("reservation_basis_units", "double", "src.{m}.reservation() ? src.{m}.reservation()->basis_units : 0.0"),
+    ],
+    "OrderBirth": [
+        # Start appended facts at the v1 struct's 8-byte boundary, preserving
+        # its trailing padding as well as all 108 field offsets.
+        ("timestamp", "int64_t", "src.{m}.timestamp()"),
+        ("cause", "int32_t", "(int32_t)src.{m}.cause()"),
+        ("bar", "int32_t", "src.{m}.bar()"),
+        ("cursor_domain", "int32_t", "(int32_t)src.{m}.cursor().domain()"),
+        ("cursor_position", "int32_t", "(int32_t)src.{m}.cursor().position()"),
+        ("cursor_index", "int32_t", "src.{m}.cursor().index()"),
+        ("cursor_count", "int32_t", "src.{m}.cursor().count()"),
+        ("cursor_price", "double", "src.{m}.cursor_price()"),
+        ("first_fill", "uint64_t", "src.{m}.first_fill()"),
+        ("last_fill", "uint64_t", "src.{m}.last_fill()"),
+        ("evaluation_ordinal", "uint64_t", "src.{m}.evaluation_ordinal()"),
+    ],
 }
 STRING_TYPES = frozenset({"std::string"})
 
@@ -159,7 +199,7 @@ def classify(ms: list[tuple[str, str]], waivers: dict[str, str]):
     for t, n in ms:
         if n in waivers:
             waived.append((t, n, waivers[n]))
-        elif t in STRING_TYPES or t in TYPE_MAP:
+        elif t in STRING_TYPES or t in TYPE_MAP or t in COMPOSITE_MAP:
             mirrored.append((t, n))
         else:
             _fail(f"member {n} has unmapped type {t}; add it to TYPE_MAP or "
@@ -172,8 +212,27 @@ def generate() -> tuple[str, str]:
     fields: list[str] = []
     copies: list[str] = []
     descs: list[tuple[str, str]] = [("struct_version", "uint32_t"), ("size", "uint32_t")]
-    for t, m in mirrored:
-        if t in STRING_TYPES:
+    prefix = json.loads((ROOT / "scripts/pending_order_v1_prefix.json").read_text())["members"]
+    native = dict((name, kind) for kind, name in mirrored)
+    for kind, name in prefix:
+        if name not in LEGACY_OUTPUTS and native.get(name) != kind:
+            _fail(f"public v1 prefix member {name} needs an explicit derived projection")
+    prefix_names = {name for _, name in prefix}
+    ordered = prefix + [(kind, name) for kind, name in mirrored if name not in prefix_names]
+    for t, m in ordered:
+        if m in LEGACY_OUTPUTS:
+            ct = TYPE_MAP[t][0]
+            fields.append(f"    {ct} {m};  // deprecated, derived output only")
+            copies.append(f"    out->{m} = {LEGACY_OUTPUTS[m]};")
+            descs.append((m, ct))
+        elif t in COMPOSITE_MAP:
+            for suffix, ct, expr in COMPOSITE_MAP[t]:
+                prefix = "quantity" if t == "QuantityRequest" else m
+                name = f"{prefix}_{suffix}"
+                fields.append(f"    {ct} {name};")
+                copies.append(f"    out->{name} = {expr.format(m=m)};")
+                descs.append((name, ct))
+        elif t in STRING_TYPES:
             fields += [f"    char {m}[{STR_CAP}];",
                        f"    uint8_t {m}_truncated;",
                        f"    uint64_t {m}_hash64;"]

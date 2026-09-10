@@ -390,17 +390,13 @@ public:
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].created_after_position_close_in_bar = !s.pending_orders_[0].created_after_position_close_in_bar;
             }},
-            {"pending_orders_[].created_while_in_position", [](Probe& s) {
-                if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].created_while_in_position = !s.pending_orders_[0].created_while_in_position;
-            }},
             {"pending_orders_[].rounded_signal_cost_close_only", [](Probe& s) {
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].rounded_signal_cost_close_only = !s.pending_orders_[0].rounded_signal_cost_close_only;
             }},
-            {"pending_orders_[].created_by_same_id_replacement", [](Probe& s) {
+            {"pending_orders_[].replaced_order_incarnation", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].created_by_same_id_replacement = !s.pending_orders_[0].created_by_same_id_replacement;
+                    ++s.pending_orders_[0].replaced_order_incarnation;
             }},
             {"pending_orders_[].declined_by_replaced_short_market", [](Probe& s) {
                 if (!s.pending_orders_.empty())
@@ -414,17 +410,19 @@ public:
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].coof_suppress_limit_on_entry_bar = !s.pending_orders_[0].coof_suppress_limit_on_entry_bar;
             }},
-            {"pending_orders_[].created_during_coof_recalc", [](Probe& s) {
+            {"pending_orders_[].birth.fill_origin", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].created_during_coof_recalc = !s.pending_orders_[0].created_during_coof_recalc;
+                    s.pending_orders_[0].birth = OrderBirth::fill_evaluation(0, 0,
+                        BirthCursor::point(BirthCursorDomain::HistoricalPath, 0, 4), 100, 1, 1, 1);
             }},
-            {"pending_orders_[].coof_born_at_close_recalc", [](Probe& s) {
+            {"pending_orders_[].birth.terminal_cursor", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].coof_born_at_close_recalc = !s.pending_orders_[0].coof_born_at_close_recalc;
+                    s.pending_orders_[0].birth = OrderBirth::fill_evaluation(0, 0,
+                        BirthCursor::point(BirthCursorDomain::HistoricalPath, 3, 4), 100, 1, 1, 1);
             }},
-            {"pending_orders_[].coof_born_mid_bar", [](Probe& s) {
+            {"pending_orders_[].pine_birth_reach", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].coof_born_mid_bar = !s.pending_orders_[0].coof_born_mid_bar;
+                    s.pending_orders_[0].pine_birth_reach = PineHistoricalBirthReach::ExtremeWaypoints;
             }},
             {"pending_orders_[].coof_cascade_inflight_fires", [](Probe& s) {
                 if (!s.pending_orders_.empty())
@@ -487,9 +485,6 @@ public:
             }},
             {"pending_orders_[].replaced_default_market_incarnation", [](Probe& s) {
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].replaced_default_market_incarnation += 1;
-            }},
-            {"pending_orders_[].replaced_exit_order_incarnation", [](Probe& s) {
-                if (!s.pending_orders_.empty()) s.pending_orders_[0].replaced_exit_order_incarnation += 1;
             }},
             {"pending_orders_[].recreated_after_named_cancelled_entry_incarnation", [](Probe& s) {
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].recreated_after_named_cancelled_entry_incarnation += 1;

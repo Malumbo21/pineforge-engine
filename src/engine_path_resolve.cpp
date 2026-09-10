@@ -195,7 +195,7 @@ bool opposing_stop_entry_hits_first(const Bar& bar, bool high_first,
     const PendingOrder& current = orders[current_idx];
     auto deferred_at_consumed_close = [&](const PendingOrder& order) {
         return current_bar_index >= 0
-            && order.coof_born_at_close_recalc
+            && order.birth.at_terminal_fill()
             && order.created_bar == current_bar_index;
     };
     if (deferred_at_consumed_close(current)) return false;
@@ -252,7 +252,7 @@ DualEntryStopPathWinner dual_entry_stop_path_winner(const Bar& bar, bool high_fi
     const PendingOrder* short_ord = nullptr;
     for (const PendingOrder& o : orders) {
         if (current_bar_index >= 0
-            && o.coof_born_at_close_recalc
+            && o.birth.at_terminal_fill()
             && o.created_bar == current_bar_index) {
             continue;
         }

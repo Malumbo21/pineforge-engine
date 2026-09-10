@@ -243,7 +243,7 @@ private:
                 // reservation decision runs.
                 for (auto& order : pending_orders_) {
                     if (order.id == "COOF_ADD" + suffix) {
-                        order.created_during_coof_recalc = true;
+                        order.birth = OrderBirth::fill_evaluation(0, 0, BirthCursor::point(BirthCursorDomain::HistoricalPath, 0, 4), 100.0, 1, 1, 1);
                     }
                 }
                 break;

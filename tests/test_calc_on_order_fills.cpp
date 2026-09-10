@@ -941,8 +941,8 @@ public:
                     && order.id == "__close__B") {
                     ++deferred_close_count;
                     deferred_close_born_at_c =
-                        order.created_during_coof_recalc
-                        && order.coof_born_at_close_recalc;
+                        order.birth.from_fill()
+                        && order.birth.at_terminal_fill();
                 }
             }
             const auto ledger = id_unclosed_qty_.find("B");

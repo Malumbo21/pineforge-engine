@@ -191,6 +191,8 @@ def _class_fields(src: str, name: str) -> dict[str, str]:
         if ch == ";":
             decl = " ".join(statement.split())
             statement = ""
+            if re.fullmatch(re.escape(name) + r"\(\)\s*=\s*default", decl):
+                continue
             if decl and not decl.startswith("using "):
                 match = re.fullmatch(r"((?:(?:static|constexpr|const)\s+)*[\w:<>]+)\s+(\w+)(?:\s*=\s*[^,]+)?", decl)
                 if not match or match[2] in fields:
@@ -339,8 +341,78 @@ def _intraday_coverage(policy: str, budget: str, obligation: str, src: str) -> N
         raise ValueError("intraday hash block must be unconditional at broker_state_hash function scope")
 
 
+def _quantity_request_coverage(quantity: str, source: str) -> None:
+    quantity = _strip_cpp_comments(quantity)
+    if _class_fields(quantity, "QuantityIntent") != {"value_": "Value"}:
+        raise ValueError("QuantityIntent data changed; update its complete hash encoding")
+    if _class_fields(quantity, "QuantityRequest") != {
+            "intent_": "std::optional<QuantityIntent>",
+            "reservation_": "std::optional<QuantityReservation>"}:
+        raise ValueError("QuantityRequest data changed; update its complete hash encoding")
+    if struct_members(quantity, "Units") != [("double", "amount")]:
+        raise ValueError("Units intent fields changed")
+    if struct_members(quantity, "Fraction") != [("double", "numerator"), ("double", "denominator")]:
+        raise ValueError("Fraction intent fields changed")
+    if struct_members(quantity, "QuantityReservation") != [("double", "units"), ("double", "basis_units")]:
+        raise ValueError("QuantityReservation fields changed")
+    if not re.search(r"struct\s+All\s*\{\s*\}", quantity):
+        raise ValueError("All intent must have no numeric payload")
+    if not re.search(r"enum\s+class\s+QuantityIntentKind\s*\{\s*Units,\s*Fraction,\s*All\s*\}", quantity):
+        raise ValueError("QuantityIntentKind hash encoding changed")
+    if not re.search(r"using\s+Value\s*=\s*std::variant<Units,\s*Fraction,\s*All>", quantity):
+        raise ValueError("QuantityIntent variant discriminator changed")
+    loop = _collection_loop_body(source, "pending_orders_", "o")
+    expected = """f.b(o.quantity_request.intent().has_value());
+        if (const auto& intent = o.quantity_request.intent()) {
+            f.i(static_cast<int64_t>(intent->kind()));
+            if (intent->kind() == QuantityIntent::Kind::Units) f.d(intent->units());
+            else if (intent->kind() == QuantityIntent::Kind::Fraction) {
+                f.d(intent->numerator()); f.d(intent->denominator());
+            }
+        }
+        f.b(o.quantity_request.reservation().has_value());
+        if (const auto& reservation = o.quantity_request.reservation()) {
+            f.d(reservation->units); f.d(reservation->basis_units);
+        }"""
+    compact = re.sub(r"\s+", "", loop)
+    folded = re.sub(r"\s+", "", expected)
+    if compact.count(folded) != 1:
+        raise ValueError("quantity intent/reservation hash requires every field and presence discriminator")
+    prefix = compact[:compact.index(folded)]
+    if prefix.count("{") != prefix.count("}"):
+        raise ValueError("quantity request hash must be unconditional inside its order loop")
+
+def _birth_coverage(header: str, source: str) -> None:
+    header = _strip_cpp_comments(header)
+    expected = {
+        "BirthCursor": {"domain_": "BirthCursorDomain", "position_": "BirthCursorPosition", "index_": "int", "count_": "int"},
+        "OrderBirth": {"cause_": "OrderBirthCause", "bar_": "int", "timestamp_": "int64_t", "cursor_": "BirthCursor", "cursor_price_": "double", "first_fill_": "uint64_t", "last_fill_": "uint64_t", "evaluation_ordinal_": "uint64_t"},
+    }
+    for name, fields in expected.items():
+        if _class_fields(header, name) != fields:
+            raise ValueError(f"{name} fields changed; classify every nested birth fact")
+    loop = _collection_loop_body(source, "pending_orders_", "o")
+    compact = re.sub(r"\s+", "", loop)
+    expressions = [
+        "f.i(static_cast<int64_t>(o.birth.cause()));",
+        "f.i(o.birth.bar());", "f.i(o.birth.timestamp());",
+        "f.i(static_cast<int64_t>(o.birth.cursor().domain()));",
+        "f.i(static_cast<int64_t>(o.birth.cursor().position()));",
+        "f.i(o.birth.cursor().index());", "f.i(o.birth.cursor().count());",
+        "f.d(o.birth.cursor_price());", "f.u(o.birth.first_fill());",
+        "f.u(o.birth.last_fill());", "f.u(o.birth.evaluation_ordinal());",
+        "f.i(static_cast<int64_t>(o.pine_birth_reach));",
+    ]
+    expected = "".join(expressions)
+    if compact.count(expected) != 1:
+        raise ValueError("birth facts and Pine reach require one complete contiguous hash block")
+    prefix = compact[:compact.index(expected)]
+    if prefix.count("{") != prefix.count("}"):
+        raise ValueError("birth facts must be unconditionally hashed at order-loop scope")
+
+
 def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
-    """The v4 layout and serialized-state contracts must advance together.
+    """The v5 layout and serialized-state contracts must advance together.
 
     Pin the actual hash entry points, rather than accepting a version string
     mentioned in a comment or an unrelated helper. Public C ABI versions have
@@ -348,18 +420,18 @@ def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
     """
     header = _strip_cpp_comments(header)
     namespaces = re.findall(r"inline\s+namespace\s+(engine_script_run_v\d+)\s*\{", header)
-    if namespaces != ["engine_script_run_v4"]:
-        raise ValueError("BacktestEngine layout requires internal namespace engine_script_run_v4")
+    if namespaces != ["engine_script_run_v5", "engine_script_run_v5"]:
+        raise ValueError("PendingOrder and BacktestEngine layouts require internal namespace engine_script_run_v5")
     broker = _one_braced_body(source,
         r"uint64_t\s+BacktestEngine::broker_state_hash\(\)\s+const\s*\{", "broker hash")
-    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v4"\);', broker):
-        raise ValueError("broker hash must start with pineforge-broker-state/v4")
+    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v5"\);', broker):
+        raise ValueError("broker hash must start with pineforge-broker-state/v5")
     stream_body = _one_braced_body(_strip_cpp_comments(stream),
         r"uint64_t\s+BacktestEngine::stream_state_hash\(\)\s+const\s*\{", "stream hash")
     compact = re.sub(r"\s+", "", stream_body)
-    fold = "integer(4);integer(broker_state_hash());"
+    fold = "integer(5);integer(broker_state_hash());"
     if compact.count(fold) != 1:
-        raise ValueError("stream hash requires version 4 followed by the broker hash")
+        raise ValueError("stream hash requires version 5 followed by the broker hash")
     prefix = compact[:compact.index(fold)]
     if prefix.count("{") != prefix.count("}") or (prefix and prefix[-1] not in ";}"):
         raise ValueError("stream version fold must be unconditional at function scope")
@@ -374,7 +446,9 @@ def main(root: Path = ROOT) -> int:
     src = _strip_cpp_comments(src_raw)
     try:
         _runtime_version_coverage(hpp, src, (root / "src/engine_stream.cpp").read_text())
+        _birth_coverage((root / "include/pineforge/order_birth.hpp").read_text(), src)
         _opening_coverage((root / "include/pineforge/broker_events.hpp").read_text(), src)
+        _quantity_request_coverage((root / "include/pineforge/quantity_intent.hpp").read_text(), src)
         _intraday_coverage(
             (root / "include/pineforge/compat/pine/intraday_cap.hpp").read_text(),
             (root / "include/pineforge/compat/pine/intraday_order_budget.hpp").read_text(),
@@ -390,6 +464,9 @@ def main(root: Path = ROOT) -> int:
         return 1
     waivers = {k: v for k, v in all_waivers.items()
                if not k.startswith((PENDING_WAIVER_PREFIX, PYRAMID_WAIVER_PREFIX))}
+    if "pending_order.quantity_request" in all_waivers:
+        print("check_broker_state_hash_coverage: quantity_request cannot be waived", file=sys.stderr)
+        return 1
     po_waivers = {k[len(PENDING_WAIVER_PREFIX):]: v
                   for k, v in all_waivers.items() if k.startswith(PENDING_WAIVER_PREFIX)}
     pe_waivers = {k[len(PYRAMID_WAIVER_PREFIX):]: v

@@ -1,0 +1,53 @@
+# Pending-order placement and replacement facts
+
+`PendingOrder::replaced_order_incarnation` identifies the immediate live
+predecessor whose priority slot the newly accepted order retains. Zero means
+fresh construction. The new order still receives its own fresh `incarnation`;
+`created_seq` remains its scheduling priority, not identity.
+
+The receipt is populated by high-level MARKET/ENTRY, RAW, and primary EXIT
+replacement. Named cancel followed by recreation is fresh; its separate
+cancel/recreate receipt does not become a replacement. When a Pine exit
+reissue materializes multiple legs, the primary leg inherits the preceding
+primary's priority and predecessor; additional legs are fresh. This receipt
+does not claim to enumerate all sibling objects erased by that reissue.
+
+The former native `created_by_same_id_replacement` Boolean and redundant
+`replaced_exit_order_incarnation` scalar are removed. Replacement readers use
+the authoritative predecessor. The conditional
+`replaced_default_market_incarnation` remains a Pine qualification receipt:
+it records additional predecessor kind, sizing, side, source-bar and cycle
+conditions that generic replacement identity alone cannot establish later.
+
+The former `created_while_in_position` Boolean is also removed. Its production
+meaning was EXIT-only: `strategy.exit` derived it from the same `effectively_flat`
+calculation used for `created_position_side`; a positive deferred close used the
+nonflat side it targeted. EXIT consumers now read that existing placement side.
+The two non-EXIT checks were vacuous because their producers always left the
+old Boolean false; those checks are removed without requiring flat placement.
+
+`created_position_side` is not renamed or reinterpreted as a universal physical
+snapshot. MARKET/ENTRY/RAW capture physical exposure; a Pine EXIT captures
+exposure after earlier same-evaluation close claims. The physical position can
+still be open when such an EXIT captures FLAT. Existing cycle/carry fields and
+their scopes are unchanged. A complete physical placement/close-claim model is
+separate work.
+
+The public size-aware `pf_pending_order_v1_t` retains every existing field at
+its original offset. Its old replacement Boolean, EXIT predecessor scalar and
+in-position Boolean are deprecated derived **output projections**, never core
+state or inputs. The legacy RAW projections remain false/zero; the appended
+`replaced_order_incarnation` reports the true RAW predecessor. Dynamic-layout
+readers can discover the new field; older prefix readers retain their layout.
+The generator emits these projections explicitly without native storage or a
+readback path. Native hashing includes the predecessor once and placement side
+once; removed redundant fields need no independent hash state.
+
+This removes two of the 32 direct PendingOrder Boolean members, leaving 30 in
+this component. It replaces one bit with factual identity and removes one
+duplicate placement value; it is not a Boolean wrapper or a renamed policy
+mask. Existing Pine priority/admission/close policies still read these facts
+and retain their existing qualification rules. Public C ABI version 4 and
+pending mirror version 1 remain unchanged. Final aggregate internal C++/hash
+versioning and stale-object pairing are owned by the integrated refactor;
+this component must not be published separately without that boundary.

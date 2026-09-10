@@ -224,7 +224,7 @@ public:
             }
             pending_book_size_on_reissue = pending_orders_.size();
             fresh_parent_shape_seen = parent != nullptr && child != nullptr
-                && !parent->created_by_same_id_replacement
+                && (parent->replaced_order_incarnation == 0)
                 && child->created_seq < parent->created_seq
                 && child->created_bar == parent->created_bar;
             parent_cancel_provenance_seen = parent != nullptr
@@ -247,13 +247,13 @@ public:
                     < std::numeric_limits<uint64_t>::max()
                 && child->incarnation == parent->incarnation + 1;
             child_reissue_provenance_seen = child != nullptr
-                && child->created_by_same_id_replacement;
+                && (child->replaced_order_incarnation != 0);
             child_replacement_token_exact = child != nullptr
                 && parent != nullptr
                 && surviving_child_incarnation_at_cancel != 0
                 && parent->named_cancel_surviving_exit_incarnation
                     == surviving_child_incarnation_at_cancel
-                && child->replaced_exit_order_incarnation
+                && child->replaced_order_incarnation
                     == surviving_child_incarnation_at_cancel;
         } else if (bar_index_ == 2) {
             position_seen_on_trigger_bar = signed_position_size();
@@ -401,8 +401,7 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
     child.type = OrderType::EXIT;
     child.created_seq = 1;
     child.incarnation = 12;
-    child.created_by_same_id_replacement = true;
-    child.replaced_exit_order_incarnation = 10;
+    child.replaced_order_incarnation = 10;
     child.created_bar = 1;
     child.created_position_side = PositionSide::FLAT;
     child.qty = kNaN;
@@ -459,7 +458,7 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
             context.stream_idle = false;
             break;
         case SortMutation::ParentReplacement:
-            parent.created_by_same_id_replacement = true;
+            parent.replaced_order_incarnation = 1;
             break;
         case SortMutation::MissingCancelToken:
             parent.recreated_after_named_cancelled_entry_incarnation = 0;
@@ -468,7 +467,7 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
             parent.named_cancel_surviving_exit_incarnation = 0;
             break;
         case SortMutation::MismatchedChildReplacementToken:
-            child.replaced_exit_order_incarnation = 8;
+            child.replaced_order_incarnation = 8;
             break;
         case SortMutation::CancelTokenEqualsParent:
             parent.recreated_after_named_cancelled_entry_incarnation =
@@ -509,10 +508,10 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
             child.qty = 1.0;
             break;
         case SortMutation::FreshChild:
-            child.created_by_same_id_replacement = false;
+            child.replaced_order_incarnation = 0;
             break;
         case SortMutation::ChildRequestedPartial:
-            child.requested_partial = true;
+            child.quantity_request.request(QuantityIntent::fraction(50.0, 100.0));
             break;
         case SortMutation::ChildPercentPartial:
             child.qty_percent = 50.0;

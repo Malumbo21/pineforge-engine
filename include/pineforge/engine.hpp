@@ -13,6 +13,9 @@
 #include "na.hpp"
 #include "bar.hpp"
 #include "broker_events.hpp"
+#include "quantity_intent.hpp"
+#include "order_birth.hpp"
+#include "compat/pine/order_birth.hpp"
 #include "compat/pine/intraday_cap.hpp"
 #include "compat/pine/order_priority.hpp"
 #include "series.hpp"
@@ -399,6 +402,9 @@ enum class ShortSeedCollisionRole : uint8_t {
     FINAL_SHORT,
 };
 
+// PendingOrder crosses out-of-line helper boundaries independently of the
+// engine class, so its changed layout must carry the same internal epoch.
+inline namespace engine_script_run_v5 {
 struct PendingOrder {
     std::string id;
     std::string from_entry;    // for exit orders
@@ -426,12 +432,12 @@ struct PendingOrder {
     // which intentionally survives same-id replacement to keep broker ordering
     // stable, incarnation is never copied or reused by a replacement.
     uint64_t incarnation = 0;
-    // True when this pending object was created by reissuing an id that was
-    // already live. The fresh incarnation above identifies the new call, but
-    // created_seq intentionally retains the replaced order's broker priority.
-    // Exact clean-room two-call rules must fail closed on this provenance
-    // rather than mistaking retained priority for current source order.
-    bool created_by_same_id_replacement = false;
+    // Exact live object whose priority slot this newly accepted order replaces.
+    // Fresh and cancel-then-recreate orders carry zero. This is causal identity,
+    // not a Boolean source-shape label: every entry, RAW and primary exit path
+    // records its immediate predecessor before that object is erased. Reissued
+    // extra exit legs are fresh objects and do not share the primary receipt.
+    uint64_t replaced_order_incarnation = 0;
     // Exact default MARKET replaced on this source bar. A priced order or
     // a prior-bar carry with the same id does not prove this call topology.
     uint64_t replaced_default_market_incarnation = 0;
@@ -440,11 +446,6 @@ struct PendingOrder {
     // Mark only the exact later MARKET objects after that fill; a reissue
     // creates a fresh object, and cancelled siblings spend no broker event.
     bool declined_by_replaced_short_market = false;
-    // For a strategy.exit replacement, the unique incarnation of the exact
-    // matching (id, from_entry) EXIT object it replaced. Zero for a fresh
-    // child. This correlates retained broker priority with a concrete prior
-    // child rather than a replacement-shaped call sequence created later.
-    uint64_t replaced_exit_order_incarnation = 0;
     // Incarnation of the live priced ENTRY removed by strategy.cancel(id)
     // earlier in the same source evaluation, copied only onto the first fresh
     // same-id strategy.entry call and then consumed. Zero means there is no
@@ -466,32 +467,14 @@ struct PendingOrder {
     // suppressed leg carries into the next bar as an ordinary order.
     bool coof_suppress_stop_on_entry_bar = false;
     bool coof_suppress_limit_on_entry_bar = false;
-    // True only when this order was emitted by a historical
-    // calc_on_order_fills execution. POOC must not confuse that intrabar
-    // origin with an order emitted by the ordinary close-time execution.
-    bool created_during_coof_recalc = false;
-    // Stronger provenance for orders born specifically in the recalculation
-    // triggered by a close-point (C) fill. C has already been consumed: no
-    // order from that recalculation may refill at C or inspect the elapsed
-    // wick. A POOC market instruction has missed its only eligible close and
-    // expires unless an ordinary execution reissues it; priced GTC orders
-    // become ordinary carried orders on the next bar.
-    bool coof_born_at_close_recalc = false;
-    // KI-67 cascade provenance: true when this order was placed by a MID-BAR
-    // fill recalc (a recalc chain that did not own the first fill event at the
-    // bar-open tick). Such "cascade" orders are eligible ONLY at the remaining
-    // EXTREME waypoints (W1/W2) of the historical 4-tick path — never
-    // intra-segment at an exact level and never at C — for the bar they are
-    // born on; at bar end they convert to ordinary resting orders. Orders born
-    // in that first BAR-OPEN recalc (or resting at bar start) keep standard
-    // exact-level semantics and leave this false. Scoped to the historical
-    // path; the magnifier path (bar_magnifier_enabled_) ignores this bit.
-    //
-    // ENTRY cascade orders use the plain "extreme-waypoint only" reach above.
-    // strategy.exit cascade orders follow the finer KI-67 Model S rule
-    // ("R-cascade-gapjump") captured by the two fields below.
-    bool coof_born_mid_bar = false;
-    // KI-67 exit cascade (Model S). Set at birth for a coof_born_mid_bar
+    // Immutable evaluation/fill origin, captured once for this incarnation.
+    // Historical extreme-only/trailing permissions live in compat::pine.
+    OrderBirth birth;
+    // Disclosed Pine historical fill permission. Trigger fields can be
+    // neutralized before deferred compaction; those mutations must not
+    // rewrite a birth-time permission or masquerade as a different origin.
+    PineHistoricalBirthReach pine_birth_reach = PineHistoricalBirthReach::Standard;
+    // KI-67 exit cascade (Model S). Set at birth for a Pine historical-cascade
     // strategy.exit order: the historical-path LEG index (0 = O->W1, 1 = W1->W2,
     // 2 = W2->C) the triggering intrabar fill (coof_cursor_price_ "ap") landed
     // on — the "in-flight" leg. -1 when the order is not a mid-bar cascade exit,
@@ -506,6 +489,9 @@ struct PendingOrder {
     // 0 and gets its gap attempt at W1. Marketable STOP never uses that extension.
     // Otherwise subsequent legs exact-fill, while a terminal/off-path order rolls.
     bool coof_cascade_inflight_fires = false;
+    // Placement exposure used by this order. ENTRY/RAW capture the physical
+    // side; Pine EXIT captures the exposure after earlier same-evaluation
+    // close claims. This is not a universal physical-position snapshot.
     PositionSide created_position_side = PositionSide::FLAT;
     // Monotonic identity of the live position instance at placement. Side
     // alone is insufficient: a resting order can survive LONG -> SHORT ->
@@ -869,10 +855,10 @@ struct PendingOrder {
     double signal_close_mc_remaining_qty =
         std::numeric_limits<double>::quiet_NaN();
     std::string comment;       // order comment for trade reporting
-    bool requested_partial = false;         // true iff caller passed qty_percent < 100
-    // Preserve the original default/full-percent EXIT call before reservation
-    // normalization can turn a sub-lot partial request into a full-size order.
-    bool full_percent_exit_request = false;
+    // Original exit amount and its latest resolved reservation basis. qty and
+    // qty_percent remain the executable/reserved values used by existing Pine
+    // reservation rules; their later reduction cannot rewrite caller intent.
+    QuantityRequest quantity_request;
     // Narrow POOC global-full-exit candidate. ``qty`` deliberately keeps the
     // normal finite reservation so sibling exits see and respect its capacity.
     // At fill time this bit upgrades that one reservation to the full live
@@ -890,7 +876,6 @@ struct PendingOrder {
     // tracking global EXIT is placed. Same-id replacement constructs a fresh
     // PendingOrder and therefore drops the relation; later orders never get it.
     bool pooc_global_full_exit_bound_add = false;
-    bool created_while_in_position = false;  // true if position was open when order was placed
     // round 8 family S — TradingView's same-bar MARKET transaction (ledger
     // note log-20260905t143024z-76025577; 15 lab tv sensor tapes famS-dbl-*,
     // famS-rev-plus-close, famS-adm-{es,nq}-{1e6,500k} on CME_MINI:ES1!/NQ1!
@@ -1050,6 +1035,8 @@ struct PendingOrder {
         ShortSeedCollisionRole::NONE;
 };
 
+ } // inline namespace engine_script_run_v5 (PendingOrder)
+
 // default_qty_type constants (matches TradingView)
 enum class QtyType { FIXED = 0, PERCENT_OF_EQUITY = 1, CASH = 2 };
 
@@ -1103,10 +1090,10 @@ struct StrategyOverrides {
 
 // The C++ subclass contract is internal, unlike pineforge.h's stable C ABI.
 // Changing its layout or vtable requires all generated/native C++ objects to be rebuilt.
-// v4 adds detached Pine order-priority ownership to the v3 cap boundary.
+// v5 integrates typed quantity, replacement identity and causal order birth.
 // Version the mangled class name so older headers' member offsets/vtable cannot
 // silently bind out-of-line members of this different object layout.
-inline namespace engine_script_run_v4 {
+inline namespace engine_script_run_v5 {
 class BacktestEngine {
 protected:
     // --- Position state ---
@@ -2106,7 +2093,7 @@ protected:
             || order.created_bar != bar_index_
             || order.created_position_side != PositionSide::FLAT
             || order.created_after_position_close_in_bar
-            || order.created_by_same_id_replacement
+            || (order.replaced_order_incarnation != 0)
             || order.oca_type != 0 || !order.oca_name.empty()
             || position_side_ != PositionSide::FLAT
             || position_entry_count_ != 0 || !pyramid_entries_.empty()
@@ -2150,7 +2137,7 @@ protected:
             || order.created_bar != bar_index_
             || order.created_position_side != PositionSide::FLAT
             || order.created_after_position_close_in_bar
-            || order.created_during_coof_recalc || order.created_by_same_id_replacement
+            || order.birth.from_fill() || (order.replaced_order_incarnation != 0)
             || !order.oca_name.empty() || order.oca_type != 0
             || position_side_ != PositionSide::FLAT || position_entry_count_ != 0
             || !pyramid_entries_.empty() || pyramiding_ < 0 || pyramiding_ > 1
@@ -3162,7 +3149,7 @@ protected:
     // KI-67: true only while the active fill recalc owns the FIRST fill event
     // at the bar-open tick (O). Orders placed while this holds keep STANDARD
     // exact-level semantics. Later fills at that same O, like fills at every
-    // other path point, are MID-BAR cascades (PendingOrder::coof_born_mid_bar).
+    // other path point, are MID-BAR cascades (the Pine historical cascade permission).
     bool coof_recalc_at_bar_open_ = false;
     // True only while executing a fill recalc triggered by a later fill event
     // at O, after the first O fill has already consumed bar-open provenance.
@@ -4409,6 +4396,7 @@ private:
     // Shared by run(), run_simple_bar_loop, and the no-magnifier aggregation
     // path. The magnifier tick loop does NOT use this — it gates the sequence
     // on is_last_tick_ and forces is_first_tick_ before on_bar.
+    OrderBirth capture_order_birth() const;
     void invoke_chart_on_bar(const Bar& bar);
     void dispatch_bar();
     void dispatch_bar_calc_on_order_fills();
@@ -4418,16 +4406,14 @@ private:
     uint64_t execute_coof_script_body(const Bar& script_bar,
                                       double broker_cursor_price,
                                       bool cursor_is_bar_point,
-                                      bool is_fill_recalc,
-                                      bool cursor_is_bar_close,
-                                      bool recalc_at_bar_open,
+                                      const OrderBirth& evaluation_origin,
                                       uint64_t direct_fill_event_budget,
                                       bool opening_money_prefix = false);
     uint64_t run_coof_recalc_chain(const Bar& script_bar,
                                    double broker_cursor_price,
                                    bool cursor_is_bar_point,
-                                   bool cursor_is_bar_close,
-                                   bool recalc_at_bar_open,
+                                   BirthCursor cursor,
+                                   uint64_t& evaluation_ordinal,
                                    uint64_t triggering_events,
                                    uint64_t max_events,
                                    uint64_t events_already,
@@ -5142,5 +5128,5 @@ public:
     void trace(const std::string& name, int value)   { trace(name, static_cast<double>(value)); }
 };
 
-} // inline namespace engine_script_run_v4
+} // inline namespace engine_script_run_v5
 } // namespace pineforge

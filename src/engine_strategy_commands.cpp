@@ -513,10 +513,12 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         }
     }
     int64_t preserved_seq = 0;
+    uint64_t replaced_order_incarnation = 0;
     uint64_t replaced_default_market_incarnation = 0;
     for (const auto& o : pending_orders_) {
         if (o.id == id) {
             preserved_seq = o.created_seq;
+            replaced_order_incarnation = o.incarnation;
             if (o.type == OrderType::MARKET && o.created_bar == bar_index_
                 && o.is_long == is_long && std::isnan(o.qty) && o.qty_type < 0
                 && o.created_position_cycle_seq == position_cycle_seq_) {
@@ -564,7 +566,7 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     order.created_bar = bar_index_;
     order.created_seq = preserved_seq > 0 ? preserved_seq : next_order_seq_++;
     order.incarnation = next_order_incarnation_++;
-    order.created_by_same_id_replacement = preserved_seq > 0;
+    order.replaced_order_incarnation = replaced_order_incarnation;
     order.replaced_default_market_incarnation =
         replaced_default_market_incarnation;
     if (preserved_seq == 0) {
@@ -573,14 +575,9 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         order.named_cancel_surviving_exit_incarnation =
             named_cancel_context.surviving_exit_incarnation;
     }
-    order.created_during_coof_recalc = coof_fill_recalc_active_;
-    order.coof_born_at_close_recalc =
-        coof_fill_recalc_active_ && coof_cursor_is_bar_close_;
-    // KI-67: a fill recalc without first-O provenance is mid-bar. This includes
-    // later fills at that same O; orders it places are cascade orders eligible
-    // only at the remaining extreme waypoints of the historical 4-tick path.
-    order.coof_born_mid_bar =
-        coof_fill_recalc_active_ && !coof_recalc_at_bar_open_;
+    order.birth = capture_order_birth();
+    order.pine_birth_reach = compat::pine::select_historical_birth_reach(
+        order.birth, false);
     order.created_position_side = position_side_;
     order.created_position_cycle_seq = position_cycle_seq_;
     order.created_after_position_close_in_bar =
@@ -2090,7 +2087,7 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
                     ? PositionSide::LONG : PositionSide::SHORT;
                 const bool qualifies = o.created_bar == bar_index_
                     && o.type == OrderType::MARKET
-                    && !o.created_during_coof_recalc
+                    && !o.birth.from_fill()
                     && !o.over_pyramiding_cap_at_placement
                     && entry_dir == position_side_
                     && o.created_position_side == position_side_;
@@ -2139,9 +2136,14 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     order.qty = reserved_qty;
     order.qty_type = -1;
     order.qty_percent = qp;
-    order.requested_partial = is_partial;
-    order.full_percent_exit_request = !has_explicit_qty
-        && (std::isnan(qty_percent) || qty_percent == 100.0);
+    order.quantity_request.request(has_explicit_qty
+        ? QuantityIntent::units(qty)
+        : (std::isnan(qty_percent) || qty_percent == 100.0)
+            ? QuantityIntent::all() : QuantityIntent::fraction(qty_percent, 100.0));
+    // A resolved reservation owns its numeric basis. Deferred percentage
+    // requests retain their original fraction until a live owner binds them.
+    if (has_explicit_qty || std::isfinite(reserved_qty))
+        order.quantity_request.reserve(reserved_qty, live_pos_qty);
     order.pooc_global_full_exit_dynamic_qty =
         bind_global_full_exit_dynamic_qty;
     order.pooc_global_full_exit_tracks_bound_adds =
@@ -2163,33 +2165,18 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     order.created_bar = bar_index_;
     order.created_seq = preserved_seq > 0 ? preserved_seq : next_order_seq_++;
     order.incarnation = next_order_incarnation_++;
-    order.created_by_same_id_replacement = preserved_seq > 0;
-    order.replaced_exit_order_incarnation = replaced_incarnation;
-    order.created_during_coof_recalc = coof_fill_recalc_active_;
-    order.coof_born_at_close_recalc =
-        coof_fill_recalc_active_ && coof_cursor_is_bar_close_;
-    // KI-67: a fill recalc that was NOT triggered at the bar-open tick is a
-    // mid-bar recalc; orders it places are cascade orders (eligible only at the
-    // remaining extreme waypoints of the historical 4-tick path). The new
-    // later-same-O refinement is priced/non-trail only: a trail born in that
-    // exact cell retains its established standard/open path reach. Otherwise
-    // the refinement would newly hold it to W1/W2 instead of letting it arm and
-    // cross continuously on the remaining legs. Magnifier keeps its own tick
-    // model and is unchanged.
-    const bool preserve_later_same_open_trail_provenance =
-        !bar_magnifier_enabled_ && has_trail_request
-        && coof_fill_recalc_active_ && !coof_recalc_at_bar_open_
-        && coof_recalc_after_first_open_fill_
-        && coof_cascade_recalc_leg_ == 0;
-    order.coof_born_mid_bar =
-        coof_fill_recalc_active_ && !coof_recalc_at_bar_open_
-        && !preserve_later_same_open_trail_provenance;
+    order.replaced_order_incarnation = replaced_incarnation;
+    order.birth = capture_order_birth();
+    order.pine_birth_reach = compat::pine::select_historical_birth_reach(
+        order.birth, has_trail_request);
+    // Later-open trailing permission is derived by the Pine policy from the
+    // immutable physical origin. It never rewrites that origin.
     // A priced exit born after a later fill at the SAME O is already held by
     // the KI-67 cascade gate for its in-flight leg 0. The pinned exception is
     // LIMIT-only: a marketable limit may resume at W1. A marketable stop keeps
     // the established whole-entry-bar suppression (including M1).
     const bool later_same_open_priced_exit_on_entry_bar =
-        !bar_magnifier_enabled_ && order.coof_born_mid_bar
+        !bar_magnifier_enabled_ && compat::pine::historical_cascade_reach(order)
         && coof_recalc_after_first_open_fill_
         && coof_cascade_recalc_leg_ == 0
         && position_open_bar_ == bar_index_
@@ -2221,7 +2208,7 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
         const bool first_high_market_limit_recross =
             !bar_magnifier_enabled_ && !process_orders_on_close_
             && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
-            && order.coof_born_mid_bar && !coof_hist_is_segment_
+            && compat::pine::historical_cascade_reach(order) && !coof_hist_is_segment_
             && coof_at_extreme_waypoint_ && coof_hist_path_index_ == 1
             && coof_cascade_recalc_leg_ == 1
             && coof_market_entry_recalc_incarnation_ != 0
@@ -2261,7 +2248,7 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     // fill lands exactly on a waypoint ("a fill AT a waypoint starts the NEXT
     // leg"). current_bar_ is the full script bar during a fill recalc; the
     // magnifier path owns its own tick model and is scoped out.
-    if (order.coof_born_mid_bar && !bar_magnifier_enabled_
+    if (compat::pine::historical_cascade_reach(order) && !bar_magnifier_enabled_
         && coof_scheduler_active_ && std::isfinite(coof_cursor_price_)
         && position_side_ != PositionSide::FLAT
         && (!std::isnan(order.stop_price) || !std::isnan(order.limit_price))
@@ -2287,7 +2274,6 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     order.created_position_side = effectively_flat ? PositionSide::FLAT : position_side_;
     order.tv_carry_qty = live_pos_qty;
     order.comment = comment;
-    order.created_while_in_position = !effectively_flat;
     // Round 7 family M mechanism 2a: a re-issue that replaces a DORMANT
     // bracket (finding-311 KILL) inside the close-time script body stays
     // dormant until this bar's process_margin_call has run — TradingView's
@@ -2323,11 +2309,10 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
         extra.qty_percent = (live_pos_qty > kQtyEpsilon)
             ? (leg_qty / live_pos_qty) * 100.0
             : order.qty_percent;
-        extra.requested_partial = leg_qty < live_pos_qty - kFullQtyEps;
+        extra.quantity_request.reserve(leg_qty, live_pos_qty);
         extra.created_seq = next_order_seq_++;
         extra.incarnation = next_order_incarnation_++;
-        extra.created_by_same_id_replacement = false;
-        extra.replaced_exit_order_incarnation = 0;
+        extra.replaced_order_incarnation = 0;
         pending_orders_.push_back(std::move(extra));
     }
 }
@@ -2424,9 +2409,11 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
             bar_index_);
     }
     int64_t preserved_seq = 0;
+    uint64_t replaced_order_incarnation = 0;
     for (const auto& o : pending_orders_) {
         if (o.id == id) {
             preserved_seq = o.created_seq;
+            replaced_order_incarnation = o.incarnation;
             break;
         }
     }
@@ -2476,14 +2463,10 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
     order.created_bar = bar_index_;
     order.created_seq = preserved_seq > 0 ? preserved_seq : next_order_seq_++;
     order.incarnation = next_order_incarnation_++;
-    order.created_during_coof_recalc = coof_fill_recalc_active_;
-    order.coof_born_at_close_recalc =
-        coof_fill_recalc_active_ && coof_cursor_is_bar_close_;
-    // KI-67: a fill recalc that was NOT triggered at the bar-open tick is a
-    // mid-bar recalc; orders it places are cascade orders (eligible only at the
-    // remaining extreme waypoints of the historical 4-tick path).
-    order.coof_born_mid_bar =
-        coof_fill_recalc_active_ && !coof_recalc_at_bar_open_;
+    order.replaced_order_incarnation = replaced_order_incarnation;
+    order.birth = capture_order_birth();
+    order.pine_birth_reach = compat::pine::select_historical_birth_reach(
+        order.birth, false);
     order.created_position_side = position_side_;
     order.created_after_position_close_in_bar =
         pending_close_qty_in_bar_ > kQtyEpsilon;
@@ -2901,23 +2884,23 @@ uint64_t BacktestEngine::queue_deferred_close_order(
         order.qty_percent = closes_full_position ? 100.0
             : (position_qty_ > eps ? (qty_to_close / position_qty_) * 100.0 : 100.0);
     }
+    // Preserve the source close's already-resolved placement target. This is
+    // not a fixed executable-quantity promise: the existing ANY-relative path
+    // can later bind its percentage to a replacement position (e.g. target 1
+    // against E2 can reserve 2 against new E4). Do not fabricate an original
+    // Pine percentage, or an exposure-coverage receipt before that binding.
+    order.quantity_request.request(QuantityIntent::units(qty_to_close));
     order.oca_name = "";
     order.oca_type = 0;
     order.created_bar = bar_index_;
     order.created_seq = next_order_seq_++;
     order.incarnation = next_order_incarnation_++;
-    order.created_during_coof_recalc = coof_fill_recalc_active_;
-    order.coof_born_at_close_recalc =
-        coof_fill_recalc_active_ && coof_cursor_is_bar_close_;
-    // KI-67: a fill recalc that was NOT triggered at the bar-open tick is a
-    // mid-bar recalc; orders it places are cascade orders (eligible only at the
-    // remaining extreme waypoints of the historical 4-tick path).
-    order.coof_born_mid_bar =
-        coof_fill_recalc_active_ && !coof_recalc_at_bar_open_;
+    order.birth = capture_order_birth();
+    order.pine_birth_reach = compat::pine::select_historical_birth_reach(
+        order.birth, false);
     order.created_position_side = position_side_;
     order.tv_carry_qty = position_qty_;
     order.comment = comment;
-    order.created_while_in_position = true;
     // design-declined-reversal-close-leg: the qty this close debited from
     // id_unclosed_qty_ at CALL time (default-FIFO branch), so a later
     // suppression can re-credit exactly that amount. NaN when nothing was

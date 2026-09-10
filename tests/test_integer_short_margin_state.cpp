@@ -246,7 +246,11 @@ public:
             break;
         case Shape::OFF_GRID: position_qty_ = pyramid_entries_[0].qty = 100.5; break;
         case Shape::LIMIT_ONLY: owned.stop_price = qnan; owned.limit_price = 98.0; break;
-        case Shape::PARTIAL: owned.qty = 50.0; owned.requested_partial = true; break;
+        case Shape::PARTIAL:
+            owned.qty = 50.0;
+            owned.quantity_request.request(QuantityIntent::units(50.0));
+            owned.quantity_request.reserve(50.0, 100.0);
+            break;
         case Shape::COARSE_FRACTIONAL:
             qty_step_ = 1.5;
             position_qty_ = pyramid_entries_[0].qty = 100.5;

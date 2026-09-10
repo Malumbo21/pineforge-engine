@@ -141,7 +141,7 @@ struct Probe : public BacktestEngine {
                    << ":o=" << (order.oca_name.empty() ? "-" : order.oca_name)
                    << "/" << order.oca_type
                    << ":c=" << order.default_flat_market_gross_candidate
-                   << ":r=" << order.created_by_same_id_replacement;
+                   << ":r=" << (order.replaced_order_incarnation != 0);
         }
         orders << "]";
         result.pending_book = orders.str();
@@ -217,7 +217,7 @@ struct Probe : public BacktestEngine {
                 if (order.default_flat_market_gross_candidate) {
                     ++candidates_after_signal;
                 }
-                if (order.created_by_same_id_replacement) {
+                if ((order.replaced_order_incarnation != 0)) {
                     ++replacements_after_signal;
                 }
             }
@@ -424,7 +424,7 @@ struct ConfigProbe : public BacktestEngine {
                    << ":o=" << (order.oca_name.empty() ? "-" : order.oca_name)
                    << "/" << order.oca_type
                    << ":c=" << order.default_flat_market_gross_candidate
-                   << ":r=" << order.created_by_same_id_replacement;
+                   << ":r=" << (order.replaced_order_incarnation != 0);
         }
         orders << "]";
         result.pending_book = orders.str();

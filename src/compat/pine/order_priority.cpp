@@ -30,7 +30,7 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
     const bool parent_is_exact_fresh_stop =
         parent->type == OrderType::ENTRY
         && parent->created_position_side == PositionSide::FLAT
-        && !parent->created_by_same_id_replacement
+        && (parent->replaced_order_incarnation == 0)
         && cancelled_incarnation != 0
         && cancelled_incarnation < parent->incarnation
         && cancelled_incarnation != child->incarnation
@@ -38,7 +38,7 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
         && surviving_exit_incarnation < parent->incarnation
         && parent->created_bar == ctx.bar_index - 1
         && std::isnan(parent->qty)
-        && !parent->created_during_coof_recalc
+        && !parent->birth.from_fill()
         && !parent->created_after_position_close_in_bar
         && !parent->over_pyramiding_cap_at_placement
         && !parent->stop_limit_activated
@@ -54,15 +54,14 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
     const bool child_is_exact_retained_bracket =
         child->type == OrderType::EXIT
         && !child->from_entry.empty()
-        && child->created_by_same_id_replacement
-        && child->replaced_exit_order_incarnation
+        && (child->replaced_order_incarnation != 0)
+        && child->replaced_order_incarnation
             == surviving_exit_incarnation
-        && !child->created_while_in_position
         && child->created_position_side == PositionSide::FLAT
         && child->created_bar == ctx.bar_index - 1
-        && !child->created_during_coof_recalc
+        && !child->birth.from_fill()
         && !child->created_after_position_close_in_bar
-        && !child->requested_partial
+        && !child->quantity_request.is_partial(1e-9, 1e-9)
         && std::isnan(child->qty)
         && child_qp >= 100.0 - 1e-9
         && std::isfinite(child->stop_price)
