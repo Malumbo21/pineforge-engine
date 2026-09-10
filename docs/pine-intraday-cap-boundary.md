@@ -7,9 +7,10 @@ extracts those decisions from existing execution paths; it does not make the
 engine independent of Pine or establish broader TradingView parity.
 
 The paired codegen explicitly selects this compatibility component in the
-`GeneratedStrategy` constructor, guarded by
-`PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1`. Older supported engines do not define
-that capability and keep their established default. Risk statements still
+`GeneratedStrategy` constructor. Current codegen uses the scoped
+`attach_pine_execution_adapter()` hook for cap and retained-parent priority,
+with a guarded cap-only fallback for older engines; see
+[pairing and regeneration](pine-order-priority-boundary.md). Risk statements still
 assign `max_intraday_filled_orders_ = (int)(expression)` at execution time;
 selecting a component does not evaluate or hoist a risk statement.
 
@@ -117,18 +118,18 @@ Independent Grok, unchanged fixed Cloud controls and full regression/gate
 verification remain root-owned requirements before any parity or publication
 claim.
 
-## Internal pairing and observable-state version 3
+## Internal pairing and observable-state version 4
 
 Relative to base `38dc73e`, the new policy/obligation members change the
-`BacktestEngine` layout. Its inline namespace is now `engine_script_run_v3`;
+`BacktestEngine` layout. Its inline namespace is now `engine_script_run_v4`;
 base-header v2 native/generated objects must fail to link against this runtime.
 The exact source-pairing test compiles frozen base headers and checks explicit
-undefined v2 symbols, alongside matched v3 positive controls. Its isolated v2
+undefined v2 symbols, alongside matched v4 positive controls. Its isolated v2
 symbol stub is a reverse-link control, not a build of the entire old runtime.
 No mismatch test program is executed.
 
-Broker hashes use `pineforge-broker-state/v3`; stream fingerprints begin with
-version3. The Pine policy's own schema stays1. Public C ABI version4, stream API
+Broker hashes use `pineforge-broker-state/v4`; stream fingerprints begin with
+version 4. Each Pine component's own schema remains 1. Public C ABI version4, stream API
 version1, POD layouts, exports and `PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1` remain
 unchanged. This version correction changes linking and serialized hash bytes,
 not cap charging, fill prices or other economic behavior. It does not make
@@ -151,3 +152,5 @@ separating requests, execution facts and exposure state; they do not establish
 Pine quota policy or predictable live fills. See [MQL5 OrderSend](https://www.mql5.com/en/docs/trading/ordersend)
 and [OnTradeTransaction](https://www.mql5.com/en/docs/event_handlers/ontradetransaction).
 This patch adds no external execution adapter or callback-ordering model.
+
+The priority attachment adds a v3/f864 frozen-header rejection control; the cap-only API and its financial rules retain their scope. See [order-priority ownership](pine-order-priority-boundary.md).

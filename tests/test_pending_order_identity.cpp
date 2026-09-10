@@ -12,6 +12,7 @@
 
 using namespace pineforge;
 namespace {
+bool pine_fixture_attachment = false;
 const double missing = std::numeric_limits<double>::quiet_NaN();
 #define REQUIRE(x) do { if (!(x)) throw std::runtime_error( \
     std::string(__func__) + ":" + std::to_string(__LINE__) + ": " #x); } while (false)
@@ -62,6 +63,11 @@ class Book final : public BacktestEngine {
 public:
     using BacktestEngine::open_trade_entry_id;
     Book() {
+#if defined(PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1)
+        if (pine_fixture_attachment) attach_pine_execution_adapter();
+#else
+        if (pine_fixture_attachment) throw std::runtime_error("Pine attachment unavailable");
+#endif
         initial_capital_ = 100000;
         pyramiding_ = 10;
         margin_long_ = margin_short_ = 0;
@@ -408,6 +414,11 @@ public:
     int observed_close_callbacks = 0;
     uint64_t replaced = 0, fresh = 0;
     CallbackBook() {
+#if defined(PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1)
+        if (pine_fixture_attachment) attach_pine_execution_adapter();
+#else
+        if (pine_fixture_attachment) throw std::runtime_error("Pine attachment unavailable");
+#endif
         initial_capital_ = 100000;
         pyramiding_ = 10;
         margin_long_ = margin_short_ = 0;
@@ -453,7 +464,8 @@ void actual_coof_callback() {
 
 int main(int argc, char** argv) {
     int failed = 0, passed = 0;
-    const std::string filter = argc > 1 ? argv[1] : "";
+    pine_fixture_attachment = argc > 1 && std::string(argv[1]) == "--pine";
+    const std::string filter = argc > 1 && !pine_fixture_attachment ? argv[1] : "";
     auto check = [&](const std::string& name, const std::function<void()>& body) {
         if (!filter.empty() && name.find(filter) == std::string::npos) return;
         try { body(); ++passed; std::cout << "PASS " << name << '\n'; }

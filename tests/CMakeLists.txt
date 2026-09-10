@@ -406,3 +406,8 @@ if(PINEFORGE_ENABLE_COVERAGE)
     target_compile_options(test_c_abi PRIVATE ${_pf_cov_test_flags})
 endif()
 add_test(NAME test_c_abi COMMAND test_c_abi)
+
+# Run the same literal lifetime/OCA/callback and financial assertions with
+# explicit Pine attachment as well as the unchanged bare-native test above.
+add_test(NAME test_pending_order_identity_pine
+         COMMAND test_pending_order_identity --pine)

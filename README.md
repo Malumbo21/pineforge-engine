@@ -125,6 +125,8 @@ live behavior or real broker fills.
 
 ## Validation scoreboard
 
+**Native policy refactoring · 2026-09-10:** engine [#234](https://github.com/pineforge-4pass/pineforge-engine/pull/234) and codegen [#127](https://github.com/pineforge-4pass/pineforge-codegen-oss/pull/127) preserve **4,182 excellent / 8 strong**. Both the old-engine/new-codegen and new-engine/new-codegen Cloud runs retain all **4,190 raw trade CSVs, counts and full grades** unchanged. The target bands have zero entrants and zero leavers: **net 0, no individual regression**. These changes remove an unused source flag and give Pine cap behavior explicit ownership; they do not claim complete engine independence. The formal gates remain zero-improvement FAILs and the official baseline remains unchanged.
+
 **Round 39 · 2026-09-09:** **4,182 excellent / 8 strong / zero moderate** across all **4,190 scored probes**. This round adds one excellent result, with zero regressions on any canonical metric.
 
 | Board | Test set | Result | TradingView trades evaluated |
@@ -169,7 +171,7 @@ Every script is exported from TradingView as-is (its own inputs, its own default
 - **strong** — ≥ 95% matched, trade count within 6%, entries within 0.1% and exits within 0.5% at p90;
 - **moderate / weak** — ≥ 75% coverage, or less.
 
-A grade is never one lucky run. Every candidate build is measured over the whole population on a reproducible cloud pipeline, each graded snapshot is published by content hash, and a build ships only through a deterministic gate: **no regression on any metric of any ETH 15m probe**, and, pooled over the other lanes, strictly more probes entering the excellent and excellent+strong bands than leaving them. Merges are fast-forwarded, so the commit that was gated is the commit on `main`.
+Published parity results use a fixed population and reproducible Cloud Run measurements. The formal gate requires **no hard-surface regression** and strictly positive pooled movement across the target excellent and excellent+strong bands. A documented native-correctness exception permits exactly zero target-band movement with no individual regression, after full comparison, independent review and CI; its actual FAIL remains recorded and baseline promotion is deferred. Negative movement is outside this exception. Baseline promotion requires a recorded PASS and an exact-head merge with green CI.
 
 ### What the closed test taught the engine
 
@@ -205,6 +207,10 @@ The corpus feed is a 1-minute Binance ETH/USDT:USDT tape with the 15-minute bars
 PyneCore's 15 non-excellent strategies involve `strategy.exit(stop=…, limit=…)` brackets, `trail_*` exits, `strategy.close(qty_percent=…)` partial exits and bar-magnifier paths — the categories where its broker emulator differs from TradingView. Last refresh **2026-06-11** (engine v0.9.0, PyneCore 6.4.6, PineTS 0.9.16); a refresh on the current engine and PyneCore, extended to the full corpus, is the next benchmark milestone. Per-strategy table: [`benchmarks/results/summary.md`](benchmarks/results/summary.md); speed: [`benchmarks/results/speed.md`](benchmarks/results/speed.md); throughput reproduction package: [`benchmarks/throughput/`](benchmarks/throughput/).
 
 ---
+
+Explicit Pine frontends must use the [execution attachment and regeneration
+contract](docs/pine-order-priority-boundary.md) for retained-parent priority.
+Bare native engines and cap-only generated constructors do not opt into it.
 
 ## What ships here
 

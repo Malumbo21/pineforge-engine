@@ -340,7 +340,7 @@ def _intraday_coverage(policy: str, budget: str, obligation: str, src: str) -> N
 
 
 def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
-    """The v3 layout and serialized-state contracts must advance together.
+    """The v4 layout and serialized-state contracts must advance together.
 
     Pin the actual hash entry points, rather than accepting a version string
     mentioned in a comment or an unrelated helper. Public C ABI versions have
@@ -348,18 +348,18 @@ def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
     """
     header = _strip_cpp_comments(header)
     namespaces = re.findall(r"inline\s+namespace\s+(engine_script_run_v\d+)\s*\{", header)
-    if namespaces != ["engine_script_run_v3"]:
-        raise ValueError("BacktestEngine layout requires internal namespace engine_script_run_v3")
+    if namespaces != ["engine_script_run_v4"]:
+        raise ValueError("BacktestEngine layout requires internal namespace engine_script_run_v4")
     broker = _one_braced_body(source,
         r"uint64_t\s+BacktestEngine::broker_state_hash\(\)\s+const\s*\{", "broker hash")
-    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v3"\);', broker):
-        raise ValueError("broker hash must start with pineforge-broker-state/v3")
+    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v4"\);', broker):
+        raise ValueError("broker hash must start with pineforge-broker-state/v4")
     stream_body = _one_braced_body(_strip_cpp_comments(stream),
         r"uint64_t\s+BacktestEngine::stream_state_hash\(\)\s+const\s*\{", "stream hash")
     compact = re.sub(r"\s+", "", stream_body)
-    fold = "integer(3);integer(broker_state_hash());"
+    fold = "integer(4);integer(broker_state_hash());"
     if compact.count(fold) != 1:
-        raise ValueError("stream hash requires version 3 followed by the broker hash")
+        raise ValueError("stream hash requires version 4 followed by the broker hash")
     prefix = compact[:compact.index(fold)]
     if prefix.count("{") != prefix.count("}") or (prefix and prefix[-1] not in ";}"):
         raise ValueError("stream version fold must be unconditional at function scope")

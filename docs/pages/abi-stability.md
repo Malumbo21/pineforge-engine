@@ -112,12 +112,12 @@ notice:
 - The shape of internal log lines (use them for humans, not parsers).
 
 Rebuild generated and native C++ objects against matching engine headers and
-runtime. The cap compatibility extraction changes the v2 object layout and
-therefore uses the internal `engine_script_run_v3` inline namespace. An object
+runtime. The cap and priority extractions change the v2/v3 object layouts and
+therefore use the internal `engine_script_run_v4` inline namespace. An object
 built from base `38dc73e` headers references v2 out-of-line members and must
-fail to link to this v3 runtime. The source-pairing check compiles frozen exact
+fail to link to this v4 runtime. The source-pairing check compiles frozen exact
 base headers separately before testing the link, so a missing include or
-compile failure cannot masquerade as mismatch protection. Both generated-style
+compile failure cannot masquerade as mismatch protection. Frozen f864/v3 headers are also rejected by this v4 runtime. Both generated-style
 and native-style current callers must still link.
 
 `PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1` remains 1: it describes the existing hook
@@ -129,13 +129,13 @@ retrofit an old module. Public C function signatures, POD layouts,
 Namespace versioning protects referenced internal C++ symbols; it does not
 validate an erased `pf_strategy_t` handle. Use a handle only with functions from
 its creating strategy module. A fully self-contained old module can still use
-its own matching runtime; this check does not turn it into a v3 module.
+its own matching runtime; this check does not turn it into a v4 module.
 
-The cap boundary also advances the broker fingerprint domain to
-`pineforge-broker-state/v3` and stream fingerprint version to 3. These identify
-changed serialized state, including the Pine configuration/quota/cause and
+The cap and priority boundaries advance the broker fingerprint domain to
+`pineforge-broker-state/v4` and stream fingerprint version to 4. These identify
+changed serialized state, including Pine priority attachment/configuration, cap quota/cause and
 separate generic close request. The Pine component schema remains 1; it is
-independent of the aggregate fingerprint version. Prior v2 fingerprints are
+independent of the aggregate fingerprint version. Prior v2/v3 fingerprints are
 not comparable. Fingerprints are replay checks, not serialized checkpoints or
 complete hashes of private strategy state. The native runner already binds
 its strategy-library SHA; its ledger format and Python provenance fingerprints

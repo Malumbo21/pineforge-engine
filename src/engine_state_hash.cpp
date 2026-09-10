@@ -86,9 +86,9 @@ void hash_str_set(Fnv& f, const std::unordered_set<std::string>& s) {
 
 uint64_t BacktestEngine::broker_state_hash() const {
     Fnv f;
-    // v3 owns cap configuration, quota/cause and generic close-request state.
+    // v4 adds explicit Pine order-priority attachment and configuration.
     // It is a serialization boundary, independent of the public C ABI version.
-    f.s("pineforge-broker-state/v3");
+    f.s("pineforge-broker-state/v4");
 
     // --- Position core ---
     f.i(static_cast<int64_t>(position_side_));
@@ -293,6 +293,12 @@ uint64_t BacktestEngine::broker_state_hash() const {
     // At-most-one-priced-entry-open-per-bar arbiter and its result.
     f.i(priced_entry_activity_bar_);
     f.b(priced_entry_filled_this_bar_);
+
+    // Explicit priority policy is future-behavioral configuration. No cached
+    // decision survives a broker boundary; hash semantic ownership only.
+    f.u(compat::pine::OrderPriority::schema_version);
+    f.b(pine_order_priority_.attached());
+    f.b(pine_order_priority_.retained_parent_first());
 
     // --- Pine compatibility policy and its day-owned quota ---
     f.u(compat::pine::IntradayCap::schema_version);

@@ -15,7 +15,6 @@ commission_type_              # config: strategy(commission_type=...)
 commission_value_             # config: strategy(commission_value=...)
 default_qty_type_             # config: strategy(default_qty_type=...)
 default_qty_value_            # config: strategy(default_qty_value=...)
-flat_retained_child_fresh_parent_order_  # config: explicit A/B ordering override
 historical_security_lookahead_projection_  # config: opt-in request.security selector
 initial_capital_              # config: strategy(initial_capital=...)
 margin_call_enabled_          # config: set_margin_call_enabled toggle

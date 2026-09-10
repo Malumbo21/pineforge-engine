@@ -16,7 +16,7 @@ import tempfile
 
 BASE_COMMIT = "38dc73e5503fe5395458e5f8df2a2ad78054a1ae"
 BASE_ENGINE_SHA256 = "06c937a1ccd31815ca7775268ac699ffdfddb1a1f19de4628b777f37e9a6d193"
-CURRENT_NAMESPACE = "engine_script_run_v3"
+CURRENT_NAMESPACE = "engine_script_run_v4"
 BASE_NAMESPACE = "engine_script_run_v2"
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/script_cpp_abi/base38"
 
@@ -29,14 +29,15 @@ def entry_diagnostic(lines, namespace, method):
     return next((line for line in lines if needle in line), None)
 
 
-def frozen_headers(destination):
+def frozen_headers(destination, fixture=FIXTURE, commit=BASE_COMMIT,
+                   namespace=BASE_NAMESPACE, engine_sha=BASE_ENGINE_SHA256):
     """Authenticate and unpack the exact tracked base38 header closure."""
-    manifest = json.loads((FIXTURE / "manifest.json").read_text())
-    if (manifest["source_commit"] != BASE_COMMIT
-            or manifest["internal_namespace"] != BASE_NAMESPACE
-            or manifest["files"]["pineforge/engine.hpp"]["sha256"] != BASE_ENGINE_SHA256):
+    manifest = json.loads((fixture / "manifest.json").read_text())
+    if (manifest["source_commit"] != commit
+            or manifest["internal_namespace"] != namespace
+            or manifest["files"]["pineforge/engine.hpp"]["sha256"] != engine_sha):
         raise RuntimeError("stale-header fixture does not identify the pinned base38 contract")
-    archive = (FIXTURE / "headers.json.gz").read_bytes()
+    archive = (fixture / "headers.json.gz").read_bytes()
     if hashlib.sha256(archive).hexdigest() != manifest["archive_sha256"]:
         raise RuntimeError("stale-header fixture archive digest mismatch")
     contents = json.loads(gzip.decompress(archive))
@@ -141,6 +142,10 @@ def main():
         root = Path(temporary)
         old_include = root / "base38/include"
         frozen_headers(old_include)
+        cap_include = root / "basef864/include"
+        frozen_headers(cap_include, FIXTURE.parent / "basef864",
+                       "f864be590931ba08c8df5af983b33b2c29be9c67", "engine_script_run_v3",
+                       "54b35fffaa163a31467f8ba883e44e02f013a37216b558dfe3a4f28fbbe84dc2")
         common = [args.compiler, "-std=c++17", "-O0", *args.extra_flag]
 
         def compile_object(name, source, include):
@@ -163,6 +168,11 @@ def main():
         stale_generated = compile_object("base38_generated", caller(BASE_NAMESPACE, True), old_include)
         old_symbols = compile_object("base38_symbol_control", BASE_SYMBOL_CONTROL, old_include)
         legacy = compile_object("legacy_unversioned", LEGACY_CALLER, old_include)
+
+        cap_native = compile_object("basef864_native", caller("engine_script_run_v3"), cap_include)
+        cap_generated = compile_object("basef864_generated", caller("engine_script_run_v3", True), cap_include)
+        cap_symbols = compile_object("basef864_symbol_control",
+            BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v3"), cap_include)
 
         def link(name, obj, runtime, missing_namespace=None):
             linked = subprocess.run(
@@ -199,7 +209,13 @@ def main():
         link("current_native_to_v2_symbol_control", current_native, old_symbols, CURRENT_NAMESPACE)
         link("current_generated_to_v2_symbol_control", current_generated, old_symbols, CURRENT_NAMESPACE)
         link("unversioned_to_current", legacy, args.library, "")
-    print("6 translation units compiled; 4 positive links; 5 rejected links; no executable run")
+        link("basef864_native_to_v3_symbol_control", cap_native, cap_symbols)
+        link("basef864_generated_to_v3_symbol_control", cap_generated, cap_symbols)
+        link("basef864_native_to_current", cap_native, args.library, "engine_script_run_v3")
+        link("basef864_generated_to_current", cap_generated, args.library, "engine_script_run_v3")
+        link("current_native_to_v3_symbol_control", current_native, cap_symbols, CURRENT_NAMESPACE)
+        link("current_generated_to_v3_symbol_control", current_generated, cap_symbols, CURRENT_NAMESPACE)
+    print("9 translation units compiled; 6 positive links; 9 rejected links; no executable run")
 
 
 if __name__ == "__main__":

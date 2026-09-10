@@ -14,6 +14,7 @@
 #include <limits>
 #include <string>
 
+#include <pineforge/pineforge.h>
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
 
@@ -82,14 +83,21 @@ enum class BookVariant {
     PostCancelDoubleReissue,
     MissingParentCancel,
     InterleavedThird,
+    InterleavedFourth,
+    IncarnationGap,
+    ChildOca,
+    SharedOca,
     MultipleChildren,
 };
 
 class FreshParentProbe final : public BacktestEngine {
 public:
     FreshParentProbe(Cell cell, int parent_first_factor,
-                     BookVariant variant = BookVariant::ExactPair)
+                     BookVariant variant = BookVariant::ExactPair,
+                     bool pine_attachment = true)
         : cell_(cell), variant_(variant) {
+        // Legacy Pine numeric assertions require an explicit frontend opt-in.
+        if (pine_attachment) attach_pine_execution_adapter();
         initial_capital_ = 1'000'000.0;
         default_qty_type_ = QtyType::FIXED;
         default_qty_value_ = 1.0;
@@ -113,17 +121,24 @@ public:
         if (bar_index_ == 0) {
             strategy_entry("E", is_long, kNaN,
                            is_long ? 130.0 : 70.0,
-                           kNaN, "original parent");
+                           kNaN, "original parent",
+                           variant_ == BookVariant::SharedOca ? "G" : "",
+                           variant_ == BookVariant::SharedOca ? 1 : 0);
             if (variant_ != BookVariant::FreshChild
                 && variant_ != BookVariant::PostCancelDoubleReissue) {
                 strategy_exit("X", "E", child_limit, child_stop,
                               kNaN, kNaN, kNaN, 100.0,
                               "retained child");
             }
-            if (variant_ == BookVariant::InterleavedThird) {
+            if (variant_ == BookVariant::InterleavedThird
+                || variant_ == BookVariant::InterleavedFourth) {
                 strategy_entry("U", is_long, kNaN,
                                is_long ? 1'000.0 : 1.0,
                                1.0, "unrelated resting parent");
+                if (variant_ == BookVariant::InterleavedFourth)
+                    strategy_entry("V", is_long, kNaN,
+                                   is_long ? 2'000.0 : 0.5,
+                                   1.0, "fourth unrelated parent");
             } else if (variant_ == BookVariant::MultipleChildren) {
                 strategy_exit("Y", "E", child_limit, child_stop,
                               kNaN, kNaN, kNaN, 100.0,
@@ -177,10 +192,19 @@ public:
             } else {
                 strategy_entry("E", is_long, kNaN,
                                is_long ? 110.0 : 90.0,
-                               kNaN, "fresh parent");
+                               kNaN, "fresh parent",
+                               variant_ == BookVariant::SharedOca ? "G" : "",
+                               variant_ == BookVariant::SharedOca ? 1 : 0);
+                if (variant_ == BookVariant::IncarnationGap) {
+                    strategy_entry("U", is_long, kNaN,
+                                   is_long ? 1'000.0 : 1.0, 1.0);
+                    strategy_cancel("U");
+                }
                 strategy_exit("X", "E", child_limit, child_stop,
                               kNaN, kNaN, kNaN, 100.0,
-                              "retained child");
+                              "retained child", kNaN,
+                              variant_ == BookVariant::ChildOca
+                                  || variant_ == BookVariant::SharedOca ? "G" : "");
             }
             if (variant_ == BookVariant::MultipleChildren) {
                 strategy_exit("Y", "E", child_limit, child_stop,
@@ -236,6 +260,13 @@ public:
         }
     }
 
+    bool priority_attached() const { return pine_order_priority_.attached(); }
+    bool priority_enabled() const { return pine_order_priority_.retained_parent_first(); }
+    bool cap_attached() const {
+        return max_intraday_filled_orders_.attachment() != compat::pine::CapAttachment::None;
+    }
+    uint64_t fills() const { return broker_fill_event_seq_; }
+    double position() const { return signed_position_size(); }
     bool fresh_parent_shape_seen = false;
     bool parent_cancel_provenance_seen = false;
     bool parent_cancel_token_exact = false;
@@ -351,8 +382,9 @@ enum class SortMutation {
 };
 
 static bool retained_child_predicate_accepts(SortMutation mutation) {
-    internal::RetainedChildFreshParentOrderContext context{
-        true,  // enabled
+    compat::pine::OrderPriority policy;
+    policy.attach();
+    compat::pine::OrderPriorityContext context{
         true,  // broker flat
         true,  // POOC
         false, // COOF option
@@ -360,7 +392,6 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
         false, // magnifier
         false, // stream warmup
         true,  // stream idle
-        2,
         2,
     };
 
@@ -404,7 +435,7 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
         case SortMutation::ExactDefaultOn:
             break;
         case SortMutation::FactorOff:
-            context.enabled = false;
+            policy.metadata("flat_retained_child_fresh_parent_order", 0.0);
             break;
         case SortMutation::BrokerLive:
             context.broker_flat = false;
@@ -525,8 +556,7 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
             parent.created_seq = 1;
             break;
     }
-    return internal::retained_child_fresh_parent_order_pair(
-        context, &parent, &child);
+    return policy.select(context, {parent, child}).has_value();
 }
 
 static Bar bar(double o, double h, double l, double c, int64_t ts) {
@@ -749,6 +779,100 @@ static void check_cancel_token_scope() {
     CHECK(probe.later_parent_has_no_token);
 }
 
+// Public command controls distinguish policy extraction from native activation.
+static void check_explicit_attachment_boundary() {
+    const Bar bars[] = {
+        bar(100,101,99,100,900000), bar(100,105,95,100,1800000),
+        bar(100,115,80,105,2700000), bar(105,108,85,95,3600000),
+    };
+    const char* key = "flat_retained_child_fresh_parent_order";
+    const double values[] = {0.0, -0.0, -1.0, kNaN,
+        std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(), 0.5, 1.0};
+    for (double value : values) {
+        for (bool attached : {false, true}) {
+            FreshParentProbe probe(Cell::LongPost, -1, BookVariant::ExactPair, attached);
+            // Exercise the actual base/C transport, not a derived shadow setter.
+            strategy_set_syminfo_metadata(static_cast<BacktestEngine*>(&probe), key, value);
+            if (!attached) probe.enable_pine_intraday_cap(); // cap-only is not execution attachment
+            probe.run(bars, 4);
+            CHECK(probe.priority_attached() == attached);
+            CHECK(probe.cap_attached());
+            const bool enabled = std::isfinite(value) && value > 0.0;
+            CHECK(probe.priority_enabled() == enabled);
+            CHECK(near(probe.position_seen_on_trigger_bar, attached && enabled ? 0 : 1));
+            CHECK(probe.trade_count() == 1);
+            CHECK(probe.fills() == 2);
+            if (probe.trade_count() == 1) {
+                CHECK(near(probe.get_trade(0).entry_price, 110));
+                CHECK(near(probe.get_trade(0).exit_price, 90));
+                CHECK(probe.get_trade(0).exit_bar_index == 2);
+            }
+        }
+    }
+    FreshParentProbe bare(Cell::LongPost, -1, BookVariant::ExactPair, false);
+    CHECK(!bare.cap_attached());
+    CHECK(!bare.priority_attached());
+    bare.run(bars, 4);
+    CHECK(near(bare.position_seen_on_trigger_bar, 1));
+    CHECK(bare.trade_count() == 1 && bare.fills() == 2);
+
+    for (BookVariant variant : {BookVariant::InterleavedFourth,
+             BookVariant::IncarnationGap, BookVariant::ChildOca, BookVariant::SharedOca}) {
+        FreshParentProbe probe(Cell::LongPost, -1, variant);
+        probe.run(bars, 4);
+        CHECK(probe.priority_attached());
+        CHECK(near(probe.position_seen_on_trigger_bar, 1));
+        CHECK(probe.pending_book_size_on_reissue ==
+              (variant == BookVariant::InterleavedFourth ? 4u : 2u));
+        CHECK(probe.parent_then_child_incarnations == (variant != BookVariant::IncarnationGap));
+        if (variant == BookVariant::SharedOca) {
+            CHECK(probe.trade_count() == 0 && probe.fills() == 1);
+            CHECK(near(probe.position(), 1));
+        } else {
+            CHECK(probe.trade_count() == 1 && probe.fills() == 2);
+            if (probe.trade_count() == 1) {
+                CHECK(near(probe.get_trade(0).entry_price, 110));
+                CHECK(near(probe.get_trade(0).exit_price, 90));
+            }
+        }
+    }
+
+    FreshParentProbe source(Cell::LongPost, -1, BookVariant::ExactPair, false);
+    const auto native_hash = source.broker_state_hash();
+    source.enable_pine_intraday_cap();
+    const auto cap_hash = source.broker_state_hash();
+    source.attach_pine_execution_adapter();
+    CHECK(native_hash != cap_hash);
+    CHECK(cap_hash != source.broker_state_hash()); // priority attachment has its own hash
+    const auto attached_hash = source.broker_state_hash();
+    source.set_syminfo_metadata(key, 0.0);
+    CHECK(attached_hash != source.broker_state_hash());
+    source.attach_pine_execution_adapter(); // idempotent, must preserve off
+    CHECK(!source.priority_enabled());
+    source.run(bars, 4);
+    auto copy = source;
+    CHECK(copy.broker_state_hash() == source.broker_state_hash());
+    copy.run(nullptr, 0);
+    CHECK(copy.priority_attached() && !copy.priority_enabled());
+    copy.set_syminfo_metadata(key, 1.0);
+    CHECK(!source.priority_enabled());
+    copy.run(bars, 4);
+    CHECK(near(copy.position_seen_on_trigger_bar, 0));
+    CHECK(near(source.position_seen_on_trigger_bar, 1));
+
+    FreshParentProbe delayed(Cell::LongPost, 0, BookVariant::ExactPair, false);
+    delayed.attach_pine_execution_adapter(); // previously supplied off stays off
+    CHECK(!delayed.priority_enabled());
+    delayed.run(bars, 4);
+    CHECK(near(delayed.position_seen_on_trigger_bar, 1));
+
+    const broker::OrderPriorityDecision decision{{{{11, 2}, {12, 3}}}};
+    CHECK(decision.sequence(11, 3) == 2);
+    CHECK(decision.sequence(12, 2) == 3);
+    CHECK(decision.sequence(13, 7) == 7); // replacement cannot inherit by priority
+}
+
 int main() {
     std::printf("pre-armed from_entry bracket path cursor\n");
     check_cell(Cell::LongPre, true, true);
@@ -786,6 +910,7 @@ int main() {
     std::printf("exact scope guards and default-on behavior\n");
     check_sort_scope_guards();
     check_cancel_token_scope();
+    check_explicit_attachment_boundary();
 
     std::printf("\n%d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed == 0 ? 0 : 1;

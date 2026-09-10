@@ -14,6 +14,7 @@
 #include "bar.hpp"
 #include "broker_events.hpp"
 #include "compat/pine/intraday_cap.hpp"
+#include "compat/pine/order_priority.hpp"
 #include "series.hpp"
 #include "timeframe.hpp"
 #include "magnifier.hpp"
@@ -36,6 +37,8 @@
 // Generated constructors can explicitly select Pine cap compatibility before
 // any host metadata setter. Older engines keep their legacy default behavior.
 #define PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1 1
+// Explicitly selects cap and retained-parent priority compatibility only.
+#define PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1 1
 
 namespace pineforge {
 
@@ -1100,10 +1103,10 @@ struct StrategyOverrides {
 
 // The C++ subclass contract is internal, unlike pineforge.h's stable C ABI.
 // Changing its layout or vtable requires all generated/native C++ objects to be rebuilt.
-// v3 replaces the v2 cap scalars with a Pine policy and a close obligation.
-// Version the mangled class name so a v2 header's member offsets/vtable cannot
+// v4 adds detached Pine order-priority ownership to the v3 cap boundary.
+// Version the mangled class name so older headers' member offsets/vtable cannot
 // silently bind out-of-line members of this different object layout.
-inline namespace engine_script_run_v3 {
+inline namespace engine_script_run_v4 {
 class BacktestEngine {
 protected:
     // --- Position state ---
@@ -1282,15 +1285,9 @@ protected:
     // Historical fill-triggered recalculation is strictly opt-in. The false
     // branch in dispatch_bar remains the legacy control path.
     bool calc_on_order_fills_ = false;
-    // Narrow ordinary-POOC broker ordering rule for one exact book shape:
-    // while truly flat, a single reissued from_entry bracket can retain an
-    // older sequence slot than its same-source-bar pure-stop parent after the
-    // prior parent was explicitly cancelled and freshly recreated.
-    // That exact two-order book scans the parent first so the child can inspect
-    // the post-entry path before the close-time script body. The metadata key
-    // remains as an explicit A/B override; ordinary execution enables the
-    // TV-pinned rule by default.
-    bool flat_retained_child_fresh_parent_order_ = true;
+    // Detached on bare native construction. Only the explicit Pine frontend
+    // attachment can select its source-shape priority interpretation.
+    compat::pine::OrderPriority pine_order_priority_;
     QtyType default_qty_type_ = QtyType::FIXED;
     double default_qty_value_ = 1.0;
     int pyramiding_ = 1;            // max additional entries in same direction
@@ -4497,6 +4494,13 @@ public:
     // Explicit frontend selection, not a generic native risk switch. This
     // preserves any prior declaration values and does not reset quota/state.
     void enable_pine_intraday_cap() { max_intraday_filled_orders_.attach(); }
+    // Current execution-adapter scope: intraday cap + retained-parent priority.
+    // Idempotent configuration attachment, not a reset or universal Pine mode.
+    // Generated constructors call this before any host metadata is forwarded.
+    void attach_pine_execution_adapter() {
+        max_intraday_filled_orders_.attach();
+        pine_order_priority_.attach();
+    }
     virtual ~BacktestEngine() = default;
     virtual void on_bar(const Bar& bar) = 0;
 
@@ -4795,10 +4799,7 @@ public:
             margin_zero_cover_full_liquidation_ =
                 std::isfinite(value) && value > 0.0;
         }
-        if (key == "flat_retained_child_fresh_parent_order") {
-            flat_retained_child_fresh_parent_order_ =
-                std::isfinite(value) && value > 0.0;
-        }
+        pine_order_priority_.metadata(key, value);
         // Forward through the real base setter used by the C ABI. A selected
         // frontend owns recognition and numeric validation; no derived shadow
         // setter or cap-key interpretation belongs in this transport.
@@ -5141,5 +5142,5 @@ public:
     void trace(const std::string& name, int value)   { trace(name, static_cast<double>(value)); }
 };
 
-} // inline namespace engine_script_run_v3
+} // inline namespace engine_script_run_v4
 } // namespace pineforge
