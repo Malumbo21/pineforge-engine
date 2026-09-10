@@ -1698,8 +1698,10 @@ protected:
     std::unordered_set<std::string> scratch_skip_ids_;
 
     // Reusable scratch for process_pending_orders (capacity persists across
-    // calls, mirroring scratch_skip_ids_). Always cleared before use.
-    std::vector<size_t> scratch_filled_indices_;
+    // calls, mirroring scratch_skip_ids_). Incarnations survive OCA erasure;
+    // vector indices and retained replacement priorities do not identify an
+    // object. Always cleared before use; never persistent cancellation state.
+    std::vector<uint64_t> scratch_filled_incarnations_;
 
     // Per-PASS dual-entry-stop arbitration winner (a flat position resting
     // one long stop-only ENTRY + one short stop-only ENTRY, both touched
@@ -4012,10 +4014,10 @@ private:
     double cover_samebar_market_adds_on_exit(
         const PendingOrder& order, double fill_price,
         PositionReductionCause cause = PositionReductionCause::SCRIPT_ORDER);
-    void cancel_oca_group(const std::string& oca_name, const std::string& exclude_id);
+    void cancel_oca_group(std::string oca_name, std::string exclude_id);
     // Pine v6 oca.reduce: when one sibling fills qty Q, reduce remaining
     // siblings' qty by Q. Siblings whose qty becomes <= 0 are cancelled.
-    void reduce_oca_group(const std::string& oca_name, const std::string& exclude_id,
+    void reduce_oca_group(std::string oca_name, std::string exclude_id,
                           double filled_qty);
     void purge_exit_orders(bool retain_for_pending_entries = false);
 
@@ -4063,16 +4065,16 @@ private:
         bool* limit_leg = nullptr) const;
     bool pending_flat_market_pair_is_live(const PendingOrder& order) const;
     void invalidate_pending_flat_market_pair(int64_t created_seq);
-    void compact_filled_pending_orders(const std::vector<size_t>& filled_indices,
+    void compact_filled_pending_orders(std::vector<uint64_t>& retired_incarnations,
                                        int exit_closed_from_bar,
                                        uint64_t exit_closed_from_incarnation,
                                        bool exit_closed_was_long);
     // Apply a fill to engine state: dispatches by order.type to the
     // per-type apply_*_order_fill helpers below, plus runs the risk
     // gate, intraday-fill cap, OCA cancellation, and bookkeeping that
-    // is common to every fill kind.
-    void apply_filled_order_to_state(PendingOrder& order,
-                                     size_t order_index,
+    // is common to every fill kind. The caller resolves an incarnation to a
+    // current index; admission borrows the book, then dispatch owns a value.
+    void apply_filled_order_to_state(size_t order_index,
                                      double fill_price,
                                      bool fill_is_limit,
                                      const Bar& bar,
@@ -4080,7 +4082,7 @@ private:
                                      int& exit_closed_from_bar,
                                      uint64_t& exit_closed_from_incarnation,
                                      bool& exit_closed_was_long,
-                                     std::vector<size_t>& filled_indices,
+                                     std::vector<uint64_t>& retired_incarnations,
                                      bool flat_dual_stop_pair = false);
     bool stop_entry_margin_admission_declines(
         const PendingOrder& order, double fill_price, const Bar& bar,
@@ -4171,7 +4173,7 @@ private:
     // are left untouched (qty=NaN → full remaining close, as before).
     void reconcile_deferred_layered_exits(
         const std::string& entry_id,
-        std::vector<std::size_t>& zero_reservation_indices);
+        std::vector<uint64_t>& zero_reservation_incarnations);
     void apply_raw_order_fill(PendingOrder& order, double fill_price,
                               double& trail_best_path_state,
                               int& exit_closed_from_bar,
@@ -4502,6 +4504,8 @@ private:
     // request_abort() arriving during a delegating overload's own setup
     // (e.g. the SymInfo/overrides overload's syminfo/inputs copy) is never
     // silently wiped by a second, later clear.
+    // The caller has already validated the complete chart bar array; do not
+    // rescan here or clear an abort that arrived during preflight/setup.
     void run_tf_impl(const Bar* input_bars, int n_input,
                      const std::string& input_tf,
                      const std::string& script_tf,
@@ -4525,6 +4529,16 @@ public:
     virtual ~BacktestEngine() = default;
     virtual void on_bar(const Bar& bar) = 0;
 
+    // All run() overloads preflight the entire chart array before modifying
+    // configuration, resetting state, preparing scripts or dispatching bars.
+    // Require n >= 0, a non-null pointer when n > 0, finite enclosed OHLC,
+    // volume that is finite >= 0 or NaN (unavailable), and strictly increasing
+    // timestamps with representable positive int64 deltas. Finite signed/zero
+    // prices, off-grid prices and gaps are structurally admitted, without a
+    // guarantee about their financial or extreme-calendar arithmetic.
+    // Rejection sets last_error() and preserves state except entry-time error,
+    // run-status and abort bookkeeping. n == 0 retains empty-new-run semantics.
+    // Processing exceptions after preflight do not imply state rollback.
     void run(const Bar* bars, int n);
 
     void run(const Bar* input_bars, int n_input,

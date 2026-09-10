@@ -93,6 +93,17 @@ strategy_free(strategy);
 Every stream function returns `0` on success and `-1` on failure. Read
 #strategy_get_last_error immediately after a failure.
 
+An attempt to begin a stream that is already realtime is rejected without
+replaying warmup, ending the active lifecycle, or disabling its action
+observations. An overflowing tick-volume accumulation is rejected before
+changing the forming bar's OHLCV or consuming the tick's timestamp/sequence.
+
+These validation checks do not make every failure transactional. Errors after
+processing starts can leave partially advanced state; discard/recover the
+instance according to the input-processing failure contract. A plural tick
+call retains repeated single-call semantics: an accepted prefix remains
+applied if a later tick fails.
+
 ## Tick and bar semantics
 
 - Warmup bars must be strictly increasing, confirmed, and use a fixed-duration

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -16,6 +17,43 @@ namespace pineforge {
 using namespace internal;
 
 namespace {
+[[noreturn]] void reject_chart_bar(int index, const char* rule) {
+    throw std::invalid_argument("chart bar[" + std::to_string(index) + "]." + rule);
+}
+
+// Structural admission only: no price-domain, grid, calendar or financial
+// arithmetic policy. Scan the entire supplied array before any run mutation.
+// Each public run() calls this once; run_tf_impl receives validated input.
+void validate_chart_bars(const Bar* bars, int n) {
+    if (n < 0) throw std::invalid_argument("chart bar count must be non-negative");
+    if (n > 0 && bars == nullptr)
+        throw std::invalid_argument("chart bars must be non-null for a nonempty array");
+    for (int i = 0; i < n; ++i) {
+        const Bar& bar = bars[i];
+        if (!std::isfinite(bar.open)) reject_chart_bar(i, "open must be finite");
+        if (!std::isfinite(bar.high)) reject_chart_bar(i, "high must be finite");
+        if (!std::isfinite(bar.low)) reject_chart_bar(i, "low must be finite");
+        if (!std::isfinite(bar.close)) reject_chart_bar(i, "close must be finite");
+        if (bar.low > std::min(bar.open, bar.close))
+            reject_chart_bar(i, "low must not exceed open or close");
+        if (bar.high < std::max(bar.open, bar.close))
+            reject_chart_bar(i, "high must not be below open or close");
+        // NaN is unavailable activity, distinct from a known zero total.
+        if (!std::isnan(bar.volume) && (!std::isfinite(bar.volume) || bar.volume < 0))
+            reject_chart_bar(i, "volume must be non-negative finite or NaN (unavailable)");
+        if (i > 0) {
+            const int64_t previous = bars[i - 1].timestamp;
+            if (bar.timestamp <= previous)
+                reject_chart_bar(i, "timestamp must be strictly increasing");
+            // With increasing signed values, a difference can overflow only
+            // when the previous timestamp is negative. This addition is safe;
+            // do not subtract the timestamps before checking representability.
+            if (previous < 0 && bar.timestamp > std::numeric_limits<int64_t>::max() + previous)
+                reject_chart_bar(i, "timestamp delta exceeds int64 range");
+        }
+    }
+}
+
 // ABI v4 live-runtime surface (task 4): installs this run's forced path
 // order as the thread-local internal::bar_path_uses_high_first override for
 // exactly the duration of the scope, restoring whatever override value was
@@ -911,6 +949,8 @@ void BacktestEngine::run(const Bar* bars, int n) {
     last_error_.clear();
     last_run_status_ = 0;
     abort_requested_.store(false, std::memory_order_relaxed);
+    try {
+    validate_chart_bars(bars, n);
     if (n > 0 && bars != nullptr) {
         last_bar_time_ = bars[n - 1].timestamp;
         last_bar_index_ = n - 1;
@@ -922,7 +962,6 @@ void BacktestEngine::run(const Bar* bars, int n) {
     // order for exactly the duration of this call (see the file-scope
     // PathOrderScope above).
     PathOrderScope path_order_scope(path_order_mode_);
-    try {
     if (!account_currency_fx_timestamps_.empty() && calc_on_order_fills_) {
         throw std::runtime_error(
             "timestamped account-currency FX does not support calc_on_order_fills");
@@ -1476,8 +1515,15 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
     last_error_.clear();
     last_run_status_ = 0;
     abort_requested_.store(false, std::memory_order_relaxed);
+    try {
+    validate_chart_bars(input_bars, n_input);
     run_tf_impl(input_bars, n_input, input_tf, script_tf, bar_magnifier,
                 magnifier_samples, magnifier_dist);
+    } catch (const std::exception& e) {
+        last_error_ = e.what();
+    } catch (...) {
+        last_error_ = "unknown error during BacktestEngine::run";
+    }
 }
 
 void BacktestEngine::run_tf_impl(const Bar* input_bars, int n_input,
@@ -2253,6 +2299,7 @@ void BacktestEngine::run(const Bar* input_bars, int n_input,
     // calls consume it once the bar loop actually starts.
     abort_requested_.store(false, std::memory_order_relaxed);
     try {
+    validate_chart_bars(input_bars, n_input);
     // Store syminfo and inputs
     syminfo_ = syminfo;
     syminfo_mintick_ = syminfo.mintick;

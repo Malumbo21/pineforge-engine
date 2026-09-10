@@ -282,7 +282,7 @@ static void test_request_security_gaps_on_emits_na_between_completions() {
         {102.0, 103.0, 101.0, 102.0, 50, 2'700'000},
         {103.0, 104.0, 102.0, 103.0, 50, 3'600'000},  // first 60m completion
         {104.0, 105.0, 103.0, 104.0, 50, 4'500'000},
-        {105.0, 106.0, 104.0, 105.0, 50, 3900'000},
+        {105.0, 106.0, 104.0, 105.0, 50, 5'400'000},
         {106.0, 107.0, 105.0, 106.0, 50, 6'300'000},
         {107.0, 108.0, 106.0, 107.0, 50, 7'200'000},  // second 60m completion
     };
@@ -290,6 +290,7 @@ static void test_request_security_gaps_on_emits_na_between_completions() {
 
     const auto& seen = strat.seen();
     CHECK(seen.size() == 8);
+    if (seen.size() != 8) return; // Keep the failed size check; avoid invalid indexing.
     CHECK(std::isnan(seen[0]));
 
     bool saw_non_nan = false;

@@ -24,6 +24,7 @@ Bar price_point(double price, double volume, int64_t timestamp) {
 bool BacktestEngine::stream_begin(const Bar* warmup_bars, int n_warmup,
                                   const std::string& input_tf,
                                   const std::string& script_tf) {
+    const StreamPhase phase_before_begin = stream_phase_;
     last_error_.clear();
     try {
         if (calc_on_order_fills_) {
@@ -128,15 +129,22 @@ bool BacktestEngine::stream_begin(const Bar* warmup_bars, int n_warmup,
         barstate_islast_ = true;
         return true;
     } catch (const std::exception& e) {
-        stream_warmup_mode_ = false;
-        stream_phase_ = StreamPhase::IDLE;
-        stream_observe_actions_ = false;
+        // An already-running stream always rejects before warmup or setup.
+        // Reporting that rejection must not terminate its existing lifecycle.
+        // Failures after starting a new setup retain the discard/replay rule.
+        if (phase_before_begin != StreamPhase::REALTIME) {
+            stream_warmup_mode_ = false;
+            stream_phase_ = StreamPhase::IDLE;
+            stream_observe_actions_ = false;
+        }
         last_error_ = e.what();
         return false;
     } catch (...) {
-        stream_warmup_mode_ = false;
-        stream_phase_ = StreamPhase::IDLE;
-        stream_observe_actions_ = false;
+        if (phase_before_begin != StreamPhase::REALTIME) {
+            stream_warmup_mode_ = false;
+            stream_phase_ = StreamPhase::IDLE;
+            stream_observe_actions_ = false;
+        }
         last_error_ = "unknown error during BacktestEngine::stream_begin";
         return false;
     }
@@ -230,13 +238,17 @@ bool BacktestEngine::stream_push_tick(const TradeTick& tick) {
                 tick.price, tick.quantity, stream_next_input_open_ms_);
             stream_has_input_bar_ = true;
         } else {
+            // Validate accumulation before touching OHLC as well as volume.
+            // A rejected update must not poison this interval or consume its
+            // timestamp/sequence. A new interval takes the fresh-bar branch.
+            const double accumulated_volume = stream_input_bar_.volume + tick.quantity;
+            if (!std::isfinite(accumulated_volume)) {
+                throw std::runtime_error("stream tick volume overflow");
+            }
             stream_input_bar_.high = std::max(stream_input_bar_.high, tick.price);
             stream_input_bar_.low = std::min(stream_input_bar_.low, tick.price);
             stream_input_bar_.close = tick.price;
-            stream_input_bar_.volume += tick.quantity;
-            if (!std::isfinite(stream_input_bar_.volume)) {
-                throw std::runtime_error("stream tick volume overflow");
-            }
+            stream_input_bar_.volume = accumulated_volume;
         }
 
         stream_last_price_ = tick.price;

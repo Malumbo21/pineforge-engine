@@ -486,7 +486,9 @@ double BacktestEngine::cover_samebar_market_adds_on_exit(const PendingOrder& ord
 
 
 // Internal helper: cancel OCA group members (except the one that just filled)
-void BacktestEngine::cancel_oca_group(const std::string& oca_name, const std::string& exclude_id) {
+void BacktestEngine::cancel_oca_group(std::string oca_name, std::string exclude_id) {
+    // Direct callers may borrow both strings from the vector being erased.
+    // Value parameters keep membership/exclusion stable throughout remove_if.
     if (oca_name.empty()) return;
     pending_orders_.erase(
         std::remove_if(pending_orders_.begin(), pending_orders_.end(),
@@ -503,8 +505,8 @@ void BacktestEngine::cancel_oca_group(const std::string& oca_name, const std::st
 // Siblings using default sizing (qty == NaN) cannot have a meaningful
 // per-order qty applied at place time, so we conservatively cancel them
 // (this matches the prior, blanket-cancel behaviour for that subset).
-void BacktestEngine::reduce_oca_group(const std::string& oca_name,
-                                      const std::string& exclude_id,
+void BacktestEngine::reduce_oca_group(std::string oca_name,
+                                      std::string exclude_id,
                                       double filled_qty) {
     if (oca_name.empty()) return;
     if (!(filled_qty > 0.0)) return;  // nothing to subtract

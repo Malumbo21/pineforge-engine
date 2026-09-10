@@ -608,7 +608,7 @@ void test_synth_no_deficit_dormant_stop_waits() {
     const std::vector<Bar> bars = synth_bars({
         {100.00, 100.20, 99.80, 100.00},   // [0]
         {100.00, 100.20, 99.80, 100.00},   // [1] signal close
-        {100.00, 100.30, 99.70, 100.50},   // [2] entry bar @100.00; reversal signal
+        {100.00, 100.50, 99.70, 100.50},   // [2] entry bar @100.00; high includes reversal signal close
         {101.40, 101.50, 100.20, 100.30},  // [3] reversal declined at 101.40; stop level 101.00 already gapped through
         {100.40, 101.20, 100.10, 100.50},  // [4] the fresh re-issued stop fills at its level 101.00
         {100.00, 100.20, 99.80, 100.00},   // [5]
@@ -644,7 +644,7 @@ std::vector<Bar> synth_e2_bars() {
     return synth_bars({
         {100.00, 100.20, 99.80, 100.00},   // [0]
         {100.00, 100.20, 99.80, 100.00},   // [1] signal close (short)
-        {100.00, 100.30, 99.70, 100.50},   // [2] entry bar @100.00; reversal signal at its close
+        {100.00, 100.50, 99.70, 100.50},   // [2] entry bar @100.00; high includes reversal signal close
         {101.50, 114.00, 100.80, 112.00},  // [3] the declined-reversal bar (low first)
         {110.00, 111.00, 109.00, 110.00},  // [4]
         {110.00, 110.20, 109.80, 110.00},  // [5]
@@ -766,7 +766,7 @@ void test_synth_admitted_pair_purges_held_bracket() {
     const std::vector<Bar> bars = synth_bars({
         {100.00, 100.20, 99.80, 100.00},   // [0]
         {100.00, 100.20, 99.80, 100.00},   // [1] signal close (short)
-        {100.00, 100.30, 99.70, 100.50},   // [2] entry bar @100.00; reversal signal at its close
+        {100.00, 100.50, 99.70, 100.50},   // [2] entry bar @100.00; high includes reversal signal close
         {100.20, 100.60, 99.90, 100.40},   // [3] the pair is admitted at 100.20
         {100.40, 105.50, 100.10, 105.00},  // [4] a live "X" would fill @105.00 here
         {105.00, 105.20, 104.80, 105.00},  // [5]

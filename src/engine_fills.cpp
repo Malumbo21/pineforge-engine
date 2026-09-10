@@ -24,6 +24,29 @@ using namespace internal;
 
 namespace {
 
+// A pass keeps identities and ordering hints, never borrowed vector elements.
+// The hint makes the unchanged-book path constant time; OCA erasure requires
+// re-resolution by incarnation. A reused label/priority cannot match this key.
+struct PendingOrderHandle {
+    uint64_t incarnation;
+    size_t index_hint;
+
+    size_t resolve(const std::vector<PendingOrder>& orders) const {
+        if (index_hint < orders.size()
+            && orders[index_hint].incarnation == incarnation) return index_hint;
+        for (size_t i = 0; i < orders.size(); ++i) {
+            if (orders[i].incarnation == incarnation) return i;
+        }
+        return orders.size();
+    }
+};
+
+bool same_pending_order(const PendingOrder& a, const PendingOrder& b) {
+    // Preserve address identity for legacy hand-built zero-ID fixtures; an
+    // owned matched-order value uses the production object's nonzero identity.
+    return &a == &b || (a.incarnation != 0 && a.incarnation == b.incarnation);
+}
+
 // Both post-full-close cleanup sites must use this exact predicate. The
 // physical same-id fact is snapshotted when deferred close_all is called,
 // because the filling close drains pyramid_entries_ before cleanup runs.
@@ -352,19 +375,28 @@ void BacktestEngine::process_pending_orders(const Bar& bar, bool before_pooc_scr
         // with an empty set every order classifies Skip and the pass is a
         // structural no-op. Bail before paying the scan.
         if (opposing_pass == 1 && pass0_opposing_skip_ids.empty()) break;
-    std::vector<size_t>& filled_indices = scratch_filled_indices_;
-    filled_indices.clear();
+    std::vector<uint64_t>& retired_incarnations = scratch_filled_incarnations_;
+    retired_incarnations.clear();
     // TV generally cancels stale SAME-DIRECTION entries after a full exit.
     // Opposite entries, same-call-bar under-cap co-queues, resting pure LIMITs,
     // and the physically-live same-ID pure-STOP close_all cell are the narrow
     // independently-proven exceptions below.
 
-    for (size_t i = 0; i < pending_orders_.size(); i++) {
+    std::vector<PendingOrderHandle> pass_orders;
+    pass_orders.reserve(pending_orders_.size());
+    for (size_t i = 0; i < pending_orders_.size(); ++i) {
+        pass_orders.push_back({pending_orders_[i].incarnation, i});
+    }
+    for (const PendingOrderHandle handle : pass_orders) {
+        size_t i = handle.resolve(pending_orders_);
+        if (i == pending_orders_.size()) continue; // canceled earlier this pass
+        FillEvaluation fill;
+        {
         PendingOrder& order = pending_orders_[i];
         if (intraday_loss_cancel_pending_) {
             // strategy.risk.max_intraday_loss fired on an earlier fill of
             // this sweep: TradingView cancels every pending order there.
-            filled_indices.push_back(i);
+            retired_incarnations.push_back(order.incarnation);
             continue;
         }
         auto eligibility = classify_order_eligibility(
@@ -373,19 +405,20 @@ void BacktestEngine::process_pending_orders(const Bar& bar, bool before_pooc_scr
             exit_closed_was_long, bar, flat_dual_stop_pair);
         if (eligibility == OrderEligibility::Remove) {
             invalidate_pending_flat_market_pair(order.created_seq);
-            filled_indices.push_back(i);
+            retired_incarnations.push_back(order.incarnation);
             continue;
         }
         if (eligibility == OrderEligibility::Skip) {
             continue;
         }
 
-        auto fill = evaluate_fill_price(
+        fill = evaluate_fill_price(
             order, i, bar, opposing_pass, trail_best_path_state,
             pass0_opposing_skip_ids);
         if (fill.kind != FillEvaluation::Kind::Fill) {
             continue;
         }
+        } // release the book borrow before a pre-exit margin intervention
 
         // finding-308: TV books forced liquidation chronologically on the
         // intrabar path. If this priced exit fills strictly AFTER the bar's
@@ -396,7 +429,7 @@ void BacktestEngine::process_pending_orders(const Bar& bar, bool before_pooc_scr
         // exactly like the end-of-bar call sites do.
         if (fill.exit_path_fill
             && ((before_pooc_script && broker_fill_event_seq_ == fills_at_pass_start
-                 && pooc_trail_money_pre_exit_scope(bar, order, fill.exit_path_position)
+                 && pooc_trail_money_pre_exit_scope(bar, pending_orders_[i], fill.exit_path_position)
                  && tv_money_long_margin_call(bar, /*carried_pooc_pre_close=*/true,
                                               /*opening_only=*/false, fill.exit_path_position))
                 || margin_call_slice_before_priced_exit(
@@ -404,7 +437,14 @@ void BacktestEngine::process_pending_orders(const Bar& bar, bool before_pooc_scr
             refresh_frozen_default_sizing_after_margin_call();
         }
 
-        const bool path_winner_stop_margin_decline =
+        // A margin intervention can consume a revived bracket and shift this
+        // same book. Re-resolve the selected object before admission as well.
+        i = handle.resolve(pending_orders_);
+        if (i == pending_orders_.size()) continue;
+        bool path_winner_stop_margin_decline;
+        {
+        const PendingOrder& order = pending_orders_[i];
+        path_winner_stop_margin_decline =
             continue_after_stop_margin_decline_scope
             && ((dual_entry_path_ == DualEntryStopPathWinner::LongFirst
                  && order.is_long)
@@ -413,13 +453,14 @@ void BacktestEngine::process_pending_orders(const Bar& bar, bool before_pooc_scr
             && check_risk_allow_entry(order.is_long)
             && stop_entry_margin_admission_declines(
                 order, fill.fill_price, bar, flat_dual_stop_pair);
+        }
         const double realized_before_fill = net_profit_sum_;
         apply_filled_order_to_state(
-            order, i, fill.fill_price, fill.is_limit_fill, bar,
+            i, fill.fill_price, fill.is_limit_fill, bar,
             trail_best_path_state,
             exit_closed_from_bar, exit_closed_from_incarnation,
             exit_closed_was_long,
-            filled_indices, flat_dual_stop_pair);
+            retired_incarnations, flat_dual_stop_pair);
         if (risk_max_intraday_loss_ > 0.0) {
             // The closing fill's own realized P&L is not yet part of the
             // equity TradingView checks at this tick (pinned t1).
@@ -435,7 +476,7 @@ void BacktestEngine::process_pending_orders(const Bar& bar, bool before_pooc_scr
         materialize_relative_exit_prices_for_live_position();
     }
     compact_filled_pending_orders(
-        filled_indices, exit_closed_from_bar, exit_closed_from_incarnation,
+        retired_incarnations, exit_closed_from_bar, exit_closed_from_incarnation,
         exit_closed_was_long);
     }  // opposing_pass
 
@@ -515,11 +556,11 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
     for (int opposing_pass = 0; opposing_pass < 2; ++opposing_pass) {
         if (opposing_pass == 1 && pass0_opposing_skip_ids.empty()) break;
 
-        std::vector<size_t>& filled_indices = scratch_filled_indices_;
-        filled_indices.clear();
+        std::vector<uint64_t>& retired_incarnations = scratch_filled_incarnations_;
+        retired_incarnations.clear();
 
         struct FillCandidate {
-            size_t order_index;
+            PendingOrderHandle order;
             FillEvaluation fill;
             double path_position;
             bool was_trail;
@@ -537,7 +578,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 exit_closed_was_long, bar);
             if (eligibility == OrderEligibility::Remove) {
                 invalidate_pending_flat_market_pair(order.created_seq);
-                filled_indices.push_back(i);
+                retired_incarnations.push_back(order.incarnation);
                 continue;
             }
             if (eligibility == OrderEligibility::Skip) continue;
@@ -668,7 +709,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             // naturally tie at position zero and fall back to creation order.
             internal::first_touch_position(bar, fill.fill_price, &path_position);
             candidates.push_back({
-                i, fill, path_position, last_exit_fill_was_trail_,
+                {order.incarnation, i}, fill, path_position, last_exit_fill_was_trail_,
                 order.created_seq, chart_waypoint_price});
         }
 
@@ -689,7 +730,7 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
         // historical book. Other order races and scheduler modes retain
         // the existing one-fill/recalc path.
         const bool group_resting_stops = [&] {
-            if (candidates.size() < 2 || !filled_indices.empty()
+            if (candidates.size() < 2 || !retired_incarnations.empty()
                 || !calc_on_order_fills_ || !coof_scheduler_active_
                 || !coof_evaluating_path_segment_ || !coof_hist_is_segment_
                 || process_orders_on_close_ || bar_magnifier_enabled_
@@ -721,7 +762,9 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             }
             if (reserved > position_qty_ + kQtyEpsilon) return false;
             for (const FillCandidate& candidate : candidates) {
-                const PendingOrder& pending = pending_orders_[candidate.order_index];
+                const size_t index = candidate.order.resolve(pending_orders_);
+                if (index == pending_orders_.size()) return false;
+                const PendingOrder& pending = pending_orders_[index];
                 if (candidate.was_trail || candidate.fill.is_limit_fill
                     || !candidate.fill.exit_path_fill
                     || pending.stop_price > bar.open
@@ -735,7 +778,10 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
         size_t grouped_fills = 0;
 
         for (const FillCandidate& candidate : candidates) {
-            PendingOrder& order = pending_orders_[candidate.order_index];
+            const size_t order_index = candidate.order.resolve(pending_orders_);
+            if (order_index == pending_orders_.size()
+                || std::find(retired_incarnations.begin(), retired_incarnations.end(),
+                             candidate.order.incarnation) != retired_incarnations.end()) continue;
             last_exit_fill_was_trail_ = candidate.was_trail;
 
             // Candidate discovery looks across the whole remaining segment,
@@ -751,17 +797,17 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             // Capture before the fill kernel: other order kinds may erase OCA
             // siblings, invalidating references into the pending-order vector.
             const bool fresh_coof_market_entry =
-                order.type == OrderType::MARKET
-                && order.created_during_coof_recalc
-                && order.created_bar == bar_index_
+                pending_orders_[order_index].type == OrderType::MARKET
+                && pending_orders_[order_index].created_during_coof_recalc
+                && pending_orders_[order_index].created_bar == bar_index_
                 && side_before_fill == PositionSide::FLAT;
-            const uint64_t opening_incarnation = order.incarnation;
+            const uint64_t opening_incarnation = candidate.order.incarnation;
             apply_filled_order_to_state(
-                order, candidate.order_index, candidate.fill.fill_price,
+                order_index, candidate.fill.fill_price,
                 candidate.fill.is_limit_fill, bar,
                 trail_best_path_state, exit_closed_from_bar,
                 exit_closed_from_incarnation, exit_closed_was_long,
-                filled_indices);
+                retired_incarnations);
             if (risk_max_intraday_loss_ > 0.0) {
                 // See process_pending_orders: the closing fill's own P&L is
                 // excluded at its own tick.
@@ -793,12 +839,8 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             // candidate has passed through the ordinary fill kernel.
             if (group_resting_stops && position_side_ != PositionSide::FLAT) continue;
 
-            std::sort(filled_indices.begin(), filled_indices.end());
-            filled_indices.erase(
-                std::unique(filled_indices.begin(), filled_indices.end()),
-                filled_indices.end());
             compact_filled_pending_orders(
-                filled_indices, exit_closed_from_bar,
+                retired_incarnations, exit_closed_from_bar,
                 exit_closed_from_incarnation,
                 exit_closed_was_long);
             finish_intraday_loss_cancel();
@@ -817,12 +859,8 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             return result;
         }
 
-        std::sort(filled_indices.begin(), filled_indices.end());
-        filled_indices.erase(
-            std::unique(filled_indices.begin(), filled_indices.end()),
-            filled_indices.end());
         compact_filled_pending_orders(
-            filled_indices, exit_closed_from_bar,
+            retired_incarnations, exit_closed_from_bar,
             exit_closed_from_incarnation,
             exit_closed_was_long);
         if (result.filled) {
@@ -4527,12 +4565,10 @@ bool BacktestEngine::same_bar_market_close_artifact_is_live(
         return false;
     }
     const std::string target_id = order.id.substr(kClosePrefix.size());
-    if (pending_orders_.empty()
-        || &order < pending_orders_.data()
-        || &order >= pending_orders_.data() + pending_orders_.size()) {
-        return false;
-    }
-    const size_t self = static_cast<size_t>(&order - pending_orders_.data());
+    const auto live = std::find_if(pending_orders_.begin(), pending_orders_.end(),
+        [&](const PendingOrder& pending) { return same_pending_order(pending, order); });
+    if (live == pending_orders_.end()) return false;
+    const size_t self = static_cast<size_t>(live - pending_orders_.begin());
     for (size_t j = self + 1; j < pending_orders_.size(); ++j) {
         const PendingOrder& sib = pending_orders_[j];
         if (sib.type == OrderType::MARKET
@@ -4756,17 +4792,21 @@ void BacktestEngine::invalidate_pending_flat_market_pair(int64_t created_seq) {
 // cleaned out. Opposite-direction-prep stops armed during a previous
 // position cycle survive (probe 93).
 void BacktestEngine::compact_filled_pending_orders(
-        const std::vector<size_t>& filled_indices,
+        std::vector<uint64_t>& retired_incarnations,
         int exit_closed_from_bar,
         uint64_t exit_closed_from_incarnation,
         bool exit_closed_was_long) {
-    if (filled_indices.empty()) return;
-    // filled_indices is built by push_back(i) with i strictly increasing over
-    // the inner fill loop (at most one push per iteration), so it is already
-    // sorted ascending with no duplicates. A binary search over the vector
-    // replaces a per-call hash-table build for the membership test below.
-    auto is_filled = [&](size_t idx) {
-        return std::binary_search(filled_indices.begin(), filled_indices.end(), idx);
+    if (retired_incarnations.empty()) return;
+    // Fill/path order need not be incarnation order (replacement preserves
+    // priority). Sort the identity ledger, never infer retirement from a slot
+    // that an immediate OCA cancellation may have shifted or erased.
+    std::sort(retired_incarnations.begin(), retired_incarnations.end());
+    retired_incarnations.erase(
+        std::unique(retired_incarnations.begin(), retired_incarnations.end()),
+        retired_incarnations.end());
+    auto is_filled = [&](uint64_t incarnation) {
+        return std::binary_search(retired_incarnations.begin(), retired_incarnations.end(),
+                                  incarnation);
     };
     PositionSide closed_side =
         exit_closed_was_long ? PositionSide::LONG : PositionSide::SHORT;
@@ -4784,7 +4824,7 @@ void BacktestEngine::compact_filled_pending_orders(
         // (they MUST stay in lockstep): a same-direction entry co-queued on the
         // close's own call bar survives ONLY if it was within the pyramiding cap
         // at placement. A co-queued STOP that does NOT fill on the close bar
-        // reaches compaction without ever entering filled_indices, so without
+        // reaches compaction without ever entering retired_incarnations, so without
         // this term it would be wiped here even though classify spared it (the
         // reverted M1 hit exactly this — R-KEEP-stop failed under a classify-only
         // fix). Over-cap co-queues and ordinary different-ID prior-bar carries
@@ -4808,7 +4848,7 @@ void BacktestEngine::compact_filled_pending_orders(
             && !resting_limit_entry_carry
             // round 8 family S, rule 2 (lockstep with classify_order_eligibility).
             && !pending_orders_[read].sbmt_kept_over_cap;
-        if (!is_filled(read)
+        if (!is_filled(pending_orders_[read].incarnation)
             && !stale_same_direction_entry_after_exit) {
             if (write != read) pending_orders_[write] = std::move(pending_orders_[read]);
             ++write;
@@ -5255,7 +5295,6 @@ bool BacktestEngine::stop_entry_margin_admission_declines(
 // cancellation, and tracks the same-direction-after-exit cleanup that
 // the post-loop compaction needs to mirror.
 void BacktestEngine::apply_filled_order_to_state(
-        PendingOrder& order,
         size_t order_index,
         double fill_price,
         bool fill_is_limit,
@@ -5264,9 +5303,18 @@ void BacktestEngine::apply_filled_order_to_state(
         int& exit_closed_from_bar,
         uint64_t& exit_closed_from_incarnation,
         bool& exit_closed_was_long,
-        std::vector<size_t>& filled_indices,
+        std::vector<uint64_t>& retired_incarnations,
         bool flat_dual_stop_pair) {
-    const bool inherits_pooc_close_fill =
+    PendingOrder matched_order;
+    bool inherits_pooc_close_fill;
+    // Admission decisions shared with post-dispatch opening ownership. They
+    // are fill-local values, independent of the pending vector's lifetime.
+    bool admitted_flat_on_frozen_sizing_price = false;
+    bool admitted_flat_on_price_gap_band = false;
+    bool will_trigger_cap = false;
+    {
+    PendingOrder& order = pending_orders_.at(order_index);
+    inherits_pooc_close_fill =
         intraday_cap_count_pooc_full_close_fills_
         && order.incarnation != 0
         && order.incarnation
@@ -5276,7 +5324,7 @@ void BacktestEngine::apply_filled_order_to_state(
             intraday_cap_pooc_close_inheritor_incarnation_ = 0;
         }
         invalidate_pending_flat_market_pair(order.created_seq);
-        filled_indices.push_back(order_index);
+        retired_incarnations.push_back(order.incarnation);
     };
     // design-declined-reversal-close-leg: a close flagged by the reversal
     // decline is Removed by classify_order_eligibility in the ordinary kernel,
@@ -5303,15 +5351,6 @@ void BacktestEngine::apply_filled_order_to_state(
     if (order.dormant_bracket && !dormant_bracket_trail_leg_live(order)) {
         return;
     }
-    // Fill-local proof that KI-54 admitted this order as a flat open on its
-    // frozen sizing price. Merely carrying a snapshot is insufficient: true
-    // reversals are admitted on their actual fill, and paired reentries may
-    // fill from flat despite having been placed from a live position.
-    bool admitted_flat_on_frozen_sizing_price = false;
-    // This call only: a true-flat positive gap admitted on rounded price
-    // still needs its existing opening-margin checkpoint after the fill.
-    bool admitted_flat_on_price_gap_band = false;
-
     if (order.type == OrderType::MARKET || order.type == OrderType::ENTRY) {
         PositionSide requested = order.is_long ? PositionSide::LONG : PositionSide::SHORT;
         bool is_opposite_entry =
@@ -5774,8 +5813,9 @@ void BacktestEngine::apply_filled_order_to_state(
             if (index != order_index
                 && (pending_orders_[index].type != OrderType::EXIT
                     || pending_orders_[index].id.compare(0, kClosePrefix.size(), kClosePrefix) != 0
-                    || std::find(filled_indices.begin(), filled_indices.end(), index)
-                           == filled_indices.end())) {
+                    || std::find(retired_incarnations.begin(), retired_incarnations.end(),
+                                 pending_orders_[index].incarnation)
+                           == retired_incarnations.end())) {
                 return false;
             }
         }
@@ -6339,7 +6379,6 @@ void BacktestEngine::apply_filled_order_to_state(
     //   - Second impl recharged the counter after each cap-cycle so
     //     multiple cap-closes fired per chart-day (3459 engine vs
     //     1957 TV trades on 97b — 43% over-count).
-    bool will_trigger_cap = false;
     if (max_intraday_filled_orders_ > 0) {
         const int64_t cur_day = intraday_order_day_key();
         if (cur_day != intraday_day_) {
@@ -6370,7 +6409,13 @@ void BacktestEngine::apply_filled_order_to_state(
             (intraday_fill_count_ >= max_intraday_filled_orders_);
     }
 
-    filled_indices.push_back(order_index);
+    retired_incarnations.push_back(order.incarnation);
+    // Admission updates above belong to the live object. From dispatch on,
+    // keep an owned matched value: entry cleanup and OCA may erase/move book
+    // elements before trade metadata and cap handling finish using this order.
+    matched_order = order;
+    }
+    PendingOrder& order = matched_order;
 
     // Track trades before fill to set exit_comment/exit_id on new trades
     size_t trades_before = trades_.size();
@@ -6868,7 +6913,7 @@ void BacktestEngine::apply_filled_order_to_state(
         }
         if (!pyramid_entries_.empty()) {
             reconcile_deferred_layered_exits(
-                pyramid_entries_.back().entry_id, filled_indices);
+                pyramid_entries_.back().entry_id, retired_incarnations);
         }
     }
 
@@ -6890,7 +6935,7 @@ void BacktestEngine::apply_filled_order_to_state(
         && (order.type == OrderType::MARKET
             || order.type == OrderType::ENTRY
             || order.type == OrderType::RAW_ORDER)) {
-        reconcile_deferred_layered_exits(order.id, filled_indices);
+        reconcile_deferred_layered_exits(order.id, retired_incarnations);
     }
 
     if (position_side_ == PositionSide::FLAT) {
@@ -7108,7 +7153,7 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
         return false;
     }
     for (const PendingOrder& other : pending_orders_) {
-        if (&other == &order) continue;
+        if (same_pending_order(other, order)) continue;
         if (other.type == OrderType::EXIT) {
             const bool bracket = std::isfinite(other.stop_price)
                 || std::isfinite(other.limit_price)
@@ -7828,7 +7873,7 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
 
 void BacktestEngine::reconcile_deferred_layered_exits(
         const std::string& entry_id,
-        std::vector<std::size_t>& zero_reservation_indices) {
+        std::vector<uint64_t>& zero_reservation_incarnations) {
     if (entry_id.empty()) return;
     const double live_pos = position_qty_;
     if (live_pos <= kQtyEpsilon) return;
@@ -7887,7 +7932,7 @@ void BacktestEngine::reconcile_deferred_layered_exits(
             o.trail_points = std::numeric_limits<double>::quiet_NaN();
             o.trail_price = std::numeric_limits<double>::quiet_NaN();
             o.trail_offset = std::numeric_limits<double>::quiet_NaN();
-            zero_reservation_indices.push_back(i);
+            zero_reservation_incarnations.push_back(o.incarnation);
             continue;
         }
         o.qty = res;
@@ -8039,9 +8084,9 @@ void BacktestEngine::materialize_relative_exit_prices_for_live_position() {
 // the reversal would have flipped, must not fire either (the pre-fix engine let
 // it fill and went flat, then re-entered on a later mid-span signal TV no-ops).
 // Flag every matching pending close; classify_order_eligibility and the
-// apply-time guard then Remove it from both fill kernels. NEVER erase
-// pending_orders_ in place and NEVER push later indices into filled_indices
-// here — that would corrupt the fill loop / compaction binary-search invariant.
+// apply-time guard then Remove it from both fill kernels. Keep this as in-place
+// suppression: later classification/admission must observe the same predicate
+// and retire each affected incarnation at its existing checkpoint.
 //
 // Binding (design doc item 3, verified against the actual queue_deferred_close_
 // order / strategy.close conventions):

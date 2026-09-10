@@ -1,4 +1,5 @@
 set(TEST_SOURCES
+    test_bulk_preflight
     test_opening_obligation
     test_high_value_price_admission
     test_integer_opening_budget
@@ -75,6 +76,7 @@ set(TEST_SOURCES
     test_engine_trade_accessors
     test_engine_risk
     test_strategy_oca
+    test_pending_order_identity
     test_oca_raw_pyramid_add
     test_strategy_pyramiding
     test_pyramiding_count_partial_drain
@@ -195,6 +197,7 @@ set(TEST_SOURCES
     test_dropped_reversal_mc_first
     test_percent_equity_open_entry_fee
     test_streaming
+    test_stream_preflight_rejections
     test_calc_on_order_fills
     test_coof_cascade_eligibility
     test_coof_open_recalc_context

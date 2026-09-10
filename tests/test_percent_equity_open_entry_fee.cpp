@@ -32,14 +32,14 @@ bool near(double lhs, double rhs, double tolerance = 1e-9) {
     return std::abs(lhs - rhs) <= tolerance;
 }
 
-Bar bar(double price) {
+Bar bar(double price, int64_t timestamp = 2000) {
     Bar result;
     result.open = price;
     result.high = price;
     result.low = price;
     result.close = price;
     result.volume = 1.0;
-    result.timestamp = 2000;
+    result.timestamp = timestamp;
     return result;
 }
 
@@ -315,7 +315,7 @@ void test_margin_ledger_is_independent_of_default_percent() {
 
 void test_fifo_partial_scales_surviving_paid_fee_snapshot() {
     PartialFeeSnapshotProbe probe;
-    const Bar bars[] = {bar(100.0), bar(100.0), bar(100.0)};
+    const Bar bars[] = {bar(100.0, 2000), bar(100.0, 62000), bar(100.0, 122000)};
     probe.run(bars, 3);
 
     CHECK(near(probe.remaining_qty, 6.0));
@@ -328,7 +328,7 @@ void test_fifo_partial_scales_surviving_paid_fee_snapshot() {
 
 void test_percent_typed_reversal_does_not_double_debit_old_fee() {
     PercentTypedReversalProbe probe;
-    const Bar bars[] = {bar(100.0), bar(100.0)};
+    const Bar bars[] = {bar(100.0, 2000), bar(100.0, 62000)};
     probe.run(bars, 2);
 
     CHECK(probe.trade_count() == 1);

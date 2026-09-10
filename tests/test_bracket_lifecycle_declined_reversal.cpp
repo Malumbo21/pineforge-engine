@@ -279,7 +279,7 @@ private:
 static std::vector<Bar> short_mc_bars(const Bar& post_event_bar) {
     return {
         mk(1000, 100, 100, 100, 100),                 // bar0: place S
-        mk(2000, 100, 101,  99,  90),                 // bar1: S fills @100; arm
+        mk(2000, 100, 101,  90,  90),                 // bar1: S fills @100; low includes signal close
         mk(3000,  91,  91,  91,  91),                 // bar2: L declines; kill
         mk(4000, 165, 170, 160, 168),                 // bar3: MC partial @170
         post_event_bar,                               // bar4

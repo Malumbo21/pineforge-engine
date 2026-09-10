@@ -354,6 +354,9 @@ void test_changed_points_restart_changed_offset_keeps() {
         {true, 1, 2314.37, "famz-trail-L-20260425-D"},
         {true, 2, 2314.43, "famz-trail-L-20260425-E"},
     };
+    // Synthetic parity padding only; retain every actual event bar below.
+    Bar short_padding = kEth1225_0645;
+    short_padding.timestamp -= 15 * 60 * 1000;
     for (const Case& c : cases) {
         // The tapes' parity: the entry bar's close carries bar_index odd.
         // Short: bars 06:45 (0), 07:00 signal (1), 07:15 entry (2) — pad one
@@ -361,7 +364,7 @@ void test_changed_points_restart_changed_offset_keeps() {
         // 00:45 entry (1).
         std::vector<Bar> bars = c.is_long
             ? std::vector<Bar>{kEth0425_0030, kEth0425_0045, kEth0425_0100, kEth0425_0115}
-            : std::vector<Bar>{kEth1225_0645, kEth1225_0645, kEth1225_0700, kEth1225_0715,
+            : std::vector<Bar>{short_padding, kEth1225_0645, kEth1225_0700, kEth1225_0715,
                                kEth1225_0730, kEth1225_0745};
         Goat p(10000.0);
         p.signal_bar = c.is_long ? 0 : 2;

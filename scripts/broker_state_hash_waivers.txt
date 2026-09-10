@@ -97,7 +97,7 @@ fold_exit_trail_peak_         # doc: "Transient companion for TRAIL exits"; NaN 
 last_exit_fill_was_trail_     # set by evaluate_fill_price, consumed same call chain by apply_filled_order_to_state
 intraday_loss_evaluating_     # transient evaluation flag: reentrancy guard, true only inside evaluate_max_intraday_loss, always false on return
 scratch_skip_ids_             # doc: "Not state -- must be empty across calls"
-scratch_filled_indices_       # doc: "Always cleared before use"
+scratch_filled_incarnations_  # doc: "Always cleared before use"
 named_entry_cancelled_incarnation_in_current_eval_  # doc: "invoke_chart_on_bar clears the map before each script execution"
 
 # --- Per-source-bar same-bar strategy.close batching scratch: the code's
