@@ -88,7 +88,7 @@ uint64_t BacktestEngine::broker_state_hash() const {
     Fnv f;
     // v6 includes resolved exit-leg owner/coordinates and immutable Pine placement evidence.
     // It is a serialization boundary, independent of the public C ABI version.
-    f.s("pineforge-broker-state/v6");
+    f.s("pineforge-broker-state/v7");
 
     // --- Position core ---
     f.i(static_cast<int64_t>(position_side_));
@@ -211,8 +211,13 @@ uint64_t BacktestEngine::broker_state_hash() const {
         f.u(o.signal_close_mc_fill_seq);
         // Round-8 family S same-bar MARKET transaction (sizing frozen at
         // placement) and its strategy.close(id) companion.
-        f.b(o.sbmt_member); f.d(o.sbmt_own_qty); f.d(o.sbmt_tx_qty);
-        f.b(o.sbmt_kept_over_cap); f.d(o.sbmt_close_qty); f.b(o.sbmt_close_buy);
+        f.i(static_cast<int64_t>(o.pine_frozen_market_instruction.kind()));
+        if (const auto* transaction = o.pine_frozen_market_instruction.transaction()) {
+            f.d(transaction->own_units); f.d(transaction->transaction_units);
+        }
+        if (const auto* close = o.pine_frozen_market_instruction.targeted_close()) {
+            f.s(close->target_id);
+        }
         // KI-65 dual same-bar opposite-MARKET pairing candidate/finalization.
         f.b(o.paired_flat_market_candidate);
         f.d(o.paired_flat_market_own_qty);
@@ -291,10 +296,19 @@ uint64_t BacktestEngine::broker_state_hash() const {
         f.d(o.explicit_slipped_signal_close);
         // Round-7 default-percent stop placement basis.
         f.d(o.default_stop_placement_signal_close);
-        // POOC global-full-exit relation bits.
-        f.b(o.pooc_global_full_exit_dynamic_qty);
-        f.b(o.pooc_global_full_exit_tracks_bound_adds);
-        f.b(o.pooc_global_full_exit_bound_add);
+        f.b(o.reservation_expansion.capture().has_value());
+        if (const auto& capture = o.reservation_expansion.capture()) {
+            f.i(capture->position_cycle);
+            f.i(static_cast<int64_t>(capture->side));
+            f.b(capture->first_later_admission.has_value());
+            if (const auto& admission = capture->first_later_admission) {
+                f.u(*admission);
+            }
+        }
+        f.b(o.reservation_growth_source.reservation_owner().has_value());
+        if (const auto& receiver = o.reservation_growth_source.reservation_owner()) {
+            f.u(*receiver);
+        }
         // Suppressed-close ledger re-credit amounts.
         f.d(o.suppressed_close_consumed_ledger_qty);
         f.d(o.suppressed_close_retired_ledger_qty);

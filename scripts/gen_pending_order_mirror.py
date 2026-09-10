@@ -61,6 +61,9 @@ TYPE_MAP: dict[str, tuple[str, str]] = {
 # Public v1 is append-only. Removed native fields survive only as one-way
 # deprecated output projections at their original offsets.
 LEGACY_OUTPUTS = {
+    "pooc_global_full_exit_dynamic_qty": "src.reservation_expansion.population_open() ? 1 : 0",
+    "pooc_global_full_exit_tracks_bound_adds": "src.reservation_expansion.capture().has_value() ? 1 : 0",
+    "pooc_global_full_exit_bound_add": "src.reservation_growth_source.reservation_owner().has_value() ? 1 : 0",
     "coof_suppress_stop_on_entry_bar": "src.pine_exit_activation.holds_stop() ? 1 : 0",
     "coof_suppress_limit_on_entry_bar": "src.pine_exit_activation.holds_limit() ? 1 : 0",
     "created_during_coof_recalc": "src.birth.from_fill() ? 1 : 0",
@@ -71,8 +74,34 @@ LEGACY_OUTPUTS = {
     "created_while_in_position": "src.type == OrderType::EXIT && src.created_position_side != PositionSide::FLAT ? 1 : 0",
     "requested_partial": "src.quantity_request.is_partial(1e-9, 1e-9) ? 1 : 0",
     "full_percent_exit_request": "src.quantity_request.requests_all() ? 1 : 0",
+    "sbmt_member": "src.pine_frozen_market_instruction.active() ? 1 : 0",
+    "sbmt_own_qty": "src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->own_units : std::numeric_limits<double>::quiet_NaN()",
+    "sbmt_tx_qty": "src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->transaction_units : std::numeric_limits<double>::quiet_NaN()",
+    "sbmt_kept_over_cap": "src.pine_frozen_market_instruction.transaction() && src.over_pyramiding_cap_at_placement ? 1 : 0",
+    "sbmt_close_qty": "src.pine_frozen_market_instruction.targeted_close() ? src.quantity_request.intent()->units() : std::numeric_limits<double>::quiet_NaN()",
+    "sbmt_close_buy": "src.pine_frozen_market_instruction.targeted_close() && src.created_position_side == PositionSide::SHORT ? 1 : 0",
 }
 COMPOSITE_MAP = {
+    "ReservationExpansion": [
+        # An eight-byte first field preserves ff54's entire 142-field object,
+        # including trailing padding, before any appended smaller fields.
+        ("position_cycle", "int64_t", "src.{m}.capture() ? src.{m}.capture()->position_cycle : 0"),
+        ("present", "uint8_t", "src.{m}.capture().has_value() ? 1 : 0"),
+        ("side", "int32_t", "src.{m}.capture() ? static_cast<int32_t>(src.{m}.capture()->side) : 0"),
+        ("first_later_admission_present", "uint8_t", "src.{m}.capture() && src.{m}.capture()->first_later_admission ? 1 : 0"),
+        ("first_later_admission", "uint64_t", "src.{m}.capture() && src.{m}.capture()->first_later_admission ? *src.{m}.capture()->first_later_admission : 0"),
+    ],
+    "ReservationGrowthSource": [
+        ("present", "uint8_t", "src.{m}.reservation_owner().has_value() ? 1 : 0"),
+        ("reservation_owner", "uint64_t", "src.{m}.reservation_owner() ? *src.{m}.reservation_owner() : 0"),
+    ],
+    "PineFrozenMarketInstruction": [
+        # Start after the full ff54 142-field prefix, including trailing padding.
+        ("kind", "uint64_t", "static_cast<uint64_t>(src.{m}.kind())"),
+        ("own_units", "double", "src.{m}.transaction() ? src.{m}.transaction()->own_units : 0.0"),
+        ("transaction_units", "double", "src.{m}.transaction() ? src.{m}.transaction()->transaction_units : 0.0"),
+        ("target_id", "std::string", "src.{m}.targeted_close() ? src.{m}.targeted_close()->target_id : std::string()"),
+    ],
     "ExitLegActivation": [
         ("owner_cycle", "int64_t", "src.{m}.bounds() ? src.{m}.bounds()->position_cycle : 0"),
         ("present", "uint8_t", "src.{m}.bounds().has_value() ? 1 : 0"),
@@ -211,6 +240,8 @@ def classify(ms: list[tuple[str, str]], waivers: dict[str, str]):
     """Return (mirrored, waived) where mirrored = [(cpp_type, name)] kept in
     the POD and waived = [(cpp_type, name, reason)]. Aborts on an unmapped,
     unwaived type or a waiver naming a non-member."""
+    if {"reservation_expansion", "reservation_growth_source"} & waivers.keys():
+        _fail("reservation expansion and source receipts cannot be waived")
     names = {n for _, n in ms}
     orphans = sorted(w for w in waivers if w not in names)
     if orphans:
@@ -228,6 +259,11 @@ def classify(ms: list[tuple[str, str]], waivers: dict[str, str]):
 
 
 def generate() -> tuple[str, str]:
+    # Share the strict nested storage census; newly stored fields cannot hide
+    # behind an unchanged composite-map name. Imported lazily (checker also
+    # uses this module's PendingOrder parser).
+    from check_broker_state_hash_coverage import _reservation_expansion_fields
+    _reservation_expansion_fields((ROOT / "include/pineforge/reservation_expansion.hpp").read_text())
     mirrored, waived = classify(members(), load_waivers())
     fields: list[str] = []
     copies: list[str] = []
@@ -238,8 +274,8 @@ def generate() -> tuple[str, str]:
         if name not in LEGACY_OUTPUTS and native.get(name) != kind:
             _fail(f"public v1 prefix member {name} needs an explicit derived projection")
     prefix_names = {name for _, name in prefix}
-    # Preserve the full 149f77c extension as well as the original c45 prefix.
-    existing_extension = ["replaced_order_incarnation", "birth", "pine_birth_reach", "quantity_request"]
+    # Preserve all 142 ff54 fields, including activation, before new composites.
+    existing_extension = ["replaced_order_incarnation", "birth", "pine_birth_reach", "quantity_request", "leg_activation", "pine_exit_activation"]
     tail = [(native[name], name) for name in existing_extension]
     tail += [(kind, name) for kind, name in mirrored
              if name not in prefix_names and name not in existing_extension]
@@ -254,9 +290,18 @@ def generate() -> tuple[str, str]:
             for suffix, ct, expr in COMPOSITE_MAP[t]:
                 prefix = "quantity" if t == "QuantityRequest" else m
                 name = f"{prefix}_{suffix}"
-                fields.append(f"    {ct} {name};")
-                copies.append(f"    out->{name} = {expr.format(m=m)};")
-                descs.append((name, ct))
+                if ct in STRING_TYPES:
+                    fields += [f"    char {name}[{STR_CAP}];",
+                               f"    uint8_t {name}_truncated;",
+                               f"    uint64_t {name}_hash64;"]
+                    copies.append(f"    copy_str({expr.format(m=m)}, out->{name}, &out->{name}_truncated, &out->{name}_hash64);")
+                    descs += [(name, f"char[{STR_CAP}]"),
+                              (f"{name}_truncated", "uint8_t"),
+                              (f"{name}_hash64", "uint64_t")]
+                else:
+                    fields.append(f"    {ct} {name};")
+                    copies.append(f"    out->{name} = {expr.format(m=m)};")
+                    descs.append((name, ct))
         elif t in STRING_TYPES:
             fields += [f"    char {m}[{STR_CAP}];",
                        f"    uint8_t {m}_truncated;",

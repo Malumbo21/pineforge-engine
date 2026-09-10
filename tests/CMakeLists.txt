@@ -1,4 +1,7 @@
 set(TEST_SOURCES
+    test_reservation_expansion
+    test_frozen_market_instruction
+    test_pine_transaction_settlement
     test_exit_leg_activation
     test_exit_activation_routes
     test_pending_order_core
@@ -367,6 +370,12 @@ add_test(
     NAME test_broker_state_hash_coverage_mutations
     COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/scripts/test_broker_state_hash_coverage.py
+)
+
+add_test(
+    NAME test_reservation_expansion_mirror_mutations
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_reservation_expansion_mirror.py
 )
 
 # When PINEFORGE_ENABLE_COVERAGE is ON we also instrument the test

@@ -57,6 +57,8 @@ consumption.
   `pf_report_t` layout and the equity curve.
 
 - <b class="tab-title">I'm a transpiler / backend author</b>
+  Read **[Order execution model](@ref fill_model)** for native ownership,
+  reservation and ordering contracts and the remaining frontend boundary work.
   Read **[Coverage](@ref coverage)** — the complete map of which Pine v6
   surface this runtime owns versus what your codegen has to emit inline.
 

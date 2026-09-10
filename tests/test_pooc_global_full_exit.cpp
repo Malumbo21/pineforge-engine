@@ -107,7 +107,7 @@ public:
             for (const auto& order : pending_orders_) {
                 if (order.type == OrderType::EXIT && order.id == "EXIT") {
                     later_bar_exit_dynamic_qty_ =
-                        order.pooc_global_full_exit_dynamic_qty;
+                        order.reservation_expansion.population_open();
                     post_fill_exit_qty_ = order.qty;
                 }
                 if (order.type == OrderType::EXIT
@@ -174,7 +174,7 @@ public:
                 exit_qty_ = order.qty;
                 exit_qty_percent_ = order.qty_percent;
                 exit_dynamic_qty_ =
-                    order.pooc_global_full_exit_dynamic_qty;
+                    order.reservation_expansion.population_open();
             }
         }
     }

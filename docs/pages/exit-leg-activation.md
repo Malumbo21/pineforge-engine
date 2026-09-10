@@ -54,7 +54,8 @@ other historical execution rules remain separate work. The effective-level
 accessor still reports resolved levels rather than masking eligibility.
 
 The internal object layout changes and requires matching C++ headers/library.
-Both PendingOrder and BacktestEngine now use internal v6 with broker/stream
-fingerprint v6. Exact shipped149/v5 engine and standalone PendingOrder clients
+The activation slice shipped with internal v6. Subsequent reservation ownership
+integration advances PendingOrder and BacktestEngine to v7 with broker/stream
+fingerprint v7. Exact shipped ff54/v6 and earlier149/v5 standalone PendingOrder clients
 are checked by compile/link-only mismatch controls with matching positives.
 Public C ABI 4, stream API 1 and pending mirror version 1 are preserved.

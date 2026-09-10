@@ -177,13 +177,14 @@ bool internal::dual_stop_margin_decline_can_continue_path(
 // resting priced order, a strategy.exit bracket, a close_all, a third entry,
 // a same-id pair) is outside the tapes; strip the membership so every order
 // takes its established kernel, byte-identical to the pre-famS engine.
-void BacktestEngine::finalize_same_bar_market_tx_book() {
+void compat::pine::finalize_frozen_market_book(
+        std::vector<PendingOrder>& orders, bool source_scope_live) {
     bool any_member = false;
     bool exact = true;
     int market_members = 0;
     std::string first_market_id;
-    for (const PendingOrder& order : pending_orders_) {
-        if (!order.sbmt_member) {
+    for (const PendingOrder& order : orders) {
+        if (!order.pine_frozen_market_instruction.active()) {
             exact = false;
             continue;
         }
@@ -197,15 +198,15 @@ void BacktestEngine::finalize_same_bar_market_tx_book() {
             }
         }
     }
-    if (!any_member || (exact && same_bar_market_tx_scope_is_live())) return;
-    for (PendingOrder& order : pending_orders_) {
-        order.sbmt_member = false;
-        order.sbmt_own_qty = std::numeric_limits<double>::quiet_NaN();
-        order.sbmt_tx_qty = std::numeric_limits<double>::quiet_NaN();
-        order.sbmt_kept_over_cap = false;
-        order.sbmt_close_qty = std::numeric_limits<double>::quiet_NaN();
-        order.sbmt_close_buy = false;
+    if (!any_member || (exact && source_scope_live)) return;
+    for (PendingOrder& order : orders) {
+        order.pine_frozen_market_instruction.revoke();
     }
+}
+
+void BacktestEngine::finalize_same_bar_market_tx_book() {
+    compat::pine::finalize_frozen_market_book(
+        pending_orders_, same_bar_market_tx_scope_is_live());
 }
 
 // A carried long can owe the broker's one-contract money-rounding trim at
@@ -3932,8 +3933,7 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && std::isnan(order.trail_offset)
                 && std::isnan(order.profit_ticks)
                 && std::isnan(order.loss_ticks)
-                && !order.pooc_global_full_exit_dynamic_qty
-                && !order.pooc_global_full_exit_tracks_bound_adds
+                && !order.reservation_expansion.capture()
                 && !order.suppress_as_declined_reversal_close
                 && std::isfinite(order.suppressed_close_consumed_ledger_qty)
                 && order.suppressed_close_consumed_ledger_qty > kQtyEpsilon;
@@ -4165,9 +4165,9 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
             // rank with the buys; the key is a pure function of the order.
             if (pa == 0) {
                 auto sbmt_sell_rank = [](const PendingOrder& o) {
-                    if (!o.sbmt_member) return 0;
+                    if (!o.pine_frozen_market_instruction.active()) return 0;
                     const bool buy = o.type == OrderType::MARKET
-                        ? o.is_long : o.sbmt_close_buy;
+                        ? o.is_long : (o.created_position_side == PositionSide::SHORT);
                     return buy ? 0 : 1;
                 };
                 const int ra = sbmt_sell_rank(a);
@@ -4494,10 +4494,10 @@ bool BacktestEngine::same_bar_market_tx_scope_is_live() const {
 // close is cancelled (rev-plus-close, dbl-short-swapped: no artifact row).
 bool BacktestEngine::same_bar_market_close_artifact_is_live(
         const PendingOrder& order) const {
-    if (!order.sbmt_member
+    if (!order.pine_frozen_market_instruction.targeted_close()
         || order.type != OrderType::EXIT
-        || !std::isfinite(order.sbmt_close_qty)
-        || order.sbmt_close_qty <= kQtyEpsilon
+        || !std::isfinite(order.quantity_request.intent()->units())
+        || order.quantity_request.intent()->units() <= kQtyEpsilon
         || order.created_bar + 1 != bar_index_
         || order.suppress_as_declined_reversal_close
         || position_side_ == PositionSide::FLAT
@@ -4505,13 +4505,14 @@ bool BacktestEngine::same_bar_market_close_artifact_is_live(
         return false;
     }
     const PositionSide target_side =
-        order.sbmt_close_buy ? PositionSide::SHORT : PositionSide::LONG;
+        order.created_position_side;
     if (position_side_ == target_side) return false;
     if (order.id.size() <= kClosePrefix.size()
         || order.id.compare(0, kClosePrefix.size(), kClosePrefix) != 0) {
         return false;
     }
-    const std::string target_id = order.id.substr(kClosePrefix.size());
+    const std::string& target_id = order.pine_frozen_market_instruction.targeted_close()->target_id;
+    if (order.id.substr(kClosePrefix.size()) != target_id) return false;
     const auto live = std::find_if(pending_orders_.begin(), pending_orders_.end(),
         [&](const PendingOrder& pending) { return same_pending_order(pending, order); });
     if (live == pending_orders_.end()) return false;
@@ -4519,10 +4520,10 @@ bool BacktestEngine::same_bar_market_close_artifact_is_live(
     for (size_t j = self + 1; j < pending_orders_.size(); ++j) {
         const PendingOrder& sib = pending_orders_[j];
         if (sib.type == OrderType::MARKET
-            && sib.sbmt_member
+            && sib.pine_frozen_market_instruction.transaction()
             && sib.id == target_id
             && sib.created_bar == order.created_bar
-            && sib.is_long != order.sbmt_close_buy) {
+            && sib.is_long != (order.created_position_side == PositionSide::SHORT)) {
             return true;
         }
     }
@@ -4541,7 +4542,7 @@ void BacktestEngine::apply_same_bar_market_tx_reversal(
         double& trail_best_path_state) {
     const PositionSide requested =
         order.is_long ? PositionSide::LONG : PositionSide::SHORT;
-    const double tx = order.sbmt_tx_qty;
+    const double tx = order.pine_frozen_market_instruction.transaction()->transaction_units;
     const double close_qty = std::min(tx, position_qty_);
     if (close_qty >= position_qty_ - kQtyEpsilon) {
         execute_market_exit(fill_price);
@@ -4798,7 +4799,8 @@ void BacktestEngine::compact_filled_pending_orders(
             && pending_orders_[read].created_position_side == closed_side
             && !resting_limit_entry_carry
             // round 8 family S, rule 2 (lockstep with classify_order_eligibility).
-            && !pending_orders_[read].sbmt_kept_over_cap;
+            && !(pending_orders_[read].pine_frozen_market_instruction.transaction()
+                 && pending_orders_[read].over_pyramiding_cap_at_placement);
         if (!is_filled(pending_orders_[read].incarnation)
             && !stale_same_direction_entry_after_exit) {
             if (write != read) pending_orders_[write] = std::move(pending_orders_[read]);
@@ -4944,24 +4946,24 @@ int BacktestEngine::probe_fill_qty(int index, double fill_price, double* qty,
         *partition = 1;
         kernel_close_only = !(residual > kQtyEpsilon);
         sized = true;
-    } else if (o.type == OrderType::MARKET && o.sbmt_member
-               && std::isfinite(o.sbmt_tx_qty) && o.sbmt_tx_qty > kQtyEpsilon
+    } else if (o.type == OrderType::MARKET && o.pine_frozen_market_instruction.transaction()
+               && std::isfinite(o.pine_frozen_market_instruction.transaction()->transaction_units) && o.pine_frozen_market_instruction.transaction()->transaction_units > kQtyEpsilon
                && same_bar_market_tx_scope_is_live()) {
         if (opposite_live_position) {
-            const double close_qty = std::min(o.sbmt_tx_qty, position_qty_);
-            const double remainder = o.sbmt_tx_qty - close_qty;
+            const double close_qty = std::min(o.pine_frozen_market_instruction.transaction()->transaction_units, position_qty_);
+            const double remainder = o.pine_frozen_market_instruction.transaction()->transaction_units - close_qty;
             *qty = remainder;
             *partition = 1;
             kernel_close_only = !(remainder > kQtyEpsilon);
             sized = true;
-        } else if (position_side_ == requested_side && o.sbmt_kept_over_cap) {
-            *qty = o.sbmt_tx_qty;
+        } else if (position_side_ == requested_side && o.over_pyramiding_cap_at_placement) {
+            *qty = o.pine_frozen_market_instruction.transaction()->transaction_units;
             *partition = 1;
             sized = true;
         } else if (position_side_ == PositionSide::FLAT
-                   && std::isfinite(o.sbmt_own_qty)
-                   && o.sbmt_tx_qty > o.sbmt_own_qty + kQtyEpsilon) {
-            *qty = o.sbmt_tx_qty;
+                   && std::isfinite(o.pine_frozen_market_instruction.transaction()->own_units)
+                   && o.pine_frozen_market_instruction.transaction()->transaction_units > o.pine_frozen_market_instruction.transaction()->own_units + kQtyEpsilon) {
+            *qty = o.pine_frozen_market_instruction.transaction()->transaction_units;
             *partition = 1;
             sized = true;
         }
@@ -5265,6 +5267,10 @@ void BacktestEngine::apply_filled_order_to_state(
     bool admitted_flat_on_price_gap_band = false;
     {
     PendingOrder& order = pending_orders_.at(order_index);
+    // A deferred-compaction object is not actionable twice. The owned copy
+    // of this dispatch may still settle after scheduling its own retirement.
+    if (std::find(retired_incarnations.begin(), retired_incarnations.end(), order.incarnation)
+        != retired_incarnations.end()) return;
     cap_origin = max_intraday_filled_orders_.origin(
         pine_cap_clock(), pine_cap_calculation(), order.incarnation, broker_fill_event_seq_);
     auto decline_and_cancel = [&]() {
@@ -5351,7 +5357,7 @@ void BacktestEngine::apply_filled_order_to_state(
         && std::isnan(order.qty)
         && default_qty_type_ == QtyType::FIXED
         && position_side_ != PositionSide::FLAT
-        && !order.sbmt_member) {
+        && !order.pine_frozen_market_instruction.active()) {
         const PositionSide requested =
             order.is_long ? PositionSide::LONG : PositionSide::SHORT;
         const bool same_side_at_creation =
@@ -5768,7 +5774,7 @@ void BacktestEngine::apply_filled_order_to_state(
         return true;
     };
     if (order.type == OrderType::MARKET && std::isnan(order.qty)
-        && !order.affordability_close_only && !order.sbmt_member
+        && !order.affordability_close_only && !order.pine_frozen_market_instruction.active()
         && position_side_ == PositionSide::FLAT
         && (order.created_position_side == PositionSide::FLAT
             || order.created_after_position_close_in_bar)
@@ -6185,9 +6191,11 @@ void BacktestEngine::apply_filled_order_to_state(
                 // FIXED/no-fee orders carry the transaction marker even
                 // when no sibling exists. Exclude an expanded transaction,
                 // not an otherwise-unused default sizing declaration.
-                && (!order.sbmt_member
-                    || (order.sbmt_tx_qty == order.sbmt_own_qty
-                        && !order.sbmt_kept_over_cap))
+                && (!order.pine_frozen_market_instruction.active()
+                    || (order.pine_frozen_market_instruction.transaction()
+                        && order.pine_frozen_market_instruction.transaction()->transaction_units
+                            == order.pine_frozen_market_instruction.transaction()->own_units
+                        && !order.over_pyramiding_cap_at_placement))
                 && order.created_bar == bar_index_ - 1
                 && order.oca_type == 0 && order.oca_name.empty()
                 && pending_orders_.size() == 1
@@ -6305,6 +6313,7 @@ void BacktestEngine::apply_filled_order_to_state(
         if (position_side_ == PositionSide::SHORT) return -position_qty_;
         return 0.0;
     };
+    const int64_t position_cycle_before_fill = position_cycle_seq_;
     const PositionSide position_side_before_fill = position_side_;
     const double position_qty_before_fill = position_qty_;
     const size_t pyramid_lots_before_fill = pyramid_entries_.size();
@@ -6450,33 +6459,23 @@ void BacktestEngine::apply_filled_order_to_state(
         primary_fill_applied ? compat::pine::FillOutcome::Committed
                              : compat::pine::FillOutcome::NoEffect, cap_origin);
 
-    // Bounded POOC global-exit growth. Only MARKET adds that were already
-    // pending when the one tracking EXIT was armed carry this relation bit.
-    // Grow its ordinary finite reservation by the actual same-side quantity
-    // delta—not requested qty—so fill-time rejection, zero-fill, reversal, or
-    // flat-open role changes add nothing. The tracking bit intentionally
-    // survives dynamic-marker invalidation: a post-exit order can be admitted
-    // before this pre-exit add reaches the POOC close fill point.
-    if (order.type == OrderType::MARKET
-        && order.pooc_global_full_exit_bound_add) {
-        const PositionSide requested_side = order.is_long
-            ? PositionSide::LONG : PositionSide::SHORT;
-        const bool successful_same_side_add =
-            requested_side == order.created_position_side
-            && position_side_before_fill == requested_side
-            && position_side_ == requested_side
-            && position_qty_ > position_qty_before_fill + kQtyEpsilon;
-        if (successful_same_side_add) {
-            const double added_qty =
-                position_qty_ - position_qty_before_fill;
-            for (auto& candidate : pending_orders_) {
-                if (candidate.type != OrderType::EXIT
-                    || !candidate.pooc_global_full_exit_tracks_bound_adds
-                    || !std::isfinite(candidate.qty)) {
-                    continue;
-                }
-                candidate.qty += added_qty;
-                break;  // reservation accounting admits at most one tracker
+    // Settle at the existing post-primary checkpoint, before OCA/risk. Source
+    // receipts are the only edges; historical dead-owner receipts never fall
+    // back to another EXIT, even when labels or queue priority match.
+    if (order.type == OrderType::MARKET && order.reservation_growth_source.reservation_owner()) {
+        const PositionSide requested = order.is_long ? PositionSide::LONG : PositionSide::SHORT;
+        const uint64_t receiver = *order.reservation_growth_source.reservation_owner();
+        if (requested == order.created_position_side && position_side_before_fill == requested
+            && position_side_ == requested
+            && std::find(retired_incarnations.begin(), retired_incarnations.end(), receiver)
+                == retired_incarnations.end()) {
+            for (auto& target : pending_orders_) {
+                if (target.incarnation != receiver) continue;
+                if (target.type == OrderType::EXIT)
+                    target.reservation_expansion.grow(target.qty,
+                        position_cycle_before_fill, position_side_before_fill, position_qty_before_fill,
+                        position_cycle_seq_, position_side_, position_qty_, kQtyEpsilon);
+                break;
             }
         }
     }
@@ -6925,7 +6924,7 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
         || (order.replaced_order_incarnation == 0)
         || order.replaced_default_market_incarnation == 0
         || !std::isnan(order.qty) || order.qty_type >= 0
-        || order.affordability_close_only || order.sbmt_member
+        || order.affordability_close_only || order.pine_frozen_market_instruction.active()
         || order.created_bar != bar_index_ - 1
         || order.birth.from_fill()
         || order.created_after_position_close_in_bar
@@ -6980,7 +6979,7 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
             || other.created_after_position_close_in_bar
             || !std::isnan(other.qty) || other.qty_type >= 0
             || other.frozen_default_qty != order.frozen_default_qty
-            || other.affordability_close_only || other.sbmt_member
+            || other.affordability_close_only || other.pine_frozen_market_instruction.active()
             || !other.oca_name.empty() || other.oca_type != 0) return false;
     }
     return true;
@@ -7089,8 +7088,8 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
     // the frozen size. The ordinary single-entry shapes (tx == own) below
     // stay byte-identical.
     bool sbmt_flat_frozen_tx = false;
-    if (order.sbmt_member && std::isfinite(order.sbmt_tx_qty)
-        && order.sbmt_tx_qty > kQtyEpsilon
+    if (order.pine_frozen_market_instruction.transaction() && std::isfinite(order.pine_frozen_market_instruction.transaction()->transaction_units)
+        && order.pine_frozen_market_instruction.transaction()->transaction_units > kQtyEpsilon
         && same_bar_market_tx_scope_is_live()) {
         const PositionSide requested =
             order.is_long ? PositionSide::LONG : PositionSide::SHORT;
@@ -7100,11 +7099,11 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
                                               trail_best_path_state);
             return;
         }
-        if (position_side_ == requested && order.sbmt_kept_over_cap) {
+        if (position_side_ == requested && order.over_pyramiding_cap_at_placement) {
             // dbl-long-mirror-closefirst: the kept Long buys its frozen 2
             // while still long (long 3) before the Short and close-Long
             // sell — an add past the pyramiding cap, never a rejected add.
-            const double add_qty = order.sbmt_tx_qty;
+            const double add_qty = order.pine_frozen_market_instruction.transaction()->transaction_units;
             const double entry_fill =
                 apply_fill_slippage(fill_price, order.is_long);
             if (std::isfinite(entry_fill) && add_qty > kQtyEpsilon) {
@@ -7141,8 +7140,8 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
         }
         sbmt_flat_frozen_tx =
             position_side_ == PositionSide::FLAT
-            && std::isfinite(order.sbmt_own_qty)
-            && order.sbmt_tx_qty > order.sbmt_own_qty + kQtyEpsilon;
+            && std::isfinite(order.pine_frozen_market_instruction.transaction()->own_units)
+            && order.pine_frozen_market_instruction.transaction()->transaction_units > order.pine_frozen_market_instruction.transaction()->own_units + kQtyEpsilon;
     }
 
     // A default-sized market order carries a quantity frozen at the signal
@@ -7181,7 +7180,7 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
     const double dispatch_qty = paired_flat_market
         ? order.paired_flat_market_transaction_qty
         : (sbmt_flat_frozen_tx
-               ? order.sbmt_tx_qty
+               ? order.pine_frozen_market_instruction.transaction()->transaction_units
                : (frozen ? order.frozen_default_qty : order.qty));
     const int dispatch_qty_type = paired_flat_market
         ? -1
@@ -7471,16 +7470,16 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
     // position, exactly the short-seed kernel's min(S, L) above.
     bool sbmt_frozen_close = false;
     double sbmt_frozen_close_qty = std::numeric_limits<double>::quiet_NaN();
-    if (order.sbmt_member && std::isfinite(order.sbmt_close_qty)
-        && order.sbmt_close_qty > kQtyEpsilon
+    if (order.pine_frozen_market_instruction.targeted_close() && std::isfinite(order.quantity_request.intent()->units())
+        && order.quantity_request.intent()->units() > kQtyEpsilon
         && same_bar_market_tx_scope_is_live()) {
         const PositionSide target_side =
-            order.sbmt_close_buy ? PositionSide::SHORT : PositionSide::LONG;
+            order.created_position_side;
         if (position_side_ != target_side) {
             if (!same_bar_market_close_artifact_is_live(order)) return;
-            const double qty = std::min(order.sbmt_close_qty, position_qty_);
+            const double qty = std::min(order.quantity_request.intent()->units(), position_qty_);
             const double entry_fill =
-                apply_fill_slippage(fill_price, /*is_buy=*/order.sbmt_close_buy);
+                apply_fill_slippage(fill_price, /*is_buy=*/(order.created_position_side == PositionSide::SHORT));
             if (!std::isfinite(entry_fill) || qty <= kQtyEpsilon) return;
             const double total_qty = position_qty_ + qty;
             position_entry_price_ =
@@ -7505,12 +7504,12 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
             return;
         }
         sbmt_frozen_close = true;
-        sbmt_frozen_close_qty = std::min(order.sbmt_close_qty, position_qty_);
+        sbmt_frozen_close_qty = std::min(order.quantity_request.intent()->units(), position_qty_);
     }
 
     double qp = std::isnan(order.qty_percent) ? 100.0 : std::clamp(order.qty_percent, 0.0, 100.0);
     const bool dynamic_full_live_qty =
-        order.pooc_global_full_exit_dynamic_qty;
+        order.reservation_expansion.live_all(position_cycle_seq_, position_side_);
     bool has_explicit_qty_to_close =
         !dynamic_full_live_qty && !std::isnan(order.qty);
     double qty_before_exit = position_qty_;
@@ -8345,7 +8344,8 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         && !resting_limit_entry_carry
         && !coqueued_within_cap
         && !same_id_stop_preserved_by_deferred_close_all
-        && !order.sbmt_kept_over_cap) {
+        && !(order.pine_frozen_market_instruction.transaction()
+             && order.over_pyramiding_cap_at_placement)) {
         return OrderEligibility::Remove;
     }
 

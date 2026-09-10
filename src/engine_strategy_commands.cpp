@@ -25,6 +25,7 @@
 #include "engine_internal.hpp"
 
 #include <pineforge/engine.hpp>
+#include <pineforge/compat/pine/reservation_expansion.hpp>
 #include <pineforge/timeframe.hpp>
 
 #include <algorithm>
@@ -330,10 +331,10 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                 || sib.id == id) {
                 continue;
             }
-            if (sib.type == OrderType::MARKET && sib.sbmt_member
-                && std::isfinite(sib.sbmt_own_qty)) {
+            if (sib.type == OrderType::MARKET && sib.pine_frozen_market_instruction.transaction()
+                && std::isfinite(sib.pine_frozen_market_instruction.transaction()->own_units)) {
                 sbmt_opp_market_pending = true;
-                sbmt_opp_pending_own += sib.sbmt_own_qty;
+                sbmt_opp_pending_own += sib.pine_frozen_market_instruction.transaction()->own_units;
             } else if (sib.type == OrderType::MARKET
                        || sib.type == OrderType::ENTRY
                        || sib.type == OrderType::RAW_ORDER) {
@@ -651,11 +652,8 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             const double held_opposite = opposite_live
                 ? std::max(0.0, position_qty_ - pending_close_qty_in_bar_)
                 : 0.0;
-            order.sbmt_member = true;
-            order.sbmt_own_qty = sbmt_own_qty;
-            order.sbmt_tx_qty =
-                sbmt_own_qty + held_opposite + sbmt_opp_pending_own;
-            order.sbmt_kept_over_cap = sbmt_over_cap;
+            order.pine_frozen_market_instruction = PineFrozenMarketInstruction::transaction(
+                sbmt_own_qty, sbmt_own_qty + held_opposite + sbmt_opp_pending_own);
         }
         if (paired_flat_market_candidate) {
             order.paired_flat_market_candidate = true;
@@ -838,7 +836,7 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     }
 
     pending_orders_.push_back(std::move(order));
-    invalidate_unsafe_pooc_global_full_exit_dynamic_qty();
+    close_reservation_capture_populations(pending_orders_.back().incarnation);
 }
 
 void BacktestEngine::strategy_close(const std::string& id,
@@ -1867,8 +1865,8 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
                               &replaced_dormant, &replaced_dormant_stop);
 
     double reserved_qty = std::numeric_limits<double>::quiet_NaN();
-    bool bind_global_full_exit_dynamic_qty = false;
-    std::vector<std::size_t> pooc_global_full_exit_bound_add_indices;
+    bool capture_expansion = false;
+    std::vector<uint64_t> selected_reservation_sources;
     // Additional bracket legs beyond the primary one (see the leg-multiplicity
     // block in the explicit-qty branch below). Empty on every other path.
     std::vector<double> extra_leg_qtys;
@@ -2069,39 +2067,10 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
         // separate branch, while from_entry, partial, RAW_ORDER, priced,
         // opposite, prior-bar, COOF-recalc, over-cap, and mixed-queue shapes
         // retain the established frozen reservation.
-        bool eligible_global_full_exit_dynamic_qty = false;
-        if (from_entry.empty()
-            && process_orders_on_close_
-            && !effectively_flat
-            && qp >= 100.0 - kFullPercentEps) {
-            bool found_qualifying_add = false;
-            bool entry_queue_is_bounded = true;
-            for (std::size_t i = 0; i < pending_orders_.size(); ++i) {
-                const PendingOrder& o = pending_orders_[i];
-                if (o.type != OrderType::MARKET
-                    && o.type != OrderType::ENTRY
-                    && o.type != OrderType::RAW_ORDER) {
-                    continue;
-                }
-                const PositionSide entry_dir = o.is_long
-                    ? PositionSide::LONG : PositionSide::SHORT;
-                const bool qualifies = o.created_bar == bar_index_
-                    && o.type == OrderType::MARKET
-                    && !o.birth.from_fill()
-                    && !o.over_pyramiding_cap_at_placement
-                    && entry_dir == position_side_
-                    && o.created_position_side == position_side_;
-                if (!qualifies) {
-                    entry_queue_is_bounded = false;
-                    break;
-                }
-                found_qualifying_add = true;
-                pooc_global_full_exit_bound_add_indices.push_back(i);
-            }
-            eligible_global_full_exit_dynamic_qty =
-                found_qualifying_add
-                && entry_queue_is_bounded;
-        }
+        selected_reservation_sources = compat::pine::select_reservation_growth_sources(
+            pending_orders_, from_entry, process_orders_on_close_, effectively_flat,
+            qp, bar_index_, position_side_);
+        bool eligible_expansion = !selected_reservation_sources.empty();
 
         if (!bind_to_pending_reversal_entry) {
             if (!compute_exit_reserved_qty(
@@ -2109,16 +2078,12 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
                     qp, is_partial, reserved_qty)) {
                 return;
             }
-            eligible_global_full_exit_dynamic_qty =
-                eligible_global_full_exit_dynamic_qty
-                && !is_partial
-                && std::isfinite(reserved_qty)
-                && reserved_qty >= live_pos_qty - kFullQtyEps;
+            eligible_expansion = compat::pine::admits_reservation_expansion(
+                selected_reservation_sources, is_partial, reserved_qty, live_pos_qty);
         }
 
         // The pending order stores this below after the common construction.
-        bind_global_full_exit_dynamic_qty =
-            eligible_global_full_exit_dynamic_qty;
+        capture_expansion = eligible_expansion;
     }
 
     PendingOrder order;
@@ -2144,15 +2109,6 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     // requests retain their original fraction until a live owner binds them.
     if (has_explicit_qty || std::isfinite(reserved_qty))
         order.quantity_request.reserve(reserved_qty, live_pos_qty);
-    order.pooc_global_full_exit_dynamic_qty =
-        bind_global_full_exit_dynamic_qty;
-    order.pooc_global_full_exit_tracks_bound_adds =
-        bind_global_full_exit_dynamic_qty;
-    if (bind_global_full_exit_dynamic_qty) {
-        for (std::size_t index : pooc_global_full_exit_bound_add_indices) {
-            pending_orders_[index].pooc_global_full_exit_bound_add = true;
-        }
-    }
     // OCA-name plumbing: ``strategy.exit`` supports oca_name (Pine v6) so
     // siblings in different OCA groups can fire independently. The cancel
     // sweep predicate (engine_fills.cpp::apply_filled_order_to_state →
@@ -2242,7 +2198,20 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     }
 
     if (extra_leg_qtys.empty()) {
+        if (capture_expansion)
+            order.reservation_expansion.capture(order.incarnation, position_cycle_seq_,
+                                                position_side_, order.qty);
+        const uint64_t receiver = order.incarnation;
         pending_orders_.push_back(std::move(order));
+        // Publication succeeded; selected identities survive vector reallocation.
+        // A new legitimate capture explicitly reassigns each authoritative edge.
+        if (capture_expansion) {
+            for (auto& source : pending_orders_) {
+                if (std::find(selected_reservation_sources.begin(), selected_reservation_sources.end(),
+                              source.incarnation) != selected_reservation_sources.end())
+                    source.reservation_growth_source.assign_capture(source.incarnation, receiver);
+            }
+        }
         return;
     }
 
@@ -2473,21 +2442,15 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
     }
 
     pending_orders_.push_back(std::move(order));
-    invalidate_unsafe_pooc_global_full_exit_dynamic_qty();
+    close_reservation_capture_populations(pending_orders_.back().incarnation);
 }
 
-void BacktestEngine::invalidate_unsafe_pooc_global_full_exit_dynamic_qty() {
-    // This helper is called only after a later entry-like placement was
-    // successfully admitted. The oracle covers adds already pending BEFORE
-    // the global exit, not any order emitted after it—even another same-side
-    // MARKET add. Clear every still-live marker, including candidates carried
-    // into a later bar; their finite ``qty`` remains the conservative
-    // reservation automatically.
-    for (auto& o : pending_orders_) {
-        if (o.type == OrderType::EXIT) {
-            o.pooc_global_full_exit_dynamic_qty = false;
-        }
-    }
+void BacktestEngine::close_reservation_capture_populations(uint64_t admitted_incarnation) {
+    // Called only after an ENTRY/MARKET/RAW admission has actually appended.
+    // Queue priority can be retained on replacement; this cause cannot.
+    for (auto& order : pending_orders_)
+        if (order.type == OrderType::EXIT)
+            order.reservation_expansion.close_population(admitted_incarnation);
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -2869,9 +2832,8 @@ uint64_t BacktestEngine::queue_deferred_close_order(
         && std::isfinite(consumed_ledger_qty)
         && qty_to_close > eps
         && position_side_ != PositionSide::FLAT) {
-        order.sbmt_member = true;
-        order.sbmt_close_qty = qty_to_close;
-        order.sbmt_close_buy = position_side_ == PositionSide::SHORT;
+        order.pine_frozen_market_instruction = PineFrozenMarketInstruction::targeted_close(
+            id, order.quantity_request);
     }
 
     const uint64_t incarnation = order.incarnation;

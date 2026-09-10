@@ -16,7 +16,7 @@ import tempfile
 
 BASE_COMMIT = "38dc73e5503fe5395458e5f8df2a2ad78054a1ae"
 BASE_ENGINE_SHA256 = "06c937a1ccd31815ca7775268ac699ffdfddb1a1f19de4628b777f37e9a6d193"
-CURRENT_NAMESPACE = "engine_script_run_v6"
+CURRENT_NAMESPACE = "engine_script_run_v7"
 BASE_NAMESPACE = "engine_script_run_v2"
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/script_cpp_abi/base38"
 
@@ -30,13 +30,14 @@ def entry_diagnostic(lines, namespace, method):
 
 
 def frozen_headers(destination, fixture=FIXTURE, commit=BASE_COMMIT,
-                   namespace=BASE_NAMESPACE, engine_sha=BASE_ENGINE_SHA256):
+                   namespace=BASE_NAMESPACE, engine_sha=BASE_ENGINE_SHA256, tree=None):
     """Authenticate and unpack the exact tracked base38 header closure."""
     manifest = json.loads((fixture / "manifest.json").read_text())
     if (manifest["source_commit"] != commit
             or manifest["internal_namespace"] != namespace
-            or manifest["files"]["pineforge/engine.hpp"]["sha256"] != engine_sha):
-        raise RuntimeError("stale-header fixture does not identify the pinned base38 contract")
+            or manifest["files"]["pineforge/engine.hpp"]["sha256"] != engine_sha
+            or (tree is not None and manifest.get("source_tree") != tree)):
+        raise RuntimeError("stale-header fixture does not identify the pinned contract")
     archive = (fixture / "headers.json.gz").read_bytes()
     if hashlib.sha256(archive).hexdigest() != manifest["archive_sha256"]:
         raise RuntimeError("stale-header fixture archive digest mismatch")
@@ -130,7 +131,12 @@ def main():
     parser.add_argument("--include", required=True)
     parser.add_argument("--generated-include", required=True)
     parser.add_argument("--extra-flag", action="append", default=[])
+    parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
+    receipt = {"library_sha256": hashlib.sha256(Path(args.library).read_bytes()).hexdigest(),
+               "current_namespace": CURRENT_NAMESPACE,
+               "standalone_namespace": "reservation_expansion_v1",
+               "executable_runs": 0, "compiles": [], "links": []}
     # Literal diagnostic controls guard the link-failure parser itself.
     for namespace in (BASE_NAMESPACE, CURRENT_NAMESPACE):
         report_only = [f"undefined pineforge::{namespace}::BacktestEngine::fill_report(pineforge::ReportC*) const"]
@@ -154,6 +160,16 @@ def main():
         frozen_headers(activation_include, FIXTURE.parent / "base149",
                        "149f77ce16ef84c6da77e67d812bf8fa88e51cde", "engine_script_run_v5",
                        "5ba773889d947e4fdab3995cc55f22f88ab037a86e0ad4016a126d297ce82eed")
+        shipped_include = root / "baseff54/include"
+        frozen_headers(shipped_include, FIXTURE.parent / "baseff54",
+                       "ff54a557ac751244dafd60df0bb22886ec35792d", "engine_script_run_v6",
+                       "d5d74b2b0542ce7aa2bf3e0a95bac8d05318ce15494148f4f07f92c7e332b237",
+                       "60431e5da18d4bce0777f0e3b4df03d41163c350")
+        growth_include = root / "growthbf312/include"
+        frozen_headers(growth_include, FIXTURE.parent / "growthbf312",
+                       "ff54a557ac751244dafd60df0bb22886ec35792d", "engine_script_run_v6",
+                       "381a18d59f20ff94c6eed9dec40497fdaa175637fc96169a0a9875a38b071736",
+                       "bf312b9d5a705d3d0ca16d4fb897e16c6e73b0d1")
         common = [args.compiler, "-std=c++17", "-O0", *args.extra_flag]
 
         def compile_object(name, source, include):
@@ -168,6 +184,9 @@ def main():
             if compiled.returncode:
                 raise RuntimeError(name + " failed to compile (not a pairing rejection):\n"
                                    + compiled.stderr)
+            receipt["compiles"].append({"name": name, "exit": compiled.returncode,
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                "object_sha256": hashlib.sha256(obj.read_bytes()).hexdigest()})
             return obj
 
         current_native = compile_object("current_native", caller(CURRENT_NAMESPACE), args.include)
@@ -214,6 +233,62 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
             BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v5"), activation_include)
         activation_priority = compile_object("base149_pending_priority", priority_caller, activation_include)
         activation_priority_symbols = compile_object("base149_pending_priority_symbols", priority_symbols, activation_include)
+        shipped_native = compile_object("baseff54_native", caller("engine_script_run_v6"), shipped_include)
+        shipped_generated = compile_object("baseff54_generated", caller("engine_script_run_v6", True), shipped_include)
+        shipped_symbols = compile_object("baseff54_symbol_control",
+            BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v6"), shipped_include)
+        shipped_priority = compile_object("baseff54_pending_priority", priority_caller, shipped_include)
+        shipped_priority_symbols = compile_object("baseff54_pending_priority_symbols", priority_symbols, shipped_include)
+
+        reservation_caller = '''#include <pineforge/reservation_expansion.hpp>
+int main(int argc, char**) {
+    pineforge::ReservationExpansion expansion;
+    pineforge::ReservationGrowthSource source;
+    const auto side = static_cast<pineforge::PositionSide>(argc);
+    double capacity = 4.0;
+    expansion.capture(1, 1, side, capacity);
+    expansion.close_population(2);
+    expansion.grow(capacity, 1, side, 1.0, 1, side, 2.0, 1e-10);
+    source.assign_capture(3, 1);
+    return expansion.owns_exposure(1, side) ? 0 : 1;
+}
+'''
+        reservation_symbols = '''#include <pineforge/reservation_expansion.hpp>
+namespace pineforge {
+void ReservationExpansion::capture(uint64_t, int64_t, PositionSide, double) {}
+void ReservationExpansion::close_population(uint64_t) {}
+bool ReservationExpansion::owns_exposure(int64_t, PositionSide) const { return false; }
+void ReservationExpansion::grow(double&, int64_t, PositionSide, double,
+    int64_t, PositionSide, double, double) const {}
+void ReservationGrowthSource::assign_capture(uint64_t, uint64_t) {}
+}
+'''
+        reservation_assertions = '''#include <type_traits>
+static_assert(std::is_same<pineforge::ReservationExpansion,
+    pineforge::reservation_expansion_v1::ReservationExpansion>::value);
+static_assert(std::is_same<pineforge::ReservationExpansionCapture,
+    pineforge::reservation_expansion_v1::ReservationExpansionCapture>::value);
+static_assert(std::is_same<pineforge::ReservationGrowthSource,
+    pineforge::reservation_expansion_v1::ReservationGrowthSource>::value);
+'''
+        current_reservation = compile_object("current_standalone_reservation",
+            reservation_caller + reservation_assertions, args.include)
+        draft_reservation = compile_object("growthbf312_unversioned_reservation", reservation_caller, growth_include)
+        draft_reservation_symbols = compile_object("growthbf312_reservation_symbols", reservation_symbols, growth_include)
+        capture_caller = '''#include <pineforge/reservation_expansion.hpp>
+void pairing_capture(const pineforge::ReservationExpansionCapture&);
+int main() {
+    pineforge::ReservationExpansionCapture capture{1, static_cast<pineforge::PositionSide>(1), {}};
+    pairing_capture(capture);
+}
+'''
+        capture_provider = '''#include <pineforge/reservation_expansion.hpp>
+void pairing_capture(const pineforge::ReservationExpansionCapture&) {}
+'''
+        current_capture = compile_object("current_capture_argument", capture_caller, args.include)
+        draft_capture = compile_object("growthbf312_capture_argument", capture_caller, growth_include)
+        current_capture_symbols = compile_object("current_capture_symbols", capture_provider, args.include)
+        draft_capture_symbols = compile_object("growthbf312_capture_symbols", capture_provider, growth_include)
 
         def link(name, obj, runtime, missing_namespace=None):
             linked = subprocess.run(
@@ -224,6 +299,7 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
                 if linked.returncode:
                     raise RuntimeError(name + " positive control failed to link:\n" + linked.stderr)
                 print(name + ": linked (not executed)")
+                receipt["links"].append({"name": name, "outcome": "linked", "exit": 0})
                 return
             if not linked.returncode:
                 raise RuntimeError(name + " stale C++ pairing unexpectedly linked")
@@ -240,6 +316,8 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
                   + "BacktestEngine entry symbols")
             for method in required_methods:
                 print("  " + entries[method].strip())
+            receipt["links"].append({"name": name, "outcome": "expected_rejection",
+                "exit": linked.returncode, "diagnostics": list(entries.values())})
 
         link("current_native_to_current", current_native, args.library)
         link("current_generated_to_current", current_generated, args.library)
@@ -271,12 +349,21 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
         link("current_native_to_v5_symbol_control", current_native, activation_symbols, CURRENT_NAMESPACE)
         link("current_generated_to_v5_symbol_control", current_generated, activation_symbols, CURRENT_NAMESPACE)
         link("base149_pending_priority_to_v5_symbols", activation_priority, activation_priority_symbols)
+        link("baseff54_native_to_v6_symbols", shipped_native, shipped_symbols)
+        link("baseff54_generated_to_v6_symbols", shipped_generated, shipped_symbols)
+        link("baseff54_native_to_current", shipped_native, args.library, "engine_script_run_v6")
+        link("baseff54_generated_to_current", shipped_generated, args.library, "engine_script_run_v6")
+        link("current_native_to_v6_symbols", current_native, shipped_symbols, CURRENT_NAMESPACE)
+        link("current_generated_to_v6_symbols", current_generated, shipped_symbols, CURRENT_NAMESPACE)
+        link("baseff54_pending_priority_to_v6_symbols", shipped_priority, shipped_priority_symbols)
         for name, obj, runtime, expected in [
+            ("baseff54_pending_priority_to_current", shipped_priority, args.library, "pineforge::engine_script_run_v6::PendingOrder"),
+            ("current_pending_priority_to_v6_symbols", current_priority, shipped_priority_symbols, "pineforge::engine_script_run_v7::PendingOrder"),
             ("base149_pending_priority_to_current", activation_priority, args.library, "pineforge::engine_script_run_v5::PendingOrder"),
-            ("current_pending_priority_to_v5_symbols", current_priority, activation_priority_symbols, "pineforge::engine_script_run_v6::PendingOrder"),
+            ("current_pending_priority_to_v5_symbols", current_priority, activation_priority_symbols, "pineforge::engine_script_run_v7::PendingOrder"),
             ("basec45_pending_priority_to_current", prior_priority, args.library, "pineforge::PendingOrder"),
             ("current_pending_priority_to_v4_symbols", current_priority, prior_priority_symbols,
-             "pineforge::engine_script_run_v6::PendingOrder"),
+             "pineforge::engine_script_run_v7::PendingOrder"),
         ]:
             result = subprocess.run([*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
                                     capture_output=True, text=True, timeout=60)
@@ -284,7 +371,39 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
                     or "OrderPriority::select(" not in result.stderr or expected not in result.stderr):
                 raise RuntimeError(name + " did not reject the expected PendingOrder type: " + result.stderr)
             print(name + ": rejected stale standalone PendingOrder argument type (not executed)")
-    print("20 translation units compiled; 13 positive links; 21 rejected links; no executable run")
+            receipt["links"].append({"name": name, "outcome": "expected_rejection",
+                "exit": result.returncode, "diagnostics": result.stderr})
+
+        link("current_reservation_to_current", current_reservation, args.library)
+        link("draft_reservation_to_draft_symbols", draft_reservation, draft_reservation_symbols)
+        link("current_capture_to_current_symbols", current_capture, current_capture_symbols)
+        link("draft_capture_to_draft_symbols", draft_capture, draft_capture_symbols)
+        for name, obj, runtime, expected in [
+            ("draft_reservation_to_current", draft_reservation, args.library,
+             ["pineforge::ReservationExpansion::capture(", "pineforge::ReservationGrowthSource::assign_capture("]),
+            ("current_reservation_to_draft_symbols", current_reservation, draft_reservation_symbols,
+             ["pineforge::reservation_expansion_v1::ReservationExpansion::capture(",
+              "pineforge::reservation_expansion_v1::ReservationGrowthSource::assign_capture("]),
+            ("draft_capture_to_current_symbols", draft_capture, current_capture_symbols,
+             ["pairing_capture(pineforge::ReservationExpansionCapture const&)"]),
+            ("current_capture_to_draft_symbols", current_capture, draft_capture_symbols,
+             ["pairing_capture(pineforge::reservation_expansion_v1::ReservationExpansionCapture const&)"]),
+        ]:
+            result = subprocess.run([*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
+                                    capture_output=True, text=True, timeout=60)
+            if (result.returncode == 0 or "undefined" not in result.stderr.lower()
+                    or any(needle not in result.stderr for needle in expected)):
+                raise RuntimeError(name + " did not reject the expected reservation ABI: " + result.stderr)
+            print(name + ": rejected stale standalone reservation ABI (not executed)")
+            receipt["links"].append({"name": name, "outcome": "expected_rejection",
+                "exit": result.returncode, "diagnostics": result.stderr})
+    linked = sum(item["outcome"] == "linked" for item in receipt["links"])
+    rejected = sum(item["outcome"] == "expected_rejection" for item in receipt["links"])
+    receipt["summary"] = {"compiled": len(receipt["compiles"]), "linked": linked, "rejected": rejected}
+    if args.receipt:
+        args.receipt.write_text(json.dumps(receipt, indent=2) + "\n")
+    print(f"{len(receipt['compiles'])} translation units compiled; {linked} positive links; "
+          f"{rejected} rejected links; no executable run")
 
 
 if __name__ == "__main__":

@@ -95,6 +95,8 @@ add_library(pineforge STATIC
     src/engine_stream.cpp
     src/engine_strategy_commands.cpp
     src/engine_trade_accessors.cpp
+    src/reservation_expansion.cpp
+    src/compat/pine/reservation_expansion.cpp
     src/pending_order_mirror.cpp
     src/magnifier.cpp
     src/math.cpp

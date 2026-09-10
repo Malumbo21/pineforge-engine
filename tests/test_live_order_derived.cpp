@@ -365,7 +365,7 @@ void test_sbmt_kernels() {
         CHECK(i >= 0);
         if (i >= 0) {
             const PendingOrder& o = s.pending_order_at(i);
-            CHECK(o.sbmt_member && near(o.sbmt_tx_qty, 2.0) && near(o.sbmt_own_qty, 1.0));
+            CHECK(o.pine_frozen_market_instruction.active() && near(o.pine_frozen_market_instruction.transaction()->transaction_units, 2.0) && near(o.pine_frozen_market_instruction.transaction()->own_units, 1.0));
             CHECK(s.probe_fill_qty(i, 100.0, &qty, &close_only, &partition) == 0);
             CHECK(near(qty, 1.0) && partition == kFrozenPlacement && close_only == 0);
         }
@@ -378,7 +378,7 @@ void test_sbmt_kernels() {
         CHECK(i >= 0);
         if (i >= 0) {
             const PendingOrder& o = s.pending_order_at(i);
-            CHECK(o.sbmt_member && near(o.sbmt_tx_qty, 2.0));
+            CHECK(o.pine_frozen_market_instruction.active() && near(o.pine_frozen_market_instruction.transaction()->transaction_units, 2.0));
             CHECK(s.probe_fill_qty(i, 100.0, &qty, &close_only, &partition) == 0);
             CHECK(near(qty, 0.0) && partition == kFrozenPlacement && close_only == 1);
         }
@@ -391,7 +391,7 @@ void test_sbmt_kernels() {
         CHECK(i >= 0);
         if (i >= 0) {
             const PendingOrder& o = s.pending_order_at(i);
-            CHECK(o.sbmt_member && o.sbmt_kept_over_cap && near(o.sbmt_tx_qty, 2.0));
+            CHECK(o.pine_frozen_market_instruction.active() && (o.pine_frozen_market_instruction.transaction() && o.over_pyramiding_cap_at_placement) && near(o.pine_frozen_market_instruction.transaction()->transaction_units, 2.0));
             CHECK(s.probe_fill_qty(i, 100.0, &qty, &close_only, &partition) == 0);
             CHECK(near(qty, 2.0) && partition == kFrozenPlacement && close_only == 0);
         }
@@ -399,7 +399,7 @@ void test_sbmt_kernels() {
         const int j = find_market(s, "Short", false);
         CHECK(j >= 0);
         if (j >= 0) {
-            CHECK(near(s.pending_order_at(j).sbmt_tx_qty, 2.0));
+            CHECK(near(s.pending_order_at(j).pine_frozen_market_instruction.transaction()->transaction_units, 2.0));
             CHECK(s.probe_fill_qty(j, 100.0, &qty, &close_only, &partition) == 0);
             CHECK(near(qty, 1.0) && partition == kFrozenPlacement && close_only == 0);
         }
@@ -414,8 +414,8 @@ void test_sbmt_kernels() {
         const int j = find_market(s, "Short", false);
         CHECK(i >= 0 && j >= 0);
         if (i >= 0 && j >= 0) {
-            CHECK(near(s.pending_order_at(i).sbmt_tx_qty, 1.0));
-            CHECK(near(s.pending_order_at(j).sbmt_tx_qty, 2.0));
+            CHECK(near(s.pending_order_at(i).pine_frozen_market_instruction.transaction()->transaction_units, 1.0));
+            CHECK(near(s.pending_order_at(j).pine_frozen_market_instruction.transaction()->transaction_units, 2.0));
             CHECK(s.probe_fill_qty(i, 100.0, &qty, &close_only, &partition) == 0);
             CHECK(near(qty, 1.0) && partition == kAtFill && close_only == 0);
             CHECK(s.probe_fill_qty(j, 100.0, &qty, &close_only, &partition) == 0);

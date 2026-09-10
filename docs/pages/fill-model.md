@@ -1,15 +1,30 @@
-# Broker state and fill ownership
+# Order execution model {#fill_model}
 
-The broker processes a source-ordered command book against a price path. Its
-physical position, logical close claims, reserved quantities and pyramiding
-capacity are separate ledgers. A Pine entry ID is a reusable name; the order
-incarnation and position cycle identify the owners of those ledgers.
+PineForge is being developed as an independent C++ backtest and forward-execution
+engine. Its native contracts describe orders, exposure, reservations and actual
+execution events. Pine source interpretation belongs to the frontend boundary.
+TradingView comparisons are compatibility evidence for a declared configuration;
+they do not define every native operation.
 
-This document describes the first extracted ownership model. Other order,
-reservation and path state is still represented in `BacktestEngine` and
-`PendingOrder`; their consolidation is ongoing. The current economic rules
-retain their tested domains. Moving a rule into a type does not establish
-that it describes every TradingView configuration.
+The migration is incomplete. The current engine still contains Pine-specific
+admission and scheduling rules, and the ordinary bar scan and callback-driven
+scan are separate. The responsibilities below guide their consolidation without
+claiming that a single unified scheduler already exists.
+
+## Responsibilities
+
+| Submodel | Owned facts and transitions | Boundary |
+|---|---|---|
+| Command admission | Original quantity request, placement observation, accepted instruction identity, rejection cause | A source frontend interprets its calls; native admission operates on explicit transaction or position intent. |
+| Exposure and reservation | Position cycle, physical quantity, reservation owner, admitted growth sources, committed growth and retirement | A proposed add is not an executed add. There is one mutable reservation capacity. |
+| Trigger lifecycle | Stop/limit/trail definitions, activation bounds and owner binding, stop-limit activation and trail progress | An unready leg cannot supply a price or authorize a ready sibling. |
+| Execution schedule | Candidate identity, event coordinate, dependency and explicit priority | Ordering does not grant admission, create quantity or activate a leg. |
+| Settlement and observation | Executed quantity, physical lots, paid fees, OCA effects, risk follow-up and callbacks | Publish observations after the corresponding state change; report projections must not change admission equity. |
+
+These are responsibilities, not five independently switchable modes. Direction,
+order kind, quantity intent and an outstanding owned claim are normal domain
+state. Encoding unrelated permissions as enum values or moving them to another
+object does not simplify the model.
 
 ## What qualifies as a generic flag
 
@@ -36,6 +51,32 @@ eligibility predicates still require that separate review. Existing parity
 scores are regression evidence, not a justification for keeping a compensating
 flag. Actual conflicting TradingView observations belong in an anomaly review
 record, separate from an unknown rule or an engine defect.
+
+## Identity and quantity
+
+Every accepted pending object receives a fresh `incarnation`. A user-supplied ID
+can be reused, and same-ID replacement can retain queue priority; neither implies
+that the new object owns the old object's claims. `replaced_order_incarnation`
+records the exact predecessor. A position cycle similarly distinguishes two
+positions that happen to have the same direction.
+
+`QuantityRequest` retains the original Units, Fraction or All request and its
+reservation basis. The executable `PendingOrder::qty` can change through OCA
+reduction or committed reserved growth. That does not rewrite the original
+request, reclassify its historical partial/full meaning, or create another
+quantity ledger.
+
+An expansion capture belongs to an exact EXIT object and exposure cycle. Selected
+source orders carry the receiving EXIT incarnation. After an actual primary fill,
+the receiver gains only the positive same-side quantity increase belonging to its
+captured cycle. A canceled or logically retired receiver cannot redirect that
+growth to another exit with the same user ID.
+
+The first later successful entry-like admission closes the capture's population.
+Canceling that later admission does not erase its historical cause. Previously
+captured sources can still pay their exact receiver; later unrelated adds do not
+join the capture. An old-cycle capture loses live-All authority while its ordinary
+finite reservation remains available for the normal settlement path.
 
 ## Opening checkpoint
 
@@ -77,6 +118,27 @@ Four historical long/short lifecycle labels had no economic consumers. They
 have been removed, along with their producers; the numerical floor-zero rules
 and their trade fixtures remain. Those labels are not alternate model states.
 
+## Current dispatch sequence
+
+The ordinary pending-order scan updates risk state, processes due opening work,
+finalizes source cohorts, updates trailing/relative prices and orders the book.
+It then classifies and matches an exact pending handle. A pre-exit margin slice
+can change the book between matching and dispatch, so the handle is resolved
+again before applying the selected order.
+
+The primary fill updates physical exposure. Reservation growth is settled at the
+existing post-primary checkpoint, before that order's OCA and risk follow-up.
+Logically retired objects cannot be dispatched again while awaiting compaction.
+Callbacks use committed fill events; a declined or zero-effect attempt is not
+itself a fill event. Pine's optional quota interpretation separately observes
+the attempt stages its own contract specifies.
+
+There is no universal `risk > exit > entry` priority. A forced action and a user
+order have event coordinates, and an earlier event must be accounted before a
+later one. Forced liquidation cannot be suppressed by an unready user stop.
+An earlier risk fill can also invalidate the quantity or owner of a later
+candidate, requiring another resolution of its identity and eligibility.
+
 ## Distinct execution domains
 
 An opening receipt is broker-local. It is not an identity for every output:
@@ -94,6 +156,28 @@ different information. The opening ownership extraction changes none of their
 path, callback or warmup policies. Terminal-close deferral is still selected
 by the existing financial policy; it has not been generalized by this model.
 
+## Remaining consolidation
+
+The complete scheduler should build immutable candidates, choose the earliest
+eligible event coordinate, satisfy causal dependencies, and then apply explicit
+priority and stable submission identity. Losing candidate scans must not commit
+trigger activation. Dependency cycles must be reported rather than hidden by
+another pairwise preference.
+
+The existing two-sort arrangement does not yet provide that contract. In
+particular, the sibling comparator has reproduced ordering-law failures for
+unrelated interleavings and mixed trailing/non-trailing exits. Grouping by owner
+alone does not repair the mixed-leg case. Replacing these sorts is separate from
+the reservation-ownership change and requires its own native ordering tests and
+Cloud compatibility assessment.
+
+A native reduction must never create new exposure. Some existing Pine close
+interpretations can produce a new transaction after their old target disappears;
+that interpretation must remain explicit at the source boundary until lowering
+to native operations is complete. The current engine also has separate forward
+ingress, callback, affordability and per-leg lifecycle work. This page does not
+claim those migrations or the large-function cleanup are finished.
+
 ## Verification and compatibility
 
 Literal state tests exercise consume-before-use, exempt presence, replacement,
@@ -103,11 +187,9 @@ fixed reference population is required before reporting parity preservation.
 Hashes supplement those comparisons; a matching fingerprint is not a proof
 that all hidden strategy state is equal.
 
-The new receipt replaces protected C++ members and changes the fingerprint
-representation. Rebuild generated and native modules against matching headers
-and runtime. The cap extraction advances the internal class namespace to
-`engine_script_run_v3`, broker hash domain to `pineforge-broker-state/v3`, and
-stream fingerprint prefix to 3. These pairing/serialization versions change
-no financial rule; public C signatures, POD layouts and API versions remain
-unchanged. See
-[ABI stability](abi-stability.md).
+Internal C++ layouts and broker/stream fingerprint domains are versioned separately
+from the public C ABI and its append-only pending-order mirror. Rebuild generated
+and native modules against matching headers and runtime. See
+[ABI stability](@ref abi_stability) for the current versions and stale-object
+pairing checks. A lower Boolean field count is not proof that every compatibility
+policy or possible order history has been covered.

@@ -195,6 +195,16 @@ def _class_fields(src: str, name: str) -> dict[str, str]:
                 continue
             if re.fullmatch(r"(?:bool|ExitLegActivationBounds)\s+\w+\([^;{}]*\)\s+const", decl):
                 continue  # declared read-only value query, never a stored field
+            reservation_methods = {
+                "ReservationExpansion": {
+                    "void capture(uint64_t receiver, int64_t cycle, PositionSide side, double capacity)",
+                    "void close_population(uint64_t admitted_incarnation)",
+                    "void grow(double& qty, int64_t before_cycle, PositionSide before_side, double before_qty, int64_t after_cycle, PositionSide after_side, double after_qty, double epsilon) const",
+                },
+                "ReservationGrowthSource": {"void assign_capture(uint64_t source, uint64_t receiver)"},
+            }
+            if decl in reservation_methods.get(name, set()):
+                continue  # exact declared operations, never a blanket declaration waiver
             if decl and not decl.startswith("using "):
                 match = re.fullmatch(r"((?:(?:static|constexpr|const)\s+)*[\w:<>]+)\s+(\w+)(?:\s*=\s*[^,]+)?", decl)
                 if not match or match[2] in fields:
@@ -384,6 +394,40 @@ def _quantity_request_coverage(quantity: str, source: str) -> None:
     if prefix.count("{") != prefix.count("}"):
         raise ValueError("quantity request hash must be unconditional inside its order loop")
 
+def _pine_frozen_market_instruction_coverage(header: str, source: str) -> None:
+    """An exclusive instruction, with each live payload folded in its owner loop."""
+    header = _strip_cpp_comments(header)
+    if _class_fields(header, "FrozenMarketInstruction") != {"value_": "Value"}:
+        raise ValueError("FrozenMarketInstruction fields changed; classify every frozen fact")
+    for name, fields in [
+        ("Transaction", [("double", "own_units"), ("double", "transaction_units")]),
+        ("TargetedClose", [("std::string", "target_id")]),
+    ]:
+        if struct_members(header, name) != fields:
+            raise ValueError(name + " instruction payload changed; update hash and mirror")
+    if not re.search(r"using\s+Value\s*=\s*std::variant<std::monostate,\s*Transaction,\s*TargetedClose>\s*;", header):
+        raise ValueError("FrozenMarketInstruction variant discriminator changed")
+    body = _one_braced_body(header,
+        r"enum\s+class\s+FrozenMarketInstructionKind\s*\{", "FrozenMarketInstructionKind")
+    if [x.strip() for x in body.split(",")] != ["Ordinary", "Transaction", "TargetedClose"]:
+        raise ValueError("FrozenMarketInstructionKind hash encoding changed")
+    loop = _collection_loop_body(source, "pending_orders_", "o")
+    expected = """f.i(static_cast<int64_t>(o.pine_frozen_market_instruction.kind()));
+        if (const auto* transaction = o.pine_frozen_market_instruction.transaction()) {
+            f.d(transaction->own_units); f.d(transaction->transaction_units);
+        }
+        if (const auto* close = o.pine_frozen_market_instruction.targeted_close()) {
+            f.s(close->target_id);
+        }"""
+    compact = re.sub(r"\s+", "", loop)
+    folded = re.sub(r"\s+", "", expected)
+    if compact.count(folded) != 1:
+        raise ValueError("frozen market instruction requires every live field and role discriminator")
+    prefix = compact[:compact.index(folded)]
+    if prefix.count("{") != prefix.count("}") or (prefix and prefix[-1] not in ";}"):
+        raise ValueError("frozen market instruction hash must be unconditional in its order loop")
+
+
 def _birth_coverage(header: str, source: str) -> None:
     header = _strip_cpp_comments(header)
     expected = {
@@ -449,8 +493,60 @@ def _exit_activation_coverage(activation: str, policy: str, source: str) -> None
         raise ValueError("exit activation hash block must be unconditional")
 
 
+def _reservation_expansion_fields(header: str) -> None:
+    header = _strip_cpp_comments(header)
+    expected = {
+        "ReservationExpansion": {"capture_": "std::optional<ReservationExpansionCapture>"},
+        "ReservationExpansionCapture": {"position_cycle": "int64_t", "side": "PositionSide", "first_later_admission": "std::optional<uint64_t>"},
+        "ReservationGrowthSource": {"reservation_owner_": "std::optional<uint64_t>"},
+    }
+    for name, fields in expected.items():
+        if _class_fields(header, name) != fields:
+            raise ValueError(name + " fields changed; every capture/source fact must be hashed")
+
+def _reservation_expansion_coverage(header: str, source: str) -> None:
+    _reservation_expansion_fields(header)
+    loop = _collection_loop_body(source, "pending_orders_", "o")
+    expected = """f.b(o.reservation_expansion.capture().has_value());
+        if (const auto& capture = o.reservation_expansion.capture()) {
+            f.i(capture->position_cycle);
+            f.i(static_cast<int64_t>(capture->side));
+            f.b(capture->first_later_admission.has_value());
+            if (const auto& admission = capture->first_later_admission) {
+                f.u(*admission);
+            }
+        }
+        f.b(o.reservation_growth_source.reservation_owner().has_value());
+        if (const auto& receiver = o.reservation_growth_source.reservation_owner()) {
+            f.u(*receiver);
+        }"""
+    compact = re.sub(r"\s+", "", loop)
+    folded = re.sub(r"\s+", "", expected)
+    if compact.count(folded) != 1:
+        raise ValueError("reservation capture/source encoding needs every nested fact and discriminator once")
+    prefix = compact[:compact.index(folded)]
+    if prefix.count("{") != prefix.count("}") or (prefix and prefix[-1] not in ";}"):
+        raise ValueError("reservation capture/source hash block must be unconditional")
+
+
+def _reservation_expansion_version_coverage(header: str, source: str) -> None:
+    """Standalone layout-sensitive types and methods own their first ABI."""
+    declaration = _one_braced_body(_strip_cpp_comments(header),
+        r"inline\s+namespace\s+reservation_expansion_v1\s*\{", "reservation ABI")
+    implementation = _one_braced_body(_strip_cpp_comments(source),
+        r"inline\s+namespace\s+reservation_expansion_v1\s*\{", "reservation implementation ABI")
+    for name in ("ReservationExpansionCapture", "ReservationExpansion", "ReservationGrowthSource"):
+        if not re.search(r"\b(?:class|struct)\s+" + name + r"\s*\{", declaration):
+            raise ValueError(name + " must belong to reservation_expansion_v1")
+    for name in ("ReservationExpansion::capture", "ReservationExpansion::close_population",
+                 "ReservationExpansion::owns_exposure", "ReservationExpansion::grow",
+                 "ReservationGrowthSource::assign_capture"):
+        if not re.search(r"\b" + re.escape(name) + r"\s*\(", implementation):
+            raise ValueError(name + " must be implemented in reservation_expansion_v1")
+
+
 def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
-    """The v6 layout and serialized-state contracts must advance together.
+    """The v7 layout and serialized-state contracts must advance together.
 
     Pin the actual hash entry points, rather than accepting a version string
     mentioned in a comment or an unrelated helper. Public C ABI versions have
@@ -458,18 +554,18 @@ def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
     """
     header = _strip_cpp_comments(header)
     namespaces = re.findall(r"inline\s+namespace\s+(engine_script_run_v\d+)\s*\{", header)
-    if namespaces != ["engine_script_run_v6", "engine_script_run_v6"]:
-        raise ValueError("PendingOrder and BacktestEngine layouts require internal namespace engine_script_run_v6")
+    if namespaces != ["engine_script_run_v7", "engine_script_run_v7"]:
+        raise ValueError("PendingOrder and BacktestEngine layouts require internal namespace engine_script_run_v7")
     broker = _one_braced_body(source,
         r"uint64_t\s+BacktestEngine::broker_state_hash\(\)\s+const\s*\{", "broker hash")
-    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v6"\);', broker):
-        raise ValueError("broker hash must start with pineforge-broker-state/v6")
+    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v7"\);', broker):
+        raise ValueError("broker hash must start with pineforge-broker-state/v7")
     stream_body = _one_braced_body(_strip_cpp_comments(stream),
         r"uint64_t\s+BacktestEngine::stream_state_hash\(\)\s+const\s*\{", "stream hash")
     compact = re.sub(r"\s+", "", stream_body)
-    fold = "integer(6);integer(broker_state_hash());"
+    fold = "integer(7);integer(broker_state_hash());"
     if compact.count(fold) != 1:
-        raise ValueError("stream hash requires version 6 followed by the broker hash")
+        raise ValueError("stream hash requires version 7 followed by the broker hash")
     prefix = compact[:compact.index(fold)]
     if prefix.count("{") != prefix.count("}") or (prefix and prefix[-1] not in ";}"):
         raise ValueError("stream version fold must be unconditional at function scope")
@@ -484,6 +580,12 @@ def main(root: Path = ROOT) -> int:
     src = _strip_cpp_comments(src_raw)
     try:
         _runtime_version_coverage(hpp, src, (root / "src/engine_stream.cpp").read_text())
+        _reservation_expansion_version_coverage(
+            (root / "include/pineforge/reservation_expansion.hpp").read_text(),
+            (root / "src/reservation_expansion.cpp").read_text())
+        _reservation_expansion_coverage((root / "include/pineforge/reservation_expansion.hpp").read_text(), src)
+        _pine_frozen_market_instruction_coverage(
+            (root / "include/pineforge/compat/pine/frozen_market_instruction.hpp").read_text(), src)
         _birth_coverage((root / "include/pineforge/order_birth.hpp").read_text(), src)
         _exit_activation_coverage((root / "include/pineforge/leg_activation.hpp").read_text(),
             (root / "include/pineforge/compat/pine/exit_activation.hpp").read_text(), src)
@@ -504,8 +606,11 @@ def main(root: Path = ROOT) -> int:
         return 1
     waivers = {k: v for k, v in all_waivers.items()
                if not k.startswith((PENDING_WAIVER_PREFIX, PYRAMID_WAIVER_PREFIX))}
-    if "pending_order.quantity_request" in all_waivers:
-        print("check_broker_state_hash_coverage: quantity_request cannot be waived", file=sys.stderr)
+    if {"pending_order.reservation_expansion", "pending_order.reservation_growth_source"} & all_waivers.keys():
+        print("check_broker_state_hash_coverage: reservation capture/source cannot be waived", file=sys.stderr)
+        return 1
+    if {"pending_order.quantity_request", "pending_order.pine_frozen_market_instruction"} & all_waivers.keys():
+        print("check_broker_state_hash_coverage: quantity_request and pine_frozen_market_instruction cannot be waived", file=sys.stderr)
         return 1
     po_waivers = {k[len(PENDING_WAIVER_PREFIX):]: v
                   for k, v in all_waivers.items() if k.startswith(PENDING_WAIVER_PREFIX)}

@@ -353,9 +353,12 @@ public:
                     s.pending_orders_[0].over_pyramiding_cap_at_placement =
                         !s.pending_orders_[0].over_pyramiding_cap_at_placement;
             }},
-            {"pending_orders_[].sbmt_member", [](Probe& s) {
-                if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].sbmt_member = !s.pending_orders_[0].sbmt_member;
+            {"pending_orders_[].pine_frozen_market_instruction", [](Probe& s) {
+                if (!s.pending_orders_.empty()) {
+                    auto& instruction = s.pending_orders_[0].pine_frozen_market_instruction;
+                    if (instruction.active()) instruction.revoke();
+                    else instruction = PineFrozenMarketInstruction::transaction(1, 2);
+                }
             }},
             {"pending_orders_[].short_seed_collision_role", [](Probe& s) {
                 if (!s.pending_orders_.empty())
@@ -443,17 +446,13 @@ public:
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].explicit_flat_admission_candidate = !s.pending_orders_[0].explicit_flat_admission_candidate;
             }},
-            {"pending_orders_[].pooc_global_full_exit_dynamic_qty", [](Probe& s) {
+            {"pending_orders_[].reservation_expansion", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].pooc_global_full_exit_dynamic_qty = !s.pending_orders_[0].pooc_global_full_exit_dynamic_qty;
+                    s.pending_orders_[0].reservation_expansion.capture(50,7,PositionSide::LONG,10);
             }},
-            {"pending_orders_[].pooc_global_full_exit_tracks_bound_adds", [](Probe& s) {
+            {"pending_orders_[].reservation_growth_source", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].pooc_global_full_exit_tracks_bound_adds = !s.pending_orders_[0].pooc_global_full_exit_tracks_bound_adds;
-            }},
-            {"pending_orders_[].pooc_global_full_exit_bound_add", [](Probe& s) {
-                if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].pooc_global_full_exit_bound_add = !s.pending_orders_[0].pooc_global_full_exit_bound_add;
+                    s.pending_orders_[0].reservation_growth_source.assign_capture(41,50);
             }},
             {"pending_orders_[].signal_close_mc_remaining_qty", [](Probe& s) {
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].signal_close_mc_remaining_qty = 424242.5;

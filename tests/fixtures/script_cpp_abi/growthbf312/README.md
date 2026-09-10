@@ -1,0 +1,1 @@
+Exact unshipped growth tree bf312 header closure: engine v6 with unversioned standalone reservation types. This is a draft ABI negative control, not a released ff54 definition. Compile/link controls only; no executable runs.

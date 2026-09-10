@@ -15,6 +15,9 @@ from gen_pending_order_mirror import members
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER = (ROOT / "include/pineforge/engine.hpp").read_text()
+EXPANSION = (ROOT / "include/pineforge/reservation_expansion.hpp").read_text()
+EXPANSION_SOURCE = (ROOT / "src/reservation_expansion.cpp").read_text()
+FROZEN = (ROOT / "include/pineforge/compat/pine/frozen_market_instruction.hpp").read_text()
 QUANTITY = (ROOT / "include/pineforge/quantity_intent.hpp").read_text()
 EVENTS = (ROOT / "include/pineforge/broker_events.hpp").read_text()
 ACTIVATION = (ROOT / "include/pineforge/leg_activation.hpp").read_text()
@@ -30,13 +33,16 @@ WAIVERS = (ROOT / "scripts/broker_state_hash_waivers.txt").read_text()
 
 class PhysicalLotCoverage(unittest.TestCase):
     def check(self, header=HEADER, source=SOURCE, waivers=WAIVERS, events=EVENTS,
-              intraday=INTRADAY, policy=POLICY, obligation=OBLIGATION, stream=STREAM, quantity=QUANTITY, birth=BIRTH, activation=ACTIVATION, exit_policy=EXIT_POLICY):
+              intraday=INTRADAY, policy=POLICY, obligation=OBLIGATION, stream=STREAM, quantity=QUANTITY, birth=BIRTH, activation=ACTIVATION, exit_policy=EXIT_POLICY, expansion=EXPANSION, expansion_source=EXPANSION_SOURCE, frozen=FROZEN):
         with tempfile.TemporaryDirectory(prefix="pf-lot-hash-check-") as temp:
             root = Path(temp)
             for name, content in [
                 ("include/pineforge/engine.hpp", header),
+                ("include/pineforge/compat/pine/frozen_market_instruction.hpp", frozen),
                 ("include/pineforge/broker_events.hpp", events),
                 ("include/pineforge/quantity_intent.hpp", quantity),
+                ("include/pineforge/reservation_expansion.hpp", expansion),
+                ("src/reservation_expansion.cpp", expansion_source),
                 ("include/pineforge/order_birth.hpp", birth),
                 ("include/pineforge/leg_activation.hpp", activation),
                 ("include/pineforge/compat/pine/exit_activation.hpp", exit_policy),
@@ -58,6 +64,72 @@ class PhysicalLotCoverage(unittest.TestCase):
                     code = exc.code if isinstance(exc.code, int) else 2
                     output.write(str(exc.code))
             return code, output.getvalue()
+
+    def test_standalone_reservation_abi_is_versioned_in_header_and_source(self):
+        for old in ("reservation_expansion_v0", "reservation_expansion_v2"):
+            self.assertEqual(self.check(expansion=EXPANSION.replace(
+                "reservation_expansion_v1", old))[0], 1)
+            self.assertEqual(self.check(expansion_source=EXPANSION_SOURCE.replace(
+                "reservation_expansion_v1", old))[0], 1)
+        for name in ("ReservationExpansionCapture", "ReservationExpansion", "ReservationGrowthSource"):
+            self.assertEqual(self.check(expansion=EXPANSION.replace(
+                name + " {", name + "Outside {"))[0], 1)
+
+    def test_every_capture_and_source_fold_is_required(self):
+        for fold in ["f.b(o.reservation_expansion.capture().has_value());",
+                     "f.i(capture->position_cycle);", "f.i(static_cast<int64_t>(capture->side));",
+                     "f.b(capture->first_later_admission.has_value());", "f.u(*admission);",
+                     "f.b(o.reservation_growth_source.reservation_owner().has_value());", "f.u(*receiver);"]:
+            with self.subTest(fold=fold):
+                self.assertEqual(self.check(source=SOURCE.replace(fold, ""))[0], 1)
+                self.assertEqual(self.check(source=SOURCE.replace(fold, "/* " + fold + " */"))[0], 1)
+                self.assertEqual(self.check(source=SOURCE.replace(fold, fold.replace("f.", "wrong.")))[0], 1)
+        for owner in ["reservation_expansion", "reservation_growth_source"]:
+            self.assertEqual(self.check(waivers=WAIVERS + "\npending_order." + owner + " # forbidden\n")[0], 1)
+
+    def test_capture_nested_storage_cannot_hide(self):
+        for field in ["std::optional<ReservationExpansionCapture> capture_;", "int64_t position_cycle;",
+                      "PositionSide side;", "std::optional<uint64_t> first_later_admission;",
+                      "std::optional<uint64_t> reservation_owner_;"]:
+            with self.subTest(field=field):
+                self.assertEqual(self.check(expansion=EXPANSION.replace(field,field + " int hidden;"))[0],1)
+                self.assertEqual(self.check(expansion=EXPANSION.replace(field,field.replace("int64_t", "int").replace("PositionSide", "int").replace("ReservationExpansionCapture", "int")))[0],1)
+
+    def test_capture_folds_cannot_be_conditional_rebound_or_duplicated(self):
+        start = SOURCE.index("        f.b(o.reservation_expansion.capture().has_value());")
+        end = SOURCE.index("        // Suppressed-close", start)
+        block = SOURCE[start:end]
+        for mutated in ["if (false) {" + block + "}", block + block,
+                        block.replace("capture = o.reservation_expansion.capture()", "capture = foreign.capture()"),
+                        block.replace("receiver = o.reservation_growth_source.reservation_owner()", "receiver = foreign.reservation_owner()"),
+                        block.replace("admission = capture->first_later_admission", "admission = foreign.first_later_admission"),
+                        "if(false) " + block]:
+            with self.subTest(mutated=mutated):
+                self.assertEqual(self.check(source=SOURCE[:start] + mutated + SOURCE[end:])[0],1)
+    def test_frozen_instruction_live_payloads_and_role_cannot_escape(self):
+        for fold in ["f.i(static_cast<int64_t>(o.pine_frozen_market_instruction.kind()));",
+                     "f.d(transaction->own_units);", "f.d(transaction->transaction_units);",
+                     "f.s(close->target_id);"]:
+            for replacement in ["", "// " + fold, "if (false) " + fold,
+                                fold.replace("f.", "other.")]:
+                with self.subTest(fold=fold, replacement=replacement):
+                    self.assertIn(fold, SOURCE)
+                    self.assertEqual(self.check(source=SOURCE.replace(fold, replacement))[0], 1)
+            self.assertEqual(self.check(source=SOURCE.replace(fold, "") + "\n" + fold)[0], 1)
+        self.assertEqual(self.check(waivers=WAIVERS +
+            "\npending_order.pine_frozen_market_instruction # attempted omission\n")[0], 1)
+
+    def test_frozen_instruction_new_fields_and_alternatives_fail_closed(self):
+        for old, new in [
+            ("double own_units;", "double own_units; double hidden;"),
+            ("std::string target_id;", "std::string target_id; uint64_t hidden;"),
+            ("Value value_;", "Value value_; bool hidden_;"),
+            ("std::monostate, Transaction, TargetedClose", "std::monostate, TargetedClose, Transaction"),
+            ("Ordinary, Transaction, TargetedClose", "Ordinary, Transaction, TargetedClose, Extra"),
+        ]:
+            with self.subTest(old=old):
+                self.assertIn(old, FROZEN)
+                self.assertEqual(self.check(frozen=FROZEN.replace(old, new))[0], 1)
 
     def test_exit_activation_has_complete_unconditional_coverage(self):
         for fold in ["f.b(o.leg_activation.bounds().has_value());", "f.i(bounds->position_cycle);",
@@ -99,26 +171,26 @@ class PhysicalLotCoverage(unittest.TestCase):
                 self.assertIn(old, QUANTITY)
                 self.assertEqual(self.check(quantity=QUANTITY.replace(old, new))[0], 1)
 
-    def test_layout_and_hash_versions_must_match_v6_contract(self):
-        self.assertIn("engine_script_run_v6", HEADER)
-        self.assertIn('f.s("pineforge-broker-state/v6");', SOURCE)
-        self.assertIn("integer(6); integer(broker_state_hash());", STREAM)
-        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v6", "engine_script_run_v2"))[0], 1)
+    def test_layout_and_hash_versions_must_match_v7_contract(self):
+        self.assertIn("engine_script_run_v7", HEADER)
+        self.assertIn('f.s("pineforge-broker-state/v7");', SOURCE)
+        self.assertIn("integer(7); integer(broker_state_hash());", STREAM)
+        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v7", "engine_script_run_v2"))[0], 1)
         for replacement in ['f.s("pineforge-broker-state/v2");', '',
-                            '// f.s("pineforge-broker-state/v6");']:
+                            '// f.s("pineforge-broker-state/v7");']:
             self.assertEqual(self.check(source=SOURCE.replace(
-                'f.s("pineforge-broker-state/v6");', replacement))[0], 1)
+                'f.s("pineforge-broker-state/v7");', replacement))[0], 1)
         for replacement in ["integer(2); integer(broker_state_hash());",
                             "integer(broker_state_hash());",
-                            "if (false) { integer(6); integer(broker_state_hash()); }"]:
+                            "if (false) { integer(7); integer(broker_state_hash()); }"]:
             self.assertEqual(self.check(stream=STREAM.replace(
-                "integer(6); integer(broker_state_hash());", replacement))[0], 1)
+                "integer(7); integer(broker_state_hash());", replacement))[0], 1)
 
     def test_version_folds_in_unrelated_helpers_do_not_cover_entry_points(self):
-        broker_fold = 'f.s("pineforge-broker-state/v6");'
+        broker_fold = 'f.s("pineforge-broker-state/v7");'
         altered = SOURCE.replace(broker_fold, '') + '\nvoid other() { ' + broker_fold + ' }\n'
         self.assertEqual(self.check(source=altered)[0], 1)
-        stream_fold = "integer(6); integer(broker_state_hash());"
+        stream_fold = "integer(7); integer(broker_state_hash());"
         altered = STREAM.replace(stream_fold, '') + '\nvoid other() { ' + stream_fold + ' }\n'
         self.assertEqual(self.check(stream=altered)[0], 1)
 

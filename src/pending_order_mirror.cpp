@@ -108,16 +108,16 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     copy_str(src.comment, out->comment, &out->comment_truncated, &out->comment_hash64);
     out->requested_partial = src.quantity_request.is_partial(1e-9, 1e-9) ? 1 : 0;
     out->full_percent_exit_request = src.quantity_request.requests_all() ? 1 : 0;
-    out->pooc_global_full_exit_dynamic_qty = src.pooc_global_full_exit_dynamic_qty ? 1 : 0;
-    out->pooc_global_full_exit_tracks_bound_adds = src.pooc_global_full_exit_tracks_bound_adds ? 1 : 0;
-    out->pooc_global_full_exit_bound_add = src.pooc_global_full_exit_bound_add ? 1 : 0;
+    out->pooc_global_full_exit_dynamic_qty = src.reservation_expansion.population_open() ? 1 : 0;
+    out->pooc_global_full_exit_tracks_bound_adds = src.reservation_expansion.capture().has_value() ? 1 : 0;
+    out->pooc_global_full_exit_bound_add = src.reservation_growth_source.reservation_owner().has_value() ? 1 : 0;
     out->created_while_in_position = src.type == OrderType::EXIT && src.created_position_side != PositionSide::FLAT ? 1 : 0;
-    out->sbmt_member = src.sbmt_member ? 1 : 0;
-    out->sbmt_own_qty = src.sbmt_own_qty;
-    out->sbmt_tx_qty = src.sbmt_tx_qty;
-    out->sbmt_kept_over_cap = src.sbmt_kept_over_cap ? 1 : 0;
-    out->sbmt_close_qty = src.sbmt_close_qty;
-    out->sbmt_close_buy = src.sbmt_close_buy ? 1 : 0;
+    out->sbmt_member = src.pine_frozen_market_instruction.active() ? 1 : 0;
+    out->sbmt_own_qty = src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->own_units : std::numeric_limits<double>::quiet_NaN();
+    out->sbmt_tx_qty = src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->transaction_units : std::numeric_limits<double>::quiet_NaN();
+    out->sbmt_kept_over_cap = src.pine_frozen_market_instruction.transaction() && src.over_pyramiding_cap_at_placement ? 1 : 0;
+    out->sbmt_close_qty = src.pine_frozen_market_instruction.targeted_close() ? src.quantity_request.intent()->units() : std::numeric_limits<double>::quiet_NaN();
+    out->sbmt_close_buy = src.pine_frozen_market_instruction.targeted_close() && src.created_position_side == PositionSide::SHORT ? 1 : 0;
     out->suppress_as_declined_reversal_close = src.suppress_as_declined_reversal_close ? 1 : 0;
     out->dormant_bracket = src.dormant_bracket ? 1 : 0;
     out->dormant_reissue_pending = src.dormant_reissue_pending ? 1 : 0;
@@ -164,6 +164,17 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->pine_exit_activation_limit_continuation_present = src.pine_exit_activation.evidence() && src.pine_exit_activation.evidence()->limit_continuation ? 1 : 0;
     out->pine_exit_activation_limit_continuation_cause = src.pine_exit_activation.evidence() && src.pine_exit_activation.evidence()->limit_continuation ? static_cast<int32_t>(src.pine_exit_activation.evidence()->limit_continuation->cause) : 0;
     out->pine_exit_activation_limit_continuation_fill = src.pine_exit_activation.evidence() && src.pine_exit_activation.evidence()->limit_continuation ? src.pine_exit_activation.evidence()->limit_continuation->observed_fill_sequence : 0;
+    out->reservation_expansion_position_cycle = src.reservation_expansion.capture() ? src.reservation_expansion.capture()->position_cycle : 0;
+    out->reservation_expansion_present = src.reservation_expansion.capture().has_value() ? 1 : 0;
+    out->reservation_expansion_side = src.reservation_expansion.capture() ? static_cast<int32_t>(src.reservation_expansion.capture()->side) : 0;
+    out->reservation_expansion_first_later_admission_present = src.reservation_expansion.capture() && src.reservation_expansion.capture()->first_later_admission ? 1 : 0;
+    out->reservation_expansion_first_later_admission = src.reservation_expansion.capture() && src.reservation_expansion.capture()->first_later_admission ? *src.reservation_expansion.capture()->first_later_admission : 0;
+    out->reservation_growth_source_present = src.reservation_growth_source.reservation_owner().has_value() ? 1 : 0;
+    out->reservation_growth_source_reservation_owner = src.reservation_growth_source.reservation_owner() ? *src.reservation_growth_source.reservation_owner() : 0;
+    out->pine_frozen_market_instruction_kind = static_cast<uint64_t>(src.pine_frozen_market_instruction.kind());
+    out->pine_frozen_market_instruction_own_units = src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->own_units : 0.0;
+    out->pine_frozen_market_instruction_transaction_units = src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->transaction_units : 0.0;
+    copy_str(src.pine_frozen_market_instruction.targeted_close() ? src.pine_frozen_market_instruction.targeted_close()->target_id : std::string(), out->pine_frozen_market_instruction_target_id, &out->pine_frozen_market_instruction_target_id_truncated, &out->pine_frozen_market_instruction_target_id_hash64);
 }
 
 namespace {
@@ -315,6 +326,19 @@ const pf_field_desc_t kLayout[] = {
     PF_PO_FIELD(pine_exit_activation_limit_continuation_present, "uint8_t"),
     PF_PO_FIELD(pine_exit_activation_limit_continuation_cause, "int32_t"),
     PF_PO_FIELD(pine_exit_activation_limit_continuation_fill, "uint64_t"),
+    PF_PO_FIELD(reservation_expansion_position_cycle, "int64_t"),
+    PF_PO_FIELD(reservation_expansion_present, "uint8_t"),
+    PF_PO_FIELD(reservation_expansion_side, "int32_t"),
+    PF_PO_FIELD(reservation_expansion_first_later_admission_present, "uint8_t"),
+    PF_PO_FIELD(reservation_expansion_first_later_admission, "uint64_t"),
+    PF_PO_FIELD(reservation_growth_source_present, "uint8_t"),
+    PF_PO_FIELD(reservation_growth_source_reservation_owner, "uint64_t"),
+    PF_PO_FIELD(pine_frozen_market_instruction_kind, "uint64_t"),
+    PF_PO_FIELD(pine_frozen_market_instruction_own_units, "double"),
+    PF_PO_FIELD(pine_frozen_market_instruction_transaction_units, "double"),
+    PF_PO_FIELD(pine_frozen_market_instruction_target_id, "char[64]"),
+    PF_PO_FIELD(pine_frozen_market_instruction_target_id_truncated, "uint8_t"),
+    PF_PO_FIELD(pine_frozen_market_instruction_target_id_hash64, "uint64_t"),
 };
 
 #undef PF_PO_FIELD

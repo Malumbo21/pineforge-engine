@@ -14,6 +14,8 @@
 #include "bar.hpp"
 #include "broker_events.hpp"
 #include "quantity_intent.hpp"
+#include "reservation_expansion.hpp"
+#include "compat/pine/frozen_market_instruction.hpp"
 #include "leg_activation.hpp"
 #include "compat/pine/exit_activation.hpp"
 #include "order_birth.hpp"
@@ -406,7 +408,7 @@ enum class ShortSeedCollisionRole : uint8_t {
 
 // PendingOrder crosses out-of-line helper boundaries independently of the
 // engine class, so its changed layout must carry the same internal epoch.
-inline namespace engine_script_run_v6 {
+inline namespace engine_script_run_v7 {
 struct PendingOrder {
     std::string id;
     std::string from_entry;    // for exit orders
@@ -857,23 +859,10 @@ struct PendingOrder {
     // qty_percent remain the executable/reserved values used by existing Pine
     // reservation rules; their later reduction cannot rewrite caller intent.
     QuantityRequest quantity_request;
-    // Narrow POOC global-full-exit candidate. ``qty`` deliberately keeps the
-    // normal finite reservation so sibling exits see and respect its capacity.
-    // At fill time this bit upgrades that one reservation to the full live
-    // position, covering same-bar MARKET pyramid adds that were already
-    // pending when the exit was placed. Any later admitted entry-like order
-    // clears the bit, making the finite qty the automatic conservative
-    // fallback—even when that later order is placed on a future bar.
-    bool pooc_global_full_exit_dynamic_qty = false;
-    // Persistent half of the bounded POOC relation. Unlike ``dynamic_qty``,
-    // later entries do not clear this bit: pre-exit adds may still be waiting
-    // to fill when invalidation occurs. Each successfully filled bound add
-    // grows this EXIT's finite qty by its exact same-side position delta.
-    bool pooc_global_full_exit_tracks_bound_adds = false;
-    // Set only on qualifying high-level MARKET adds already pending when the
-    // tracking global EXIT is placed. Same-id replacement constructs a fresh
-    // PendingOrder and therefore drops the relation; later orders never get it.
-    bool pooc_global_full_exit_bound_add = false;
+    // EXIT-owned exposure capture and source-owned exact receiver receipt.
+    // The public legacy flags are one-way projections of these causal facts.
+    ReservationExpansion reservation_expansion;
+    ReservationGrowthSource reservation_growth_source;
     // round 8 family S — TradingView's same-bar MARKET transaction (ledger
     // note log-20260905t143024z-76025577; 15 lab tv sensor tapes famS-dbl-*,
     // famS-rev-plus-close, famS-adm-{es,nq}-{1e6,500k} on CME_MINI:ES1!/NQ1!
@@ -911,14 +900,11 @@ struct PendingOrder {
     // dropped, so its same-id close finds no pending entry and is cancelled
     // (LONG 1, no artifact row). The generalized form of the short-seed
     // collision kernel (finding 272), with which it agrees on that book.
-    bool sbmt_member = false;
-    double sbmt_own_qty = std::numeric_limits<double>::quiet_NaN();
-    double sbmt_tx_qty = std::numeric_limits<double>::quiet_NaN();
-    bool sbmt_kept_over_cap = false;
-    // strategy.close member: frozen target and broker side (buy closes a
-    // short). The target id is order.id without the "__close__" prefix.
-    double sbmt_close_qty = std::numeric_limits<double>::quiet_NaN();
-    bool sbmt_close_buy = false;
+    // One typed source instruction. Transaction quantities live here; a
+    // targeted close consumes quantity_request's resolved original Units.
+    // Cap and closing-side facts remain the existing immutable placement
+    // snapshots, rather than separately writable coordination booleans.
+    PineFrozenMarketInstruction pine_frozen_market_instruction;
     // design-declined-reversal-close-leg: set at the KI-54 percent-of-equity
     // reversal-decline site when this pending FULL close was co-queued AFTER,
     // and on the same bar as, the declined MARKET reversal entry targeting the
@@ -1033,7 +1019,7 @@ struct PendingOrder {
         ShortSeedCollisionRole::NONE;
 };
 
- } // inline namespace engine_script_run_v6 (PendingOrder)
+ } // inline namespace engine_script_run_v7 (PendingOrder)
 
 // default_qty_type constants (matches TradingView)
 enum class QtyType { FIXED = 0, PERCENT_OF_EQUITY = 1, CASH = 2 };
@@ -1091,7 +1077,7 @@ struct StrategyOverrides {
 // v6 adds explicit owner-bound exit-leg activation and Pine placement evidence.
 // Version the mangled class name so older headers' member offsets/vtable cannot
 // silently bind out-of-line members of this different object layout.
-inline namespace engine_script_run_v6 {
+inline namespace engine_script_run_v7 {
 class BacktestEngine {
 protected:
     // --- Position state ---
@@ -2169,8 +2155,11 @@ protected:
             && std::isfinite(order.affordability_placement_equity)
             && order.affordability_placement_equity > 0.0
             && order.affordability_held_qty == 0.0
-            && (!order.sbmt_member || (order.sbmt_tx_qty == order.sbmt_own_qty
-                                      && !order.sbmt_kept_over_cap));
+            && (!order.pine_frozen_market_instruction.active()
+                || (order.pine_frozen_market_instruction.transaction()
+                    && order.pine_frozen_market_instruction.transaction()->transaction_units
+                        == order.pine_frozen_market_instruction.transaction()->own_units
+                    && !order.over_pyramiding_cap_at_placement));
         if (!default_all_in && !explicit_fixed) return false;
         const double mark = default_all_in ? order.sizing_mark
                                           : order.affordability_signal_price;
@@ -3983,7 +3972,7 @@ private:
         const PendingOrder& order) const;
     bool short_seed_collision_final_short_is_live(
         const PendingOrder& order) const;
-    // round 8 family S (PendingOrder::sbmt_member): the same-bar MARKET
+    // round 8 family S (PendingOrder::pine_frozen_market_instruction): the same-bar MARKET
     // transaction's scope, the close-artifact predicate (rule 4) and the
     // frozen-transaction reversal kernel (rules 1/2).
     bool same_bar_market_tx_scope_is_live() const;
@@ -4253,7 +4242,7 @@ private:
                                    double& qp_io,
                                    bool& is_partial_io,
                                    double& reserved_qty_out);
-    void invalidate_unsafe_pooc_global_full_exit_dynamic_qty();
+    void close_reservation_capture_populations(uint64_t admitted_incarnation);
 
     // execute_market_entry / execute_partial_exit_* helpers (defined in
     // engine_orders.cpp).
@@ -4976,12 +4965,12 @@ public:
     //                            strategy.order size at the signal close), a
     //                            MARKET's frozen broker transaction
     //                            (paired_flat_market_transaction_qty; a
-    //                            same-bar-market member's sbmt_tx_qty from
+    //                            same-bar-market transaction's frozen total from
     //                            FLAT or as a kept over-cap add), or what one
     //                            of the two MARKET reversal kernels opens:
     //                            a same-bar-market member against an
     //                            opposite live position opens the remainder
-    //                            sbmt_tx_qty - min(sbmt_tx_qty, live qty)
+    //                            transaction_units - min(transaction_units, live qty)
     //                            (apply_same_bar_market_tx_reversal), and the
     //                            exact SHORT-seed collision's final short
     //                            re-opens the residual pyramid_entries_[0].qty
@@ -5129,5 +5118,5 @@ public:
     void trace(const std::string& name, int value)   { trace(name, static_cast<double>(value)); }
 };
 
-} // inline namespace engine_script_run_v6
+} // inline namespace engine_script_run_v7
 } // namespace pineforge
