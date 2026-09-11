@@ -7124,9 +7124,12 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
                         ? sibling.legs.target().incarnation : sibling.incarnation,
                     sibling.legs.target().owner,
                     sibling.legs.revision()};
-                if (sibling.cancellation.cancel(CancellationCause::Replacement,
-                    order.incarnation, order.created_seq, target, target)
-                    != CancellationResult::Applied)
+                if (sibling.cancellation.cancelled()) continue;
+                const auto result = sibling.cancellation.cancel(
+                    CancellationCause::Replacement, order.incarnation,
+                    order.created_seq, target, target);
+                if (result != CancellationResult::Applied
+                    && result != CancellationResult::Replay)
                     throw std::logic_error("replacement cancellation receipt rejected");
             }
         }
@@ -7895,16 +7898,20 @@ void BacktestEngine::suppress_declined_reversal_close_legs(
             co.legs.target().incarnation != 0 ? co.legs.target().incarnation : co.incarnation,
             co.legs.target().owner,
             co.legs.revision()};
+        double* ledger = nullptr;
+        if (co.cancellation.has_close_claim())
+            ledger = &id_unclosed_qty_[co.id.substr(kClosePrefix.size())];
         const CancellationResult cancelled = co.cancellation.cancel(
             CancellationCause::Dependency, declined_entry.incarnation,
             declined_entry.created_seq, target, target);
-        if (cancelled != CancellationResult::Applied)
+        if (cancelled != CancellationResult::Applied
+            && cancelled != CancellationResult::Replay)
             throw std::logic_error("dependency cancellation receipt rejected");
         if (cancelled == CancellationResult::Applied) {
             // round-4b F1: the call retired the id's ledger whole; restore
             // the target AND the remainder it retired beyond the target.
-            double& ledger = id_unclosed_qty_[co.id.substr(kClosePrefix.size())];
-            co.cancellation.release_close_claim_once(ledger);
+            if (ledger && !co.cancellation.release_close_claim_once(*ledger))
+                throw std::logic_error("dependency cancellation claim release rejected");
         }
     }
 }

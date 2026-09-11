@@ -29,6 +29,9 @@ int main() {
     CHECK(receipt.cancel(CancellationCause::Dependency, 11, 4,
                          CancellationTarget{12, 7, std::numeric_limits<uint64_t>::max()}, target)
           == CancellationResult::Invalid);
+    CHECK(receipt.cancel(CancellationCause::Dependency, 11, 4,
+                         target, CancellationTarget{13, 7, 3})
+          == CancellationResult::Invalid);
     CHECK(receipt.cancel(CancellationCause::Dependency, 11, 4, target, target)
           == CancellationResult::Applied);
     CHECK(receipt.cancelled());

@@ -16,8 +16,8 @@ class ReservationMirror(unittest.TestCase):
         header, source = mirror.generate()
         self.assertEqual(header, mirror.OUT_H.read_text())
         self.assertEqual(source, mirror.OUT_C.read_text())
-        self.assertIn('#define PF_PENDING_ORDER_FIELD_COUNT 396', header)
-        self.assertIn('396 POD fields', header)
+        self.assertIn('#define PF_PENDING_ORDER_FIELD_COUNT 406', header)
+        self.assertIn('406 POD fields', header)
 
     def test_every_nested_mapping_is_observable(self):
         original = mirror.generate()
