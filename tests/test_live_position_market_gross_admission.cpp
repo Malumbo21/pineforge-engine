@@ -28,6 +28,7 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/compat/pine/market_admission.hpp>
 
 using namespace pineforge;
 

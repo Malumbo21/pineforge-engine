@@ -45,6 +45,7 @@
 #include <limits>
 
 #include <pineforge/engine.hpp>
+#include <pineforge/compat/pine/market_admission.hpp>
 #include <pineforge/bar.hpp>
 #include <pineforge/na.hpp>
 

@@ -24,6 +24,12 @@ admission::CurrentPrices BacktestEngine::admission_current_prices(const PendingO
     return {prices.limit_price, prices.stop_price, prices.trail_points,
             prices.trail_price, prices.trail_offset};
 }
+bool BacktestEngine::opening_admission_eligible(const MarketAdmissionDraft& draft) const {
+    // Pine is one policy adapter over the generic admission journal. Keep
+    // that dependency in this translation unit so engine.hpp exposes the
+    // native model without importing a source-language policy header.
+    return compat::pine::opening_qualification(draft);
+}
 admission::BookObservation BacktestEngine::admission_book_observation(const PendingOrder& order) const {
     return {order.incarnation,order.created_seq,order.created_bar,static_cast<int>(order.type),
             static_cast<int>(order.created_position_side),order.id,order.oca_name,order.oca_type,order.birth,admission_current_prices(order),order.market_admission};

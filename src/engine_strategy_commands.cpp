@@ -1,4 +1,5 @@
 #include <pineforge/compat/pine/exit_lifecycle.hpp>
+#include <pineforge/compat/pine/market_admission.hpp>
 /*
  * engine_strategy_commands.cpp — the strategy.* command surface.
  *

@@ -1,4 +1,5 @@
 #include <pineforge/compat/pine/exit_lifecycle.hpp>
+#include <pineforge/compat/pine/market_admission.hpp>
 /*
  * engine_fills.cpp — process_pending_orders — the bar-pump fill loop
  */

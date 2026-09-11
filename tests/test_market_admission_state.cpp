@@ -1,5 +1,6 @@
 #include "admission_literal_book.hpp"
 #include "admission_mutation_walk.hpp"
+#include <pineforge/compat/pine/market_admission.hpp>
 #include <cstdio>
 #include <cstring>
 #include <set>

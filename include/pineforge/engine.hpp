@@ -15,7 +15,6 @@
 #include "broker_events.hpp"
 #include "quantity_intent.hpp"
 #include "market_admission.hpp"
-#include "compat/pine/market_admission.hpp"
 #include "reservation_expansion.hpp"
 #include "compat/pine/frozen_market_instruction.hpp"
 #include "leg_activation.hpp"
@@ -2055,7 +2054,7 @@ protected:
         const bool default_all_in = std::isnan(order.qty)
             && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
             && default_qty_value_ == 100.0
-            && compat::pine::opening_qualification(order.market_admission)
+            && opening_admission_eligible(order.market_admission)
             && std::isfinite(order.frozen_default_qty) && order.frozen_default_qty > 0.0
             && std::isfinite(order.sizing_equity) && order.sizing_equity > 0.0
             && order.sizing_fx == 1.0;
@@ -3888,6 +3887,11 @@ private:
     void bind_market_command(PendingOrder& order, admission::CommandCapture& command);
     admission::ReviewCapture begin_market_review(admission::Checkpoint checkpoint);
     void reclaim_market_admission();
+    // The generic engine asks for an opening-admission decision through this
+    // source-owned seam.  The Pine compatibility adapter is implemented in
+    // engine_market_admission.cpp and is deliberately absent from this
+    // public engine header.
+    bool opening_admission_eligible(const MarketAdmissionDraft& draft) const;
     void record_market_sizing_revision(PendingOrder& order, admission::SizingObservation before,
                                       double affordability_before);
     bool pending_flat_market_pair_scope_is_live() const;
