@@ -1,5 +1,6 @@
 set(TEST_SOURCES
     test_order_cancellation
+    test_cancellation_mirror_coverage
     test_market_admission_causality
     test_pending_order_mirror_no_alloc
     test_market_admission_decisions
