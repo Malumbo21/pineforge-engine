@@ -3850,6 +3850,7 @@ private:
                               bool explicit_qty_prequantized,
                               uint64_t entry_incarnation);
     void execute_market_exit(double fill_price);
+    void append_same_side_fill(PyramidEntry lot);
     // Range-end accounting: record the rows that close a position still
     // open after the final script bar at that bar's close, the way
     // TradingView's deep-backtest report does (engine_orders.cpp). Called by

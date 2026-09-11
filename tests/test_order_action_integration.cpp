@@ -45,6 +45,7 @@ public:
     void seed_two_lots() {
         position_side_ = PositionSide::LONG;
         position_cycle_seq_ = 4;
+        next_position_cycle_seq_ = 5;
         position_entry_price_ = 106.0;
         position_qty_ = 5.0;
         position_entry_count_ = 2;
@@ -56,6 +57,8 @@ public:
         PyramidEntry b{110.0, 2000, 3.0, "B", 0};
         b.entry_incarnation = 12;
         b.entry_commission_account = 3.0;
+        b.max_runup = 60.0;
+        b.max_drawdown = 30.0;
         pyramid_entries_.push_back(a);
         pyramid_entries_.push_back(b);
         id_unclosed_qty_.clear();
@@ -92,6 +95,11 @@ public:
     void enable_stream_actions() { stream_observe_actions_ = true; }
     void set_slippage(int ticks) { slippage_ = ticks; }
     void make_short() { position_side_ = PositionSide::SHORT; }
+    void per_order_fees() {
+        commission_type_ = CommissionType::CASH_PER_ORDER;
+        commission_value_ = 3.0;
+        for (auto& lot : pyramid_entries_) lot.entry_commission_account = 3.0;
+    }
 
     void transact(PendingOrder& order, double raw_price) {
         double trail = std::numeric_limits<double>::quiet_NaN();
@@ -122,6 +130,8 @@ void reduce_preserves_fifo_identity_and_scales_survivor() {
     CHECK(book.lots()[0].entry_incarnation == 12);
     CHECK(book.lots()[0].qty == 2.0);
     CHECK(book.lots()[0].entry_commission_account == 2.0);
+    CHECK(book.lots()[0].max_runup == 40.0);
+    CHECK(book.lots()[0].max_drawdown == 20.0);
     CHECK(book.signed_position() == 2.0);
     CHECK(book.cycle() == 4);
 
@@ -140,6 +150,14 @@ void reduce_preserves_fifo_identity_and_scales_survivor() {
     CHECK(oversized.signed_position() == 0.0);
     CHECK(oversized.lots().empty());
     CHECK(oversized.trades().size() == 2);
+    CHECK(oversized.cycle() == 0);
+
+    Book order_fee;
+    order_fee.seed_two_lots();
+    order_fee.per_order_fees();
+    order_fee.partial(120.0, 3.0);
+    CHECK(order_fee.lots().size() == 1);
+    CHECK(order_fee.lots()[0].entry_commission_account == 3.0);
 }
 
 void reduce_handles_short_side_and_slippage_once() {
@@ -151,14 +169,14 @@ void reduce_handles_short_side_and_slippage_once() {
     CHECK(book.signed_position() == -3.0);
     CHECK(book.trades().size() == 1);
     CHECK(!book.trades()[0].is_long);
-    CHECK(book.trades()[0].exit_price == 121.0);
+    CHECK(std::abs(book.trades()[0].exit_price - 120.02) < 1e-12);
 
     Book long_side;
     long_side.seed_two_lots();
     long_side.set_slippage(2);
     long_side.partial(120.0, 2.0);
     CHECK(long_side.trades().size() == 1);
-    CHECK(long_side.trades()[0].exit_price == 119.0);
+    CHECK(std::abs(long_side.trades()[0].exit_price - 119.98) < 1e-12);
 }
 
 void append_preserves_lot_metadata_and_stream_action() {
@@ -173,6 +191,7 @@ void append_preserves_lot_metadata_and_stream_action() {
 
     CHECK(book.lots().size() == 3);
     CHECK(book.lots().back().entry_id == "C");
+    CHECK(book.lots().back().entry_comment == "native add");
     CHECK(book.lots().back().entry_incarnation == 13);
     CHECK(!book.lots().back().market_pyramid_add);
     CHECK(book.lots().back().entry_commission_account == 1.0);
@@ -195,62 +214,73 @@ PendingOrder transaction_order(bool is_long, double own, double total) {
 }
 
 void transact_closes_fifo_and_crosses_flat() {
-    Book partial;
-    partial.seed_three_units();
-    auto sell_two = transaction_order(false, 2.0, 2.0);
-    partial.transact(sell_two, 120.0);
-    CHECK(partial.signed_position() == 1.0);
-    CHECK(partial.trades().size() == 1);
-    CHECK(partial.trades()[0].qty == 1.0);
-    CHECK(partial.trades()[0].entry_id == "A");
+    for (bool from_short : {false, true}) {
+        Book partial;
+        partial.seed_three_units(); // FIFO A=1, B=2
+        if (from_short) partial.make_short();
+        partial.enable_stream_actions();
+        auto two = transaction_order(from_short, 2.0, 2.0);
+        partial.transact(two, 120.0);
+        CHECK(partial.signed_position() == (from_short ? -1.0 : 1.0));
+        CHECK(partial.cycle() == 4);
+        CHECK(partial.trades().size() == 2);
+        if (partial.trades().size() == 2) {
+            CHECK(partial.trades()[0].entry_id == "A" && partial.trades()[0].qty == 1.0);
+            CHECK(partial.trades()[1].entry_id == "B" && partial.trades()[1].qty == 1.0);
+        }
+        CHECK(partial.lots().size() == 1 && partial.lots()[0].entry_id == "B");
+        CHECK(partial.stream_actions() == 2);
+        if (partial.stream_actions() == 2) {
+            CHECK(!partial.stream_order_action_at(0).is_entry);
+            CHECK(!partial.stream_order_action_at(1).is_entry);
+            CHECK(partial.stream_order_action_at(0).quantity == 1.0);
+            CHECK(partial.stream_order_action_at(1).quantity == 1.0);
+        }
 
-    Book stream;
-    stream.seed_three_units();
-    stream.enable_stream_actions();
-    auto stream_sell = transaction_order(false, 2.0, 2.0);
-    stream.transact(stream_sell, 120.0);
-    CHECK(stream.stream_actions() == 1);
-    CHECK(!stream.stream_order_action_at(0).is_entry);
-    CHECK(stream.stream_order_action_at(0).quantity == 1.0);
+        Book exact;
+        exact.seed_three_units();
+        if (from_short) exact.make_short();
+        auto three = transaction_order(from_short, 3.0, 3.0);
+        exact.transact(three, 120.0);
+        CHECK(exact.signed_position() == 0.0 && exact.cycle() == 0);
+        CHECK(exact.lots().empty());
+        CHECK(exact.trades().size() == 2);
+        if (exact.trades().size() == 2) {
+            CHECK(exact.trades()[0].qty == 1.0 && exact.trades()[1].qty == 2.0);
+        }
 
-    Book exact;
-    exact.seed_three_units();
-    auto sell_three = transaction_order(false, 3.0, 3.0);
-    exact.transact(sell_three, 120.0);
-    CHECK(exact.signed_position() == 0.0);
-    CHECK(exact.trades().size() == 2);
-    CHECK(exact.trades()[0].qty == 2.0 && exact.trades()[1].qty == 1.0);
-
-    Book crossing;
-    crossing.seed_three_units();
-    auto sell_three_again = transaction_order(false, 3.0, 3.0);
-    crossing.transact(sell_three_again, 120.0);
-    CHECK(crossing.signed_position() == 0.0);
-    CHECK(crossing.trades().size() == 2);
-    // Equal transaction and held quantities produce a flat position and no
-    // phantom opening lot; the signed planner's open remainder is zero.
-    CHECK(crossing.lots().empty());
+        Book crossing;
+        crossing.seed_three_units();
+        if (from_short) crossing.make_short();
+        crossing.enable_stream_actions();
+        auto five = transaction_order(from_short, 5.0, 5.0);
+        crossing.transact(five, 120.0);
+        CHECK(crossing.signed_position() == (from_short ? 2.0 : -2.0));
+        CHECK(crossing.cycle() == 5);
+        CHECK(crossing.lots().size() == 1);
+        if (!crossing.lots().empty()) {
+            CHECK(crossing.lots()[0].entry_id == (from_short ? "BUY" : "SELL"));
+            CHECK(crossing.lots()[0].qty == 2.0);
+            CHECK(crossing.lots()[0].entry_incarnation == 44);
+        }
+        CHECK(crossing.trades().size() == 2);
+        CHECK(crossing.stream_actions() == 3);
+        if (crossing.stream_actions() == 3) {
+            CHECK(!crossing.stream_order_action_at(0).is_entry);
+            CHECK(!crossing.stream_order_action_at(1).is_entry);
+            CHECK(crossing.stream_order_action_at(2).is_entry);
+            CHECK(crossing.stream_order_action_at(2).quantity == 2.0);
+        }
+    }
 }
 
-void transact_crosses_with_open_remainder() {
-    Book book;
-    book.seed_three_units();
-    auto sell_five = transaction_order(false, 5.0, 5.0);
-    book.transact(sell_five, 120.0);
-    CHECK(book.signed_position() == -2.0);
-    CHECK(book.lots().size() == 1);
-    CHECK(book.lots().back().entry_id == "SELL");
-    CHECK(book.lots().back().qty == 2.0);
-    CHECK(book.lots().back().entry_incarnation == 44);
-    CHECK(book.trades().size() == 2);
-}
 }
 
 int main() {
     reduce_preserves_fifo_identity_and_scales_survivor();
+    reduce_handles_short_side_and_slippage_once();
     append_preserves_lot_metadata_and_stream_action();
     transact_closes_fifo_and_crosses_flat();
-    transact_crosses_with_open_remainder();
     std::printf("order action integration: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

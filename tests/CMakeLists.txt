@@ -1,4 +1,6 @@
 set(TEST_SOURCES
+    test_order_action
+    test_order_action_integration
     test_placement_facts
     test_order_cancellation
     test_cancellation_mirror_coverage

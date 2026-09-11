@@ -4,6 +4,7 @@
  */
 
 #include "engine_internal.hpp"
+#include <pineforge/order_action.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -340,7 +341,11 @@ double BacktestEngine::fifo_drain(const std::string* from_entry, double qty_limi
 void BacktestEngine::execute_partial_exit_qty(
         double fill_price, double qty_to_close, PositionReductionCause cause) {
     if (position_side_ == PositionSide::FLAT || pyramid_entries_.empty()) return;
-    qty_to_close = std::clamp(qty_to_close, 0.0, position_qty_);
+    const double held = position_side_ == PositionSide::LONG
+        ? position_qty_ : -position_qty_;
+    const auto reduction = order_action::plan(held, order_action::Reduce{qty_to_close});
+    if (!reduction) return;
+    qty_to_close = reduction->close_units();
     if (qty_to_close <= kQtyEpsilon) return;
 
     bool is_buy = (position_side_ == PositionSide::SHORT);
@@ -350,6 +355,27 @@ void BacktestEngine::execute_partial_exit_qty(
     // Close FIFO across all pyramid entries, creating trade records.
     fifo_drain(/*from_entry=*/nullptr, qty_to_close, fill_price, was_long);
     settle_position_after_partial_exit(cause);
+}
+
+
+// Settle an already resolved same-side fill as a distinct physical lot.
+// Admission, sizing, side selection and source interpretation precede this
+// seam. It neither consults a pyramiding cap nor invents a source-policy bit.
+// The caller supplies the lot's immutable label, identity and fill metadata;
+// accounting and stream observations still use the engine's sole lot ledger.
+void BacktestEngine::append_same_side_fill(PyramidEntry lot) {
+    const double total_qty = position_qty_ + lot.qty;
+    position_entry_price_ =
+        (position_entry_price_ * position_qty_ + lot.price * lot.qty) / total_qty;
+    position_qty_ = total_qty;
+    ++position_entry_count_;
+    trail_best_price_ = lot.price;
+    snapshot_entry_commission(lot);
+    pyramid_entries_.push_back(std::move(lot));
+    if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
+    const auto& filled = pyramid_entries_.back();
+    id_unclosed_qty_[filled.entry_id] += filled.qty;
+    cycle_filled_entry_ids_.insert(filled.entry_id);
 }
 
 

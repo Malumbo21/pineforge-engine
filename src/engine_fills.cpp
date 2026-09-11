@@ -5,6 +5,7 @@
  */
 
 #include "engine_internal.hpp"
+#include <pineforge/order_action.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -4498,14 +4499,22 @@ void BacktestEngine::apply_same_bar_market_tx_reversal(
     const PositionSide requested =
         order.is_long ? PositionSide::LONG : PositionSide::SHORT;
     const double tx = order.pine_frozen_market_instruction.transaction()->transaction_units;
-    const double close_qty = std::min(tx, position_qty_);
+    // Pine has already resolved the source instruction to physical units.
+    // Native netting owns the close/open split; this adapter retains its
+    // established dust threshold, slippage and post-fill lifecycle.
+    const double held = position_side_ == PositionSide::LONG
+        ? position_qty_ : -position_qty_;
+    const auto transaction = order_action::plan(
+        held, order_action::Transact{order.is_long ? tx : -tx});
+    if (!transaction) return;
+    const double close_qty = transaction->close_units();
     if (close_qty >= position_qty_ - kQtyEpsilon) {
         execute_market_exit(fill_price);
     } else if (close_qty > kQtyEpsilon) {
         execute_partial_exit_qty(fill_price, close_qty,
                                  PositionReductionCause::SCRIPT_ORDER);
     }
-    const double remainder = tx - close_qty;
+    const double remainder = std::abs(transaction->open_units());
     if (remainder > kQtyEpsilon && std::isfinite(fill_price)) {
         const double entry_fill = apply_fill_slippage(fill_price, order.is_long);
         open_fresh_position(requested, entry_fill, remainder, order.id,
@@ -7410,13 +7419,6 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
         const double entry_fill = apply_fill_slippage(fill_price, /*is_buy=*/true);
         if (!std::isfinite(entry_fill) || qty <= kQtyEpsilon) return;
 
-        const double total_qty = position_qty_ + qty;
-        position_entry_price_ =
-            (position_entry_price_ * position_qty_ + entry_fill * qty)
-            / total_qty;
-        position_qty_ = total_qty;
-        ++position_entry_count_;
-        trail_best_price_ = entry_fill;
         PyramidEntry materialized{};
         materialized.price = entry_fill;
         materialized.time = current_bar_.timestamp;
@@ -7425,11 +7427,7 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
         materialized.entry_bar_index = bar_index_;
         materialized.entry_comment = order.comment;
         materialized.entry_incarnation = order.incarnation;
-        snapshot_entry_commission(materialized);
-        pyramid_entries_.push_back(std::move(materialized));
-        if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
-        id_unclosed_qty_[order.id] += qty;
-        cycle_filled_entry_ids_.insert(order.id);
+        append_same_side_fill(std::move(materialized));
         return;
     }
 
@@ -7453,13 +7451,6 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
             const double entry_fill =
                 apply_fill_slippage(fill_price, /*is_buy=*/(order.created_position_side == PositionSide::SHORT));
             if (!std::isfinite(entry_fill) || qty <= kQtyEpsilon) return;
-            const double total_qty = position_qty_ + qty;
-            position_entry_price_ =
-                (position_entry_price_ * position_qty_ + entry_fill * qty)
-                / total_qty;
-            position_qty_ = total_qty;
-            ++position_entry_count_;
-            trail_best_price_ = entry_fill;
             PyramidEntry artifact{};
             artifact.price = entry_fill;
             artifact.time = current_bar_.timestamp;
@@ -7468,11 +7459,7 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
             artifact.entry_bar_index = bar_index_;
             artifact.entry_comment = order.comment;
             artifact.entry_incarnation = order.incarnation;
-            snapshot_entry_commission(artifact);
-            pyramid_entries_.push_back(std::move(artifact));
-            if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
-            id_unclosed_qty_[order.id] += qty;
-            cycle_filled_entry_ids_.insert(order.id);
+            append_same_side_fill(std::move(artifact));
             return;
         }
         sbmt_frozen_close = true;

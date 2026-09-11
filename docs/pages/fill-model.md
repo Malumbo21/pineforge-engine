@@ -87,6 +87,32 @@ captured sources can still pay their exact receiver; later unrelated adds do not
 join the capture. An old-cycle capture loses live-All authority while its ordinary
 finite reservation remains available for the normal settlement path.
 
+### Native quantity actions
+
+`order_action::plan` in `<pineforge/order_action.hpp>` resolves physical units
+against a supplied signed position. `Reduce{units}` accepts a finite,
+nonnegative magnitude, caps it at the held exposure and never opens or flips.
+`Transact{signed_units}` closes opposing exposure first and opens only its
+remaining units. For example, selling 2, 3 or 5 units against a long position
+of 3 leaves long 1, flat or short 2, respectively. A zero request is valid.
+Nonfinite values, overflow and a nonzero request lost to binary64 rounding
+produce no plan.
+
+The plan is immutable arithmetic output. It owns no position ledger, source
+policy, quantity step, cycle counter or execution permission. It does not
+authorize a delayed fill: a scheduler must revalidate its order identity and
+current book before settlement. Pending cancellation and replay receipts are
+separate lifecycle contracts.
+
+The current bridge uses this planner for partial reduction and Pine's already
+resolved frozen-transaction close/open split. The existing settlement paths
+still own FIFO lots, fees, slippage, dust thresholds and observations. A shared
+same-side lot append also keeps physical identity and metadata without
+introducing another position book. This is a prerequisite for the unified
+executor; `ShortSeedCollisionRole` and its compatibility projection remain
+until ordered actions replace all of their consumers. This change does not
+reduce the pending-order flag count or provide broker-account reconciliation.
+
 ## Opening checkpoint
 
 An accepted opening or add can create an opening-affordability checkpoint.
