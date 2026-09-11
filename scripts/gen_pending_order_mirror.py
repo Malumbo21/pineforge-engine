@@ -371,8 +371,14 @@ def generate() -> tuple[str, str]:
     # Preserve all 142 ff54 fields, including activation, before new composites.
     existing_extension = ["replaced_order_incarnation", "birth", "pine_birth_reach", "quantity_request", "leg_activation", "pine_exit_activation", "reservation_expansion", "reservation_growth_source", "pine_frozen_market_instruction"]
     tail = [(native[name], name) for name in existing_extension]
+    # Cancellation is the first new native member after the shipped v1
+    # contract. Keep every pre-cancellation field byte-for-byte in place and
+    # append the receipt's leaves after the complete 396-field object.
     tail += [(kind, name) for kind, name in mirrored
-             if name not in prefix_names and name not in existing_extension]
+             if name not in prefix_names and name not in existing_extension
+             and name != "cancellation"]
+    if "cancellation" in native:
+        tail.append((native["cancellation"], "cancellation"))
     ordered = prefix + tail
     for t, m in ordered:
         if m in LEGACY_OUTPUTS:

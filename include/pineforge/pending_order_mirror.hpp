@@ -330,16 +330,6 @@ typedef struct pf_pending_order_v1_s {
     uint32_t legs_last_cancel_legs_item0;
     uint32_t legs_last_cancel_legs_item1;
     uint32_t legs_last_cancel_legs_item2;
-    int32_t cancellation_cause;
-    int32_t cancellation_state;
-    int32_t cancellation_close_claim_release;
-    uint64_t cancellation_source_incarnation;
-    int64_t cancellation_source_sequence;
-    uint64_t cancellation_target_incarnation;
-    int64_t cancellation_target_owner;
-    uint64_t cancellation_target_revision;
-    double cancellation_close_claim_consumed;
-    double cancellation_close_claim_retired;
     uint64_t market_admission_observation_present;
     uint64_t market_admission_observation_command;
     int64_t market_admission_observation_kind;
@@ -418,6 +408,16 @@ typedef struct pf_pending_order_v1_s {
     int64_t market_admission_sizing_revision_bar;
     uint64_t market_admission_review_target_command;
     uint64_t market_admission_sizing_revision_target_command;
+    int32_t cancellation_cause;
+    int32_t cancellation_state;
+    int32_t cancellation_close_claim_release;
+    uint64_t cancellation_source_incarnation;
+    int64_t cancellation_source_sequence;
+    uint64_t cancellation_target_incarnation;
+    int64_t cancellation_target_owner;
+    uint64_t cancellation_target_revision;
+    double cancellation_close_claim_consumed;
+    double cancellation_close_claim_retired;
 } pf_pending_order_v1_t;
 
 /* One row of the self-describing layout table returned by

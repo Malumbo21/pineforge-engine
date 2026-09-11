@@ -340,16 +340,6 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->legs_last_cancel_legs_item0 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size() > 0) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs)[0])) : (UINT32_MAX);
     out->legs_last_cancel_legs_item1 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size() > 1) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs)[1])) : (UINT32_MAX);
     out->legs_last_cancel_legs_item2 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size() > 2) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs)[2])) : (UINT32_MAX);
-    out->cancellation_cause = static_cast<int32_t>(src.cancellation.cause());
-    out->cancellation_state = static_cast<int32_t>(src.cancellation.state());
-    out->cancellation_close_claim_release = static_cast<int32_t>(src.cancellation.close_claim_release());
-    out->cancellation_source_incarnation = src.cancellation.source_incarnation();
-    out->cancellation_source_sequence = src.cancellation.source_sequence();
-    out->cancellation_target_incarnation = src.cancellation.target_incarnation();
-    out->cancellation_target_owner = src.cancellation.target_owner();
-    out->cancellation_target_revision = src.cancellation.target_revision();
-    out->cancellation_close_claim_consumed = src.cancellation.close_claim_consumed();
-    out->cancellation_close_claim_retired = src.cancellation.close_claim_retired();
     out->market_admission_observation_present = src.market_admission.observation() ? 1 : 0;
     out->market_admission_observation_command = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->command) : 0;
     out->market_admission_observation_kind = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->kind) : 0;
@@ -424,6 +414,16 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->market_admission_sizing_revision_bar = src.market_admission.sizing_revision() ? static_cast<int64_t>(src.market_admission.sizing_revision()->bar) : 0;
     out->market_admission_review_target_command = src.market_admission.review() ? static_cast<uint64_t>(src.market_admission.review()->target_command) : 0;
     out->market_admission_sizing_revision_target_command = src.market_admission.sizing_revision() ? static_cast<uint64_t>(src.market_admission.sizing_revision()->target_command) : 0;
+    out->cancellation_cause = static_cast<int32_t>(src.cancellation.cause());
+    out->cancellation_state = static_cast<int32_t>(src.cancellation.state());
+    out->cancellation_close_claim_release = static_cast<int32_t>(src.cancellation.close_claim_release());
+    out->cancellation_source_incarnation = src.cancellation.source_incarnation();
+    out->cancellation_source_sequence = src.cancellation.source_sequence();
+    out->cancellation_target_incarnation = src.cancellation.target_incarnation();
+    out->cancellation_target_owner = src.cancellation.target_owner();
+    out->cancellation_target_revision = src.cancellation.target_revision();
+    out->cancellation_close_claim_consumed = src.cancellation.close_claim_consumed();
+    out->cancellation_close_claim_retired = src.cancellation.close_claim_retired();
 }
 
 namespace {
@@ -751,16 +751,6 @@ const pf_field_desc_t kLayout[] = {
     PF_PO_FIELD(legs_last_cancel_legs_item0, "uint32_t"),
     PF_PO_FIELD(legs_last_cancel_legs_item1, "uint32_t"),
     PF_PO_FIELD(legs_last_cancel_legs_item2, "uint32_t"),
-    PF_PO_FIELD(cancellation_cause, "int32_t"),
-    PF_PO_FIELD(cancellation_state, "int32_t"),
-    PF_PO_FIELD(cancellation_close_claim_release, "int32_t"),
-    PF_PO_FIELD(cancellation_source_incarnation, "uint64_t"),
-    PF_PO_FIELD(cancellation_source_sequence, "int64_t"),
-    PF_PO_FIELD(cancellation_target_incarnation, "uint64_t"),
-    PF_PO_FIELD(cancellation_target_owner, "int64_t"),
-    PF_PO_FIELD(cancellation_target_revision, "uint64_t"),
-    PF_PO_FIELD(cancellation_close_claim_consumed, "double"),
-    PF_PO_FIELD(cancellation_close_claim_retired, "double"),
     PF_PO_FIELD(market_admission_observation_present, "uint64_t"),
     PF_PO_FIELD(market_admission_observation_command, "uint64_t"),
     PF_PO_FIELD(market_admission_observation_kind, "int64_t"),
@@ -839,6 +829,16 @@ const pf_field_desc_t kLayout[] = {
     PF_PO_FIELD(market_admission_sizing_revision_bar, "int64_t"),
     PF_PO_FIELD(market_admission_review_target_command, "uint64_t"),
     PF_PO_FIELD(market_admission_sizing_revision_target_command, "uint64_t"),
+    PF_PO_FIELD(cancellation_cause, "int32_t"),
+    PF_PO_FIELD(cancellation_state, "int32_t"),
+    PF_PO_FIELD(cancellation_close_claim_release, "int32_t"),
+    PF_PO_FIELD(cancellation_source_incarnation, "uint64_t"),
+    PF_PO_FIELD(cancellation_source_sequence, "int64_t"),
+    PF_PO_FIELD(cancellation_target_incarnation, "uint64_t"),
+    PF_PO_FIELD(cancellation_target_owner, "int64_t"),
+    PF_PO_FIELD(cancellation_target_revision, "uint64_t"),
+    PF_PO_FIELD(cancellation_close_claim_consumed, "double"),
+    PF_PO_FIELD(cancellation_close_claim_retired, "double"),
 };
 
 #undef PF_PO_FIELD

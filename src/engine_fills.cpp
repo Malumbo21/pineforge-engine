@@ -7119,10 +7119,14 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
             if (sibling.type == OrderType::MARKET
                 && sibling.created_seq > order.created_seq
                 && sibling.created_bar == order.created_bar && !sibling.is_long) {
-                if (!sibling.cancellation.cancel(CancellationCause::Replacement,
-                    order.incarnation, order.created_seq,
-                    sibling.incarnation, sibling.legs.target().owner,
-                    sibling.legs.revision()))
+                const CancellationTarget target{
+                    sibling.legs.target().incarnation != 0
+                        ? sibling.legs.target().incarnation : sibling.incarnation,
+                    sibling.legs.target().owner,
+                    sibling.legs.revision()};
+                if (sibling.cancellation.cancel(CancellationCause::Replacement,
+                    order.incarnation, order.created_seq, target, target)
+                    != CancellationResult::Applied)
                     throw std::logic_error("replacement cancellation receipt rejected");
             }
         }
@@ -7887,13 +7891,16 @@ void BacktestEngine::suppress_declined_reversal_close_legs(
         const bool full_close =
             std::isnan(co.qty) && co.qty_percent >= 100.0 - kFullPercentEps;
         if (!full_close) continue;
-        const bool cancelled = co.cancellation.cancel(
+        const CancellationTarget target{
+            co.legs.target().incarnation != 0 ? co.legs.target().incarnation : co.incarnation,
+            co.legs.target().owner,
+            co.legs.revision()};
+        const CancellationResult cancelled = co.cancellation.cancel(
             CancellationCause::Dependency, declined_entry.incarnation,
-            declined_entry.created_seq, co.incarnation,
-            co.legs.target().owner, co.legs.revision());
-        if (!cancelled)
+            declined_entry.created_seq, target, target);
+        if (cancelled != CancellationResult::Applied)
             throw std::logic_error("dependency cancellation receipt rejected");
-        if (cancelled) {
+        if (cancelled == CancellationResult::Applied) {
             // round-4b F1: the call retired the id's ledger whole; restore
             // the target AND the remainder it retired beyond the target.
             double& ledger = id_unclosed_qty_[co.id.substr(kClosePrefix.size())];

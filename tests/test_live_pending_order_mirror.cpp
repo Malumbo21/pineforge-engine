@@ -88,6 +88,10 @@ int main() {
     CHECK(m.short_seed_collision_role == (int32_t)ShortSeedCollisionRole::NONE);
     CHECK(m.coof_cascade_seg_i == -1);                        // int8_t widened to int32_t
     CHECK(m.dormant_hold_bar == -1 && m.same_id_stop_deferred_close_all_bar == -1);
+    // The v1 396-field prefix remains byte-stable; cancellation leaves are
+    // appended after the final admission receipt field.
+    CHECK(offsetof(pf_pending_order_v1_t, cancellation_cause)
+          > offsetof(pf_pending_order_v1_t, market_admission_sizing_revision_target_command));
     // The whole struct is defined: no 0xAB byte survives outside the string
     // payloads (padding is memset to 0 by the filler).
     {
@@ -102,6 +106,28 @@ int main() {
         std::memset(&m2, 0x5C, sizeof m2);
         fill_pending_order_mirror(o, &m2);
         CHECK(std::memcmp(&m, &m2, sizeof m) == 0);
+    }
+    {
+        PendingOrder cancelled = o;
+        CancellationTarget target{cancelled.legs.target().incarnation,
+                                  cancelled.legs.target().owner,
+                                  cancelled.legs.revision()};
+        if (target.incarnation == 0) target.incarnation = cancelled.incarnation;
+        CHECK(cancelled.cancellation.bind_close_claim(2.5, 0.25));
+        CHECK(cancelled.cancellation.cancel(CancellationCause::Dependency,
+              7001, 4, target, target) == CancellationResult::Applied);
+        pf_pending_order_v1_t cm;
+        fill_pending_order_mirror(cancelled, &cm);
+        CHECK(cm.cancellation_cause == static_cast<int32_t>(CancellationCause::Dependency));
+        CHECK(cm.cancellation_state == static_cast<int32_t>(CancellationState::Cancelled));
+        CHECK(cm.cancellation_close_claim_release == static_cast<int32_t>(CloseClaimRelease::Pending));
+        CHECK(cm.cancellation_source_incarnation == 7001);
+        CHECK(cm.cancellation_source_sequence == 4);
+        CHECK(cm.cancellation_target_incarnation == target.incarnation);
+        CHECK(cm.cancellation_target_owner == target.owner);
+        CHECK(cm.cancellation_target_revision == target.revision);
+        CHECK(cm.cancellation_close_claim_consumed == 2.5);
+        CHECK(cm.cancellation_close_claim_retired == 0.25);
     }
 
     // --- pending_order_layout: self-describing, ordered, in-bounds ----------

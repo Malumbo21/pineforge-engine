@@ -16,7 +16,7 @@ import tempfile
 
 BASE_COMMIT = "38dc73e5503fe5395458e5f8df2a2ad78054a1ae"
 BASE_ENGINE_SHA256 = "06c937a1ccd31815ca7775268ac699ffdfddb1a1f19de4628b777f37e9a6d193"
-CURRENT_NAMESPACE = "engine_script_run_v8"
+CURRENT_NAMESPACE = "engine_script_run_v9"
 BASE_NAMESPACE = "engine_script_run_v2"
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/script_cpp_abi/base38"
 
@@ -472,14 +472,14 @@ void Journal::reset() {}
         link("basecc0_pending_priority_to_v7_symbols", cc0_priority, cc0_priority_symbols)
         for name, obj, runtime, expected in [
             ("basecc0_pending_priority_to_current", cc0_priority, args.library, "pineforge::engine_script_run_v7::PendingOrder"),
-            ("current_pending_priority_to_v7_symbols", current_priority, cc0_priority_symbols, "pineforge::engine_script_run_v8::PendingOrder"),
+            ("current_pending_priority_to_v7_symbols", current_priority, cc0_priority_symbols, "pineforge::engine_script_run_v9::PendingOrder"),
             ("baseff54_pending_priority_to_current", shipped_priority, args.library, "pineforge::engine_script_run_v6::PendingOrder"),
-            ("current_pending_priority_to_v6_symbols", current_priority, shipped_priority_symbols, "pineforge::engine_script_run_v8::PendingOrder"),
+            ("current_pending_priority_to_v6_symbols", current_priority, shipped_priority_symbols, "pineforge::engine_script_run_v9::PendingOrder"),
             ("base149_pending_priority_to_current", activation_priority, args.library, "pineforge::engine_script_run_v5::PendingOrder"),
-            ("current_pending_priority_to_v5_symbols", current_priority, activation_priority_symbols, "pineforge::engine_script_run_v8::PendingOrder"),
+            ("current_pending_priority_to_v5_symbols", current_priority, activation_priority_symbols, "pineforge::engine_script_run_v9::PendingOrder"),
             ("basec45_pending_priority_to_current", prior_priority, args.library, "pineforge::PendingOrder"),
             ("current_pending_priority_to_v4_symbols", current_priority, prior_priority_symbols,
-             "pineforge::engine_script_run_v8::PendingOrder"),
+             "pineforge::engine_script_run_v9::PendingOrder"),
         ]:
             result = subprocess.run([*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
                                     capture_output=True, text=True, timeout=60)

@@ -23,9 +23,23 @@ enum class CancellationState : int32_t {
 };
 
 enum class CloseClaimRelease : int32_t {
-    NotApplicable = 0,
-    Pending = 1,
-    Released = 2,
+    Unbound = 0,
+    NotApplicable = 1,
+    Pending = 2,
+    Released = 3,
+};
+
+enum class CancellationResult : int32_t {
+    Applied = 0,
+    Replay = 1,
+    AlreadyTerminal = 2,
+    Invalid = 3,
+};
+
+struct CancellationTarget {
+    uint64_t incarnation = 0;
+    int64_t owner = 0;
+    uint64_t revision = 0;
 };
 
 // One order-owned receipt covers both cancellation sites currently modelled
@@ -47,40 +61,56 @@ public:
 
     bool cancelled() const { return state_ == CancellationState::Cancelled; }
     bool has_close_claim() const {
-        return close_claim_release_ != CloseClaimRelease::NotApplicable;
+        return close_claim_release_ != CloseClaimRelease::Unbound
+            && close_claim_release_ != CloseClaimRelease::NotApplicable;
     }
 
-    // Returns false when a second or invalid cancellation tries to overwrite
-    // the original causal receipt.  First cause wins by construction.
-    bool cancel(CancellationCause cause, uint64_t source_incarnation,
-                int64_t source_sequence, uint64_t target_incarnation,
-                int64_t target_owner = 0, uint64_t target_revision = 0) {
-        if (state_ != CancellationState::Live
-            || cause == CancellationCause::None
-            || source_incarnation == 0 || source_sequence <= 0
-            || target_incarnation == 0 || target_owner < 0
-            || target_revision == std::numeric_limits<uint64_t>::max()) {
-            return false;
+    // Validate the causal request against the lifecycle identity supplied by
+    // the caller before mutating the receipt. The target comparison prevents
+    // a stale order reference from cancelling a later incarnation.
+    CancellationResult cancel(CancellationCause cause, uint64_t source_incarnation,
+                int64_t source_sequence, CancellationTarget target,
+                CancellationTarget current_target) {
+        const bool valid = cause != CancellationCause::None
+            && source_incarnation != 0 && source_sequence > 0
+            && target.incarnation != 0 && target.owner >= 0
+            && target.revision != std::numeric_limits<uint64_t>::max()
+            && current_target.incarnation == target.incarnation
+            && current_target.owner == target.owner
+            && current_target.revision == target.revision;
+        if (!valid) return CancellationResult::Invalid;
+        if (state_ == CancellationState::Cancelled) {
+            return cause_ == cause && source_incarnation_ == source_incarnation
+                && source_sequence_ == source_sequence
+                && target_incarnation_ == target.incarnation
+                && target_owner_ == target.owner
+                && target_revision_ == target.revision
+                ? CancellationResult::Replay
+                : CancellationResult::AlreadyTerminal;
         }
         cause_ = cause;
         state_ = CancellationState::Cancelled;
         source_incarnation_ = source_incarnation;
         source_sequence_ = source_sequence;
-        target_incarnation_ = target_incarnation;
-        target_owner_ = target_owner;
-        target_revision_ = target_revision;
-        return true;
+        target_incarnation_ = target.incarnation;
+        target_owner_ = target.owner;
+        target_revision_ = target.revision;
+        return CancellationResult::Applied;
     }
 
     // Capture the placement-time close claim.  NaN is the existing sentinel
     // for a close that did not debit the id ledger, so it remains a no-op.
     bool bind_close_claim(double consumed, double retired) {
-        if (close_claim_release_ == CloseClaimRelease::Released) return false;
+        if (state_ != CancellationState::Live
+            || close_claim_release_ != CloseClaimRelease::Unbound) return false;
+        const bool no_claim = std::isnan(consumed) && retired == 0.0;
+        const bool valid_claim = std::isfinite(consumed) && consumed > 0.0
+            && std::isfinite(retired) && retired >= 0.0;
+        if (!no_claim && !valid_claim) return false;
         close_claim_consumed_ = consumed;
         close_claim_retired_ = retired;
-        close_claim_release_ = std::isfinite(consumed) && consumed > 0.0
-            ? CloseClaimRelease::Pending
-            : CloseClaimRelease::NotApplicable;
+        close_claim_release_ = valid_claim
+            ? CloseClaimRelease::Pending : CloseClaimRelease::NotApplicable;
         return true;
     }
 
@@ -88,10 +118,13 @@ public:
     // order-id ledger so the generic receipt has no knowledge of Pine ids.
     bool release_close_claim_once(double& ledger) {
         if (state_ != CancellationState::Cancelled
-            || close_claim_release_ != CloseClaimRelease::Pending) {
+            || close_claim_release_ != CloseClaimRelease::Pending
+            || !std::isfinite(ledger)) {
             return false;
         }
-        ledger += close_claim_consumed_ + close_claim_retired_;
+        const double credit = close_claim_consumed_ + close_claim_retired_;
+        if (!std::isfinite(credit) || !std::isfinite(ledger + credit)) return false;
+        ledger += credit;
         close_claim_release_ = CloseClaimRelease::Released;
         return true;
     }
@@ -99,7 +132,7 @@ public:
 private:
     CancellationCause cause_ = CancellationCause::None;
     CancellationState state_ = CancellationState::Live;
-    CloseClaimRelease close_claim_release_ = CloseClaimRelease::NotApplicable;
+    CloseClaimRelease close_claim_release_ = CloseClaimRelease::Unbound;
     uint64_t source_incarnation_ = 0;
     int64_t source_sequence_ = 0;
     uint64_t target_incarnation_ = 0;

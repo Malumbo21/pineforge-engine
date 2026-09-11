@@ -177,25 +177,25 @@ class PhysicalLotCoverage(unittest.TestCase):
                 self.assertEqual(self.check(quantity=QUANTITY.replace(old, new))[0], 1)
 
     def test_layout_and_hash_versions_must_match_v8_contract(self):
-        self.assertIn("engine_script_run_v8", HEADER)
-        self.assertIn('f.s("pineforge-broker-state/v8");', SOURCE)
-        self.assertIn("integer(8); integer(broker_state_hash());", STREAM)
-        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v8", "engine_script_run_v2"))[0], 1)
+        self.assertIn("engine_script_run_v9", HEADER)
+        self.assertIn('f.s("pineforge-broker-state/v9");', SOURCE)
+        self.assertIn("integer(9); integer(broker_state_hash());", STREAM)
+        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v9", "engine_script_run_v2"))[0], 1)
         for replacement in ['f.s("pineforge-broker-state/v2");', '',
-                            '// f.s("pineforge-broker-state/v8");']:
+                            '// f.s("pineforge-broker-state/v9");']:
             self.assertEqual(self.check(source=SOURCE.replace(
-                'f.s("pineforge-broker-state/v8");', replacement))[0], 1)
+                'f.s("pineforge-broker-state/v9");', replacement))[0], 1)
         for replacement in ["integer(2); integer(broker_state_hash());",
                             "integer(broker_state_hash());",
-                            "if (false) { integer(8); integer(broker_state_hash()); }"]:
+                            "if (false) { integer(9); integer(broker_state_hash()); }"]:
             self.assertEqual(self.check(stream=STREAM.replace(
-                "integer(8); integer(broker_state_hash());", replacement))[0], 1)
+                "integer(9); integer(broker_state_hash());", replacement))[0], 1)
 
     def test_version_folds_in_unrelated_helpers_do_not_cover_entry_points(self):
-        broker_fold = 'f.s("pineforge-broker-state/v8");'
+        broker_fold = 'f.s("pineforge-broker-state/v9");'
         altered = SOURCE.replace(broker_fold, '') + '\nvoid other() { ' + broker_fold + ' }\n'
         self.assertEqual(self.check(source=altered)[0], 1)
-        stream_fold = "integer(8); integer(broker_state_hash());"
+        stream_fold = "integer(9); integer(broker_state_hash());"
         altered = STREAM.replace(stream_fold, '') + '\nvoid other() { ' + stream_fold + ' }\n'
         self.assertEqual(self.check(stream=altered)[0], 1)
 

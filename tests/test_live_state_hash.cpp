@@ -367,9 +367,11 @@ public:
             }},
             {"pending_orders_[].suppress_as_declined_reversal_close", [](Probe& s) {
                 if (!s.pending_orders_.empty())
+                    [&] {
+                        const CancellationTarget target{s.pending_orders_[0].incarnation, 0, 0};
                     s.pending_orders_[0].cancellation.cancel(
-                        CancellationCause::Dependency, 9001, 9001,
-                        s.pending_orders_[0].incarnation, 0, 0);
+                        CancellationCause::Dependency, 9001, 9001, target, target);
+                    }();
             }},
 
             // Task 7 (carried task-5 ruling): every PendingOrder member the
@@ -397,9 +399,11 @@ public:
             }},
             {"pending_orders_[].declined_by_replaced_short_market", [](Probe& s) {
                 if (!s.pending_orders_.empty())
+                    [&] {
+                        const CancellationTarget target{s.pending_orders_[0].incarnation, 0, 0};
                     s.pending_orders_[0].cancellation.cancel(
-                        CancellationCause::Replacement, 9002, 9002,
-                        s.pending_orders_[0].incarnation, 0, 0);
+                        CancellationCause::Replacement, 9002, 9002, target, target);
+                    }();
             }},
             {"pending_orders_[].leg_activation", [](Probe& s) {
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].leg_activation.bind({1,2,3});
@@ -469,19 +473,80 @@ public:
             }},
             {"pending_orders_[].suppressed_close_consumed_ledger_qty", [](Probe& s) {
                 if (!s.pending_orders_.empty()) {
+                    const CancellationTarget target{s.pending_orders_[0].incarnation, 0, 0};
                     s.pending_orders_[0].cancellation.bind_close_claim(424242.5, 0.0);
                     s.pending_orders_[0].cancellation.cancel(
-                        CancellationCause::Dependency, 9003, 9003,
-                        s.pending_orders_[0].incarnation, 0, 0);
+                        CancellationCause::Dependency, 9003, 9003, target, target);
                 }
             }},
             {"pending_orders_[].suppressed_close_retired_ledger_qty", [](Probe& s) {
                 if (!s.pending_orders_.empty()) {
+                    const CancellationTarget target{s.pending_orders_[0].incarnation, 0, 0};
                     s.pending_orders_[0].cancellation.bind_close_claim(1.0, 424242.5);
                     s.pending_orders_[0].cancellation.cancel(
-                        CancellationCause::Dependency, 9004, 9004,
-                        s.pending_orders_[0].incarnation, 0, 0);
+                        CancellationCause::Dependency, 9004, 9004, target, target);
                 }
+            }},
+            {"pending_orders_[].cancellation.cause", [](Probe& s) {
+                if (!s.pending_orders_.empty()) {
+                    const CancellationTarget target{s.pending_orders_[0].incarnation, 0, 0};
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Dependency, 9101, 1, target, target);
+                }
+            }},
+            {"pending_orders_[].cancellation.state", [](Probe& s) {
+                if (!s.pending_orders_.empty()) {
+                    const CancellationTarget target{s.pending_orders_[0].incarnation, 0, 0};
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Replacement, 9102, 2, target, target);
+                }
+            }},
+            {"pending_orders_[].cancellation.close_claim_release", [](Probe& s) {
+                if (!s.pending_orders_.empty())
+                    s.pending_orders_[0].cancellation.bind_close_claim(2.0, 0.0);
+            }},
+            {"pending_orders_[].cancellation.source_incarnation", [](Probe& s) {
+                if (!s.pending_orders_.empty()) {
+                    const CancellationTarget target{s.pending_orders_[0].incarnation, 0, 0};
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Dependency, 9103, 3, target, target);
+                }
+            }},
+            {"pending_orders_[].cancellation.source_sequence", [](Probe& s) {
+                if (!s.pending_orders_.empty()) {
+                    const CancellationTarget target{s.pending_orders_[0].incarnation, 0, 0};
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Dependency, 9104, 4, target, target);
+                }
+            }},
+            {"pending_orders_[].cancellation.target_incarnation", [](Probe& s) {
+                if (!s.pending_orders_.empty()) {
+                    const CancellationTarget target{s.pending_orders_[0].incarnation + 1, 0, 0};
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Dependency, 9105, 5, target, target);
+                }
+            }},
+            {"pending_orders_[].cancellation.target_owner", [](Probe& s) {
+                if (!s.pending_orders_.empty()) {
+                    const CancellationTarget target{s.pending_orders_[0].incarnation, 7, 0};
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Dependency, 9106, 6, target, target);
+                }
+            }},
+            {"pending_orders_[].cancellation.target_revision", [](Probe& s) {
+                if (!s.pending_orders_.empty()) {
+                    const CancellationTarget target{s.pending_orders_[0].incarnation, 0, 8};
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Dependency, 9107, 7, target, target);
+                }
+            }},
+            {"pending_orders_[].cancellation.close_claim_consumed", [](Probe& s) {
+                if (!s.pending_orders_.empty())
+                    s.pending_orders_[0].cancellation.bind_close_claim(123.0, 0.0);
+            }},
+            {"pending_orders_[].cancellation.close_claim_retired", [](Probe& s) {
+                if (!s.pending_orders_.empty())
+                    s.pending_orders_[0].cancellation.bind_close_claim(1.0, 123.0);
             }},
             {"pending_orders_[].replaced_default_market_incarnation", [](Probe& s) {
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].replaced_default_market_incarnation += 1;

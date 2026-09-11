@@ -18,12 +18,19 @@ int main() {
     CHECK(receipt.cause() == CancellationCause::None);
     receipt.bind_close_claim(3.0, 0.5);
     CHECK(receipt.close_claim_release() == CloseClaimRelease::Pending);
-    CHECK(!receipt.cancel(CancellationCause::Dependency, 11, 0, 12));
-    CHECK(!receipt.cancel(CancellationCause::Dependency, 0, 4, 12));
-    CHECK(!receipt.cancel(CancellationCause::Dependency, 11, 4, 12, -1, 3));
-    CHECK(!receipt.cancel(CancellationCause::Dependency, 11, 4, 12, 7,
-                         std::numeric_limits<uint64_t>::max()));
-    CHECK(receipt.cancel(CancellationCause::Dependency, 11, 4, 12, 7, 3));
+    const CancellationTarget target{12, 7, 3};
+    CHECK(receipt.cancel(CancellationCause::Dependency, 11, 0, target, target)
+          == CancellationResult::Invalid);
+    CHECK(receipt.cancel(CancellationCause::Dependency, 0, 4, target, target)
+          == CancellationResult::Invalid);
+    CHECK(receipt.cancel(CancellationCause::Dependency, 11, 4,
+                         CancellationTarget{12, -1, 3}, target)
+          == CancellationResult::Invalid);
+    CHECK(receipt.cancel(CancellationCause::Dependency, 11, 4,
+                         CancellationTarget{12, 7, std::numeric_limits<uint64_t>::max()}, target)
+          == CancellationResult::Invalid);
+    CHECK(receipt.cancel(CancellationCause::Dependency, 11, 4, target, target)
+          == CancellationResult::Applied);
     CHECK(receipt.cancelled());
     CHECK(receipt.source_incarnation() == 11);
     CHECK(receipt.source_sequence() == 4);
@@ -36,12 +43,20 @@ int main() {
     CHECK(receipt.close_claim_release() == CloseClaimRelease::Released);
     CHECK(!receipt.release_close_claim_once(ledger));
     CHECK(std::abs(ledger - 10.5) < 1e-12);
+    CHECK(receipt.cancel(CancellationCause::Dependency, 11, 4, target, target)
+          == CancellationResult::Replay);
+    CHECK(receipt.cancel(CancellationCause::Replacement, 11, 4, target, target)
+          == CancellationResult::AlreadyTerminal);
+    CHECK(!receipt.bind_close_claim(9.0, 0.0));
     CHECK(!receipt.bind_close_claim(8.0, 0.0));
     CHECK(receipt.close_claim_release() == CloseClaimRelease::Released);
 
     OrderCancellationReceipt replacement;
     replacement.bind_close_claim(std::numeric_limits<double>::quiet_NaN(), 0.0);
-    CHECK(replacement.cancel(CancellationCause::Replacement, 9, 3, 10));
+    const CancellationTarget replacement_target{10, 0, 0};
+    CHECK(replacement.cancel(CancellationCause::Replacement, 9, 3,
+                             replacement_target, replacement_target)
+          == CancellationResult::Applied);
     CHECK(replacement.close_claim_release() == CloseClaimRelease::NotApplicable);
     CHECK(!replacement.release_close_claim_once(ledger));
     std::printf("order_cancellation: %d checks, %d failures\n", checks, failures);
