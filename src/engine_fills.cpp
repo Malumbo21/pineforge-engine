@@ -7901,17 +7901,15 @@ void BacktestEngine::suppress_declined_reversal_close_legs(
         double* ledger = nullptr;
         if (co.cancellation.has_close_claim())
             ledger = &id_unclosed_qty_[co.id.substr(kClosePrefix.size())];
-        const CancellationResult cancelled = co.cancellation.cancel(
+        const CancellationResult cancelled = co.cancellation.cancel_and_release(
             CancellationCause::Dependency, declined_entry.incarnation,
-            declined_entry.created_seq, target, target);
+            declined_entry.created_seq, target, target, ledger);
         if (cancelled != CancellationResult::Applied
             && cancelled != CancellationResult::Replay)
             throw std::logic_error("dependency cancellation receipt rejected");
         if (cancelled == CancellationResult::Applied) {
             // round-4b F1: the call retired the id's ledger whole; restore
             // the target AND the remainder it retired beyond the target.
-            if (ledger && !co.cancellation.release_close_claim_once(*ledger))
-                throw std::logic_error("dependency cancellation claim release rejected");
         }
     }
 }

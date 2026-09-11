@@ -98,6 +98,30 @@ public:
         return CancellationResult::Applied;
     }
 
+    // Atomically commit a cancellation and its already-prepared claim credit.
+    // The caller reserves the ledger slot before calling this method; all
+    // validation and finite arithmetic happen on a copy, so an invalid claim
+    // cannot leave a cancelled instruction behind.
+    CancellationResult cancel_and_release(CancellationCause cause,
+                uint64_t source_incarnation, int64_t source_sequence,
+                CancellationTarget target, CancellationTarget current_target,
+                double* ledger) {
+        OrderCancellationReceipt next = *this;
+        const auto result = next.cancel(cause, source_incarnation,
+                                        source_sequence, target, current_target);
+        if (result != CancellationResult::Applied) return result;
+        if (next.close_claim_release_ == CloseClaimRelease::Pending) {
+            if (!ledger) return CancellationResult::Invalid;
+            double value = *ledger;
+            if (!next.release_close_claim_once(value)) return CancellationResult::Invalid;
+            *this = next;
+            *ledger = value;
+            return CancellationResult::Applied;
+        }
+        *this = next;
+        return CancellationResult::Applied;
+    }
+
     // Capture the placement-time close claim.  NaN is the existing sentinel
     // for a close that did not debit the id ledger, so it remains a no-op.
     bool bind_close_claim(double consumed, double retired) {
