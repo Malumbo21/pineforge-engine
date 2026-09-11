@@ -395,9 +395,12 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                 * active_account_currency_fx() * (margin_pct / 100.0);
             const double epsilon =
                 std::max(1e-9, std::abs(placement_equity) * 1e-12);
-            if (std::isfinite(required_margin)
-                && std::isfinite(placement_equity)
-                && required_margin > placement_equity + epsilon) {
+            // An infinite required margin (including arithmetic overflow)
+            // cannot be funded by finite equity. NaN still fails the ordered
+            // comparison; it must not turn +infinity into an admitted order.
+            if (std::isfinite(placement_equity)
+                && (required_margin == std::numeric_limits<double>::infinity()
+                    || required_margin > placement_equity + epsilon)) {
                 command.outcome(admission::Outcome::RejectedAffordability);
 
                 if (!reversal) {

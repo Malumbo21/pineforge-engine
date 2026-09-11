@@ -104,9 +104,33 @@ public:
 
     // --- intraday-loss surface (TradingView's day-scoped rule) ---
     void set_position(bool is_long, double qty, double entry_price) {
+        if (qty == 0.0) {
+            position_side_ = PositionSide::FLAT;
+            position_qty_ = position_entry_price_ = 0.0;
+            position_cycle_seq_ = 0;
+            position_entry_count_ = 0;
+            position_entry_time_ = 0;
+            position_open_bar_ = -1;
+            pyramid_entries_.clear();
+            return;
+        }
         position_side_ = is_long ? PositionSide::LONG : PositionSide::SHORT;
         position_qty_ = qty;
         position_entry_price_ = entry_price;
+        // A risk-triggered close now settles the authoritative physical book.
+        // Seed the actual lot as well as the cached position projection.
+        position_cycle_seq_ = next_position_cycle_seq_++;
+        position_entry_count_ = 1;
+        position_entry_time_ = current_bar_.timestamp;
+        position_open_bar_ = bar_index_;
+        PyramidEntry lot{};
+        lot.price = entry_price;
+        lot.time = current_bar_.timestamp;
+        lot.qty = qty;
+        lot.entry_id = "risk";
+        lot.entry_bar_index = bar_index_;
+        snapshot_entry_commission(lot);
+        pyramid_entries_ = {std::move(lot)};
     }
     void begin_day(const Bar& b) {
         current_bar_ = b;

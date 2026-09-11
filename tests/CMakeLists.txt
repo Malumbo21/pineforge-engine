@@ -1,4 +1,5 @@
 set(TEST_SOURCES
+    test_unbounded_margin_admission
     test_resolved_execution
     test_order_action
     test_order_action_integration

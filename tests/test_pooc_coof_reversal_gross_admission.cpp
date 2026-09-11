@@ -310,6 +310,12 @@ static void test_green_mutated_two_order_books_fail_closed() {
         CHECK(probe.last_error().empty());
         CHECK(probe.observed_trades == expected_trades);
         CHECK_NEAR(probe.observed_size, expected_size, 1e-9);
+        for (int i = 0; i < probe.trade_count(); ++i) {
+            const auto& trade = probe.get_trade(i);
+            CHECK(std::isfinite(trade.qty) && trade.qty > 0.0);
+            CHECK(std::isfinite(trade.pnl));
+            CHECK(std::isfinite(trade.commission));
+        }
     };
 
     run("same-bar replacement stays on ordinary path",
