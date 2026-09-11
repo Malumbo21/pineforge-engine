@@ -16,7 +16,8 @@ class ReservationMirror(unittest.TestCase):
         header, source = mirror.generate()
         self.assertEqual(header, mirror.OUT_H.read_text())
         self.assertEqual(source, mirror.OUT_C.read_text())
-        self.assertIn('155 POD fields', header)
+        self.assertIn('#define PF_PENDING_ORDER_FIELD_COUNT 396', header)
+        self.assertIn('396 POD fields', header)
 
     def test_every_nested_mapping_is_observable(self):
         original = mirror.generate()
@@ -48,6 +49,7 @@ class ReservationMirror(unittest.TestCase):
                 root = Path(temp)
                 path = root / 'include/pineforge/reservation_expansion.hpp'
                 path.parent.mkdir(parents=True)
+                (path.parent / "exit_leg_lifecycle.hpp").write_text((ROOT / "include/pineforge/exit_leg_lifecycle.hpp").read_text())
                 path.write_text(HEADER.replace(declaration,declaration + ' int hidden;'))
                 with patch.object(mirror,'ROOT',root), self.assertRaises(ValueError): mirror.generate()
 

@@ -42,11 +42,11 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
         && !parent->created_after_position_close_in_bar
         && !parent->over_pyramiding_cap_at_placement
         && !parent->stop_limit_activated
-        && std::isfinite(parent->stop_price)
-        && std::isnan(parent->limit_price)
-        && std::isnan(parent->trail_points)
-        && std::isnan(parent->trail_price)
-        && std::isnan(parent->trail_offset)
+        && std::isfinite(parent->legs.prices().stop_price)
+        && std::isnan(parent->legs.prices().limit_price)
+        && std::isnan(parent->legs.prices().trail_points)
+        && std::isnan(parent->legs.prices().trail_price)
+        && std::isnan(parent->legs.prices().trail_offset)
         && parent->oca_name.empty()
         && parent->oca_type == 0;
     const double child_qp = std::isnan(child->qty_percent)
@@ -64,13 +64,13 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
         && !child->quantity_request.is_partial(1e-9, 1e-9)
         && std::isnan(child->qty)
         && child_qp >= 100.0 - 1e-9
-        && std::isfinite(child->stop_price)
-        && std::isfinite(child->limit_price)
-        && std::isnan(child->profit_ticks)
-        && std::isnan(child->loss_ticks)
-        && std::isnan(child->trail_points)
-        && std::isnan(child->trail_price)
-        && std::isnan(child->trail_offset)
+        && std::isfinite(child->legs.prices().stop_price)
+        && std::isfinite(child->legs.prices().limit_price)
+        && std::isnan(child->legs.prices().profit_ticks)
+        && std::isnan(child->legs.prices().loss_ticks)
+        && std::isnan(child->legs.prices().trail_points)
+        && std::isnan(child->legs.prices().trail_price)
+        && std::isnan(child->legs.prices().trail_offset)
         && child->oca_name.empty()
         && child->oca_type == 0;
     const bool exact_pair = parent_is_exact_fresh_stop

@@ -32,7 +32,7 @@ ExitActivationPolicy select_exit_activation(const PendingOrder& order,
     const bool long_side = c.side == PositionSide::LONG;
     const bool limit_marketable = !std::isnan(limit)
         && (long_side ? c.cursor_price >= limit : c.cursor_price <= limit);
-    const bool trailing = !std::isnan(order.trail_points) || !std::isnan(order.trail_price);
+    const bool trailing = !std::isnan(order.legs.prices().trail_points) || !std::isnan(order.legs.prices().trail_price);
     const bool later_open = !c.magnifier && historical_cascade_reach(order)
         && c.after_first_open_fill && c.recalc_leg == 0
         && (!std::isnan(stop) || !std::isnan(limit)) && !trailing && limit_marketable;
@@ -52,8 +52,8 @@ ExitActivationPolicy select_exit_activation(const PendingOrder& order,
         && c.fx_series_empty && limit_marketable
         && internal::bar_path_uses_high_first(c.bar)
         && c.cursor_price == c.tick_high
-        && c.bar.low < order.limit_price && order.limit_price < c.bar.high
-        && (std::isnan(order.stop_price) || order.stop_price < c.bar.low);
+        && c.bar.low < order.legs.prices().limit_price && order.legs.prices().limit_price < c.bar.high
+        && (std::isnan(order.legs.prices().stop_price) || order.legs.prices().stop_price < c.bar.low);
     std::optional<LimitContinuation> continuation;
     if (later_open) continuation = LimitContinuation{LimitContinuationCause::LaterSameOpen, c.current_fill};
     else if (first_high_recross) continuation = LimitContinuation{LimitContinuationCause::FirstHighRecross, c.current_fill};

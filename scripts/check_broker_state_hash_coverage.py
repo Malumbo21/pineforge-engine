@@ -546,7 +546,7 @@ def _reservation_expansion_version_coverage(header: str, source: str) -> None:
 
 
 def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
-    """The v7 layout and serialized-state contracts must advance together.
+    """The v8 layout and serialized-state contracts must advance together.
 
     Pin the actual hash entry points, rather than accepting a version string
     mentioned in a comment or an unrelated helper. Public C ABI versions have
@@ -554,18 +554,18 @@ def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
     """
     header = _strip_cpp_comments(header)
     namespaces = re.findall(r"inline\s+namespace\s+(engine_script_run_v\d+)\s*\{", header)
-    if namespaces != ["engine_script_run_v7", "engine_script_run_v7"]:
-        raise ValueError("PendingOrder and BacktestEngine layouts require internal namespace engine_script_run_v7")
+    if namespaces != ["engine_script_run_v8", "engine_script_run_v8"]:
+        raise ValueError("PendingOrder and BacktestEngine layouts require internal namespace engine_script_run_v8")
     broker = _one_braced_body(source,
         r"uint64_t\s+BacktestEngine::broker_state_hash\(\)\s+const\s*\{", "broker hash")
-    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v7"\);', broker):
-        raise ValueError("broker hash must start with pineforge-broker-state/v7")
+    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v8"\);', broker):
+        raise ValueError("broker hash must start with pineforge-broker-state/v8")
     stream_body = _one_braced_body(_strip_cpp_comments(stream),
         r"uint64_t\s+BacktestEngine::stream_state_hash\(\)\s+const\s*\{", "stream hash")
     compact = re.sub(r"\s+", "", stream_body)
-    fold = "integer(7);integer(broker_state_hash());"
+    fold = "integer(8);integer(broker_state_hash());"
     if compact.count(fold) != 1:
-        raise ValueError("stream hash requires version 7 followed by the broker hash")
+        raise ValueError("stream hash requires version 8 followed by the broker hash")
     prefix = compact[:compact.index(fold)]
     if prefix.count("{") != prefix.count("}") or (prefix and prefix[-1] not in ";}"):
         raise ValueError("stream version fold must be unconditional at function scope")
@@ -579,6 +579,10 @@ def main(root: Path = ROOT) -> int:
     src_raw = (root / "src/engine_state_hash.cpp").read_text(encoding="utf-8")
     src = _strip_cpp_comments(src_raw)
     try:
+        from check_exit_leg_lifecycle import check as check_exit_lifecycle
+        check_exit_lifecycle((root / "include/pineforge/exit_leg_lifecycle.hpp").read_text(), src)
+        from check_market_admission_schema import check as market_admission_coverage
+        market_admission_coverage(root)
         _runtime_version_coverage(hpp, src, (root / "src/engine_stream.cpp").read_text())
         _reservation_expansion_version_coverage(
             (root / "include/pineforge/reservation_expansion.hpp").read_text(),
@@ -609,7 +613,7 @@ def main(root: Path = ROOT) -> int:
     if {"pending_order.reservation_expansion", "pending_order.reservation_growth_source"} & all_waivers.keys():
         print("check_broker_state_hash_coverage: reservation capture/source cannot be waived", file=sys.stderr)
         return 1
-    if {"pending_order.quantity_request", "pending_order.pine_frozen_market_instruction"} & all_waivers.keys():
+    if {"pending_order.quantity_request", "pending_order.pine_frozen_market_instruction", "pending_order.legs"} & all_waivers.keys():
         print("check_broker_state_hash_coverage: quantity_request and pine_frozen_market_instruction cannot be waived", file=sys.stderr)
         return 1
     po_waivers = {k[len(PENDING_WAIVER_PREFIX):]: v

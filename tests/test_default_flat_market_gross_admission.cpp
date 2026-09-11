@@ -136,11 +136,11 @@ struct Probe : public BacktestEngine {
             orders << order.id << ":" << order_type_name(order.type)
                    << ":" << (order.is_long ? "L" : "S")
                    << ":q=" << number(order.qty)
-                   << ":l=" << number(order.limit_price)
-                   << ":s=" << number(order.stop_price)
+                   << ":l=" << number(order.legs.prices().limit_price)
+                   << ":s=" << number(order.legs.prices().stop_price)
                    << ":o=" << (order.oca_name.empty() ? "-" : order.oca_name)
                    << "/" << order.oca_type
-                   << ":c=" << order.default_flat_market_gross_candidate
+                   << ":c=" << compat::pine::awaits_default_review(order.market_admission)
                    << ":r=" << (order.replaced_order_incarnation != 0);
         }
         orders << "]";
@@ -214,7 +214,7 @@ struct Probe : public BacktestEngine {
             }
             queued_after_signal = pending_orders_.size();
             for (const PendingOrder& order : pending_orders_) {
-                if (order.default_flat_market_gross_candidate) {
+                if (compat::pine::awaits_default_review(order.market_admission)) {
                     ++candidates_after_signal;
                 }
                 if ((order.replaced_order_incarnation != 0)) {
@@ -419,11 +419,11 @@ struct ConfigProbe : public BacktestEngine {
             orders << order.id << ":" << Probe::order_type_name(order.type)
                    << ":" << (order.is_long ? "L" : "S")
                    << ":q=" << Probe::number(order.qty)
-                   << ":l=" << Probe::number(order.limit_price)
-                   << ":s=" << Probe::number(order.stop_price)
+                   << ":l=" << Probe::number(order.legs.prices().limit_price)
+                   << ":s=" << Probe::number(order.legs.prices().stop_price)
                    << ":o=" << (order.oca_name.empty() ? "-" : order.oca_name)
                    << "/" << order.oca_type
-                   << ":c=" << order.default_flat_market_gross_candidate
+                   << ":c=" << compat::pine::awaits_default_review(order.market_admission)
                    << ":r=" << (order.replaced_order_incarnation != 0);
         }
         orders << "]";
@@ -456,7 +456,7 @@ struct ConfigProbe : public BacktestEngine {
                 strategy_entry("Short", false);
             }
             for (const PendingOrder& order : pending_orders_) {
-                if (order.default_flat_market_gross_candidate) {
+                if (compat::pine::awaits_default_review(order.market_admission)) {
                     ++candidates_after_signal;
                 }
             }

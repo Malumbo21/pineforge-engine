@@ -1,3 +1,4 @@
+#include "exit_lifecycle_fixture.hpp"
 // R28 covered TV controls: integer short margin events, including a bracket
 // revived after an opening declined reversal, precede close-time script state.
 // Evidence: r28-killed-dynamic, r28-killed-explicit-child, r28-killed-funded,
@@ -216,36 +217,35 @@ public:
         cycle_filled_entry_ids_.insert("S");
         PendingOrder order{};
         order.id = "XS";
+        order.incarnation = 8; // explicit identity for this synthetic native checkpoint
         order.type = OrderType::EXIT;
         order.from_entry = "S";
-        order.limit_price = order.trail_points = order.trail_offset = order.qty = qnan;
+        order.legs.set_limit_price(order.legs.set_trail_points(order.legs.set_trail_offset(order.qty = qnan)));
         order.qty_percent = 100.0;
-        order.stop_price = 101.0;
+        order.legs.set_stop_price(101.0);
         // Snapshot of the private opening-decline producer. The command
         // fixture above separately exercises that producer through orders.
-        order.dormant_bracket = true;
-        order.dormant_reversal_kill_bar = bar_index_;
-        order.dormant_hold_bar = -1;
-        order.dormant_reissue_pending = false;
+        lifecycle_fixture::suspend(order);
+        lifecycle_fixture::suspend(order, bar_index_);
         pending_orders_.push_back(order);
         auto& owned = pending_orders_.front();
         switch (shape) {
-        case Shape::UNKNOWN: owned.dormant_reversal_kill_bar = -1; break;
-        case Shape::OLD: owned.dormant_reversal_kill_bar = 0; break;
-        case Shape::FUTURE: owned.dormant_reversal_kill_bar = 2; break;
-        case Shape::HELD: owned.dormant_hold_bar = 1; break;
-        case Shape::OLD_HOLD: owned.dormant_hold_bar = 0; break;
-        case Shape::REISSUED: owned.dormant_reissue_pending = true; break;
-        case Shape::TRAIL: owned.trail_price = 100.5; break;
+        case Shape::UNKNOWN: lifecycle_fixture::suspend(owned, std::nullopt); break;
+        case Shape::OLD: lifecycle_fixture::suspend(owned, 0); break;
+        case Shape::FUTURE: lifecycle_fixture::suspend(owned, 2); break;
+        case Shape::HELD: lifecycle_fixture::suspend(owned, owned.legs.excluded_bar(), 1); break;
+        case Shape::OLD_HOLD: lifecycle_fixture::suspend(owned, owned.legs.excluded_bar(), 0); break;
+        case Shape::REISSUED: lifecycle_fixture::stage(owned); break;
+        case Shape::TRAIL: owned.legs.set_trail_price(100.5); break;
         case Shape::FOREIGN: owned.from_entry = "Other"; break;
         case Shape::GLOBAL: owned.from_entry.clear(); break;
-        case Shape::UNPRICED: owned.stop_price = qnan; break;
+        case Shape::UNPRICED: owned.legs.set_stop_price(qnan); break;
         case Shape::STOP_ORIGIN:
             pyramid_entries_[0].ordinary_market_open = false;
             pyramid_entries_[0].ordinary_stop_open = true;
             break;
         case Shape::OFF_GRID: position_qty_ = pyramid_entries_[0].qty = 100.5; break;
-        case Shape::LIMIT_ONLY: owned.stop_price = qnan; owned.limit_price = 98.0; break;
+        case Shape::LIMIT_ONLY: owned.legs.set_stop_price(qnan); owned.legs.set_limit_price(98.0); break;
         case Shape::PARTIAL:
             owned.qty = 50.0;
             owned.quantity_request.request(QuantityIntent::units(50.0));
@@ -255,11 +255,11 @@ public:
             qty_step_ = 1.5;
             position_qty_ = pyramid_entries_[0].qty = 100.5;
             break;
-        case Shape::TRAIL_OFFSET: owned.trail_offset = 1.0; break;
+        case Shape::TRAIL_OFFSET: owned.legs.set_trail_offset(1.0); break;
         case Shape::PENDING_ENTRY:
             owned.type = OrderType::ENTRY;
-            owned.stop_price = 110.0;
-            owned.dormant_bracket = false;
+            owned.legs.set_stop_price(110.0);
+            lifecycle_fixture::restore(owned);
             break;
         case Shape::INFINITE_PERCENT: owned.qty_percent = INFINITY; break;
         case Shape::NAKED: pending_orders_.clear(); break;

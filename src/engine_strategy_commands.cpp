@@ -1,3 +1,4 @@
+#include <pineforge/compat/pine/exit_lifecycle.hpp>
 /*
  * engine_strategy_commands.cpp — the strategy.* command surface.
  *
@@ -96,8 +97,14 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                                      const std::string& comment,
                                      const std::string& oca_name, int oca_type,
                                      int qty_type) {
-    if (!trading_is_active(current_bar_.timestamp, trade_start_time_, script_tf_seconds_)) return;
-    if (intraday_loss_orders_blocked()) return;  // strategy.risk.max_intraday_loss fired today
+    auto command=begin_market_command(admission::CommandKind::Entry,id,is_long,qty,qty_type,
+                                      limit_price,stop_price,oca_name,oca_type);
+    if (!trading_is_active(current_bar_.timestamp, trade_start_time_, script_tf_seconds_)) {
+        command.outcome(admission::Outcome::IgnoredTradingWindow);return;
+    }
+    if (intraday_loss_orders_blocked()) {
+        command.outcome(admission::Outcome::IgnoredIntradayLoss);return;
+    }
 
     NamedEntryCancelContext named_cancel_context;
     const auto named_cancel =
@@ -127,117 +134,21 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     // latched on 04-06 07:00, then carrying to fire on the new chart-
     // day before the script's else-branch could cancel it).
     if (_intraday_cap_currently_latched()) {
-        last_rejected_strategy_entry_call_bar_ = bar_index_;
+        command.outcome(admission::Outcome::RejectedIntradayCap);
+
         return;
     }
 
-    // KI-65 MARKET/MARKET follow-up. Every explicit MARKET call first receives
-    // the established OWN-qty admission below. Eligible own-admitted calls are
-    // merely snapshotted here; the broker pair is finalized at the next fill
-    // boundary, after the complete same-source-bar call set is known. Deferring
-    // prevents an alternating three-call set from prematurely gross-rejecting
-    // call 2 before call 3 exists.
-    const bool explicit_fixed_market_call =
-        std::isfinite(qty) && qty > kQtyEpsilon
-        && std::isnan(limit_price) && std::isnan(stop_price)
-        && oca_name.empty()
-        && (qty_type < 0 || qty_type == static_cast<int>(QtyType::FIXED));
-    const bool pooc_coof_ordinary_flat_market_call =
-        !std::isnan(qty)
-        && std::isnan(limit_price) && std::isnan(stop_price)
-        && process_orders_on_close_
-        && calc_on_order_fills_
-        && !coof_fill_recalc_active_
-        && position_side_ == PositionSide::FLAT;
-    const double paired_flat_market_own_qty = explicit_fixed_market_call
-        ? std::abs(apply_qty_step(qty))
-        : std::numeric_limits<double>::quiet_NaN();
-    const bool paired_flat_market_candidate =
-        explicit_fixed_market_call
-        && paired_flat_market_own_qty > kQtyEpsilon
-        && pending_flat_market_pair_scope_is_live()
-        && position_side_ == PositionSide::FLAT;
-    const bool pooc_coof_explicit_flat_market_candidate =
-        explicit_fixed_market_call
-        && pooc_coof_ordinary_flat_market_call;
-
-    // Preserve an exact omitted-qty MARKET pair's call provenance until the
-    // next broker boundary, where the complete source-bar book is known.
-    const bool default_flat_market_gross_call =
-        default_flat_market_gross_scope_is_live()
-        && std::isnan(qty)
-        && std::isnan(limit_price)
-        && std::isnan(stop_price)
-        && oca_name.empty();
-    if (default_flat_market_gross_scope_is_live()) {
-        int current_bar_entry_like = 0;
-        bool has_non_candidate_entry_like = false;
-        for (const PendingOrder& pending : pending_orders_) {
-            if (pending.created_bar != bar_index_) continue;
-            const bool entry_like =
-                pending.type == OrderType::MARKET
-                || pending.type == OrderType::ENTRY
-                || pending.type == OrderType::RAW_ORDER;
-            if (!entry_like) continue;
-            ++current_bar_entry_like;
-            if (!pending.default_flat_market_gross_candidate) {
-                has_non_candidate_entry_like = true;
-            }
-        }
-        // An ineligible call, an admitted non-candidate sibling, or a third
-        // candidate call makes this source bar permanently non-exact even if a
-        // later rejection/cancel/replacement reduces the live book back to 2.
-        if (!default_flat_market_gross_call
-            || has_non_candidate_entry_like
-            || current_bar_entry_like >= 2) {
-            default_flat_market_gross_disqualified_bars_.insert(
-                bar_index_);
-        }
-    }
+    // Original command/configuration evidence is owned by the capture frame;
+    // admission outcomes and actual removals complete its journal record.
 
     // Same-id replacement: strategy.entry with an id that is already pending
     // replaces that order. Shared by the ordinary replacement below and by
     // the round-7 rejected-STOP-re-issue cancel (a rejected placement leaves
     // no order behind, but still retires the one it was replacing).
     const auto remove_same_id_pending_orders = [&]() {
-        for (const PendingOrder& pending : pending_orders_) {
-            if (pending.id == id) {
-                const bool entry_like =
-                    pending.type == OrderType::MARKET
-                    || pending.type == OrderType::ENTRY
-                    || pending.type == OrderType::RAW_ORDER;
-                // A candidate call that replaces any resting entry-like order
-                // is not an exact two-call source-bar set, even when the
-                // replaced order came from an earlier bar. Taint this call's
-                // bar as well as preserving the old-bar tombstone below.
-                if (paired_flat_market_candidate && entry_like) {
-                    pending_flat_market_pair_disqualified_bars_.insert(
-                        bar_index_);
-                }
-                // The POOC+COOF gross-admission oracle covers two fresh
-                // calls, not a current call that inherits an older order's
-                // broker priority. Taint the current source bar even when the
-                // replaced object came from a prior bar.
-                if (pooc_coof_explicit_flat_market_candidate) {
-                    pending_flat_market_pair_disqualified_bars_.insert(
-                        bar_index_);
-                }
-                if (default_flat_market_gross_call && entry_like) {
-                    default_flat_market_gross_disqualified_bars_.insert(
-                        bar_index_);
-                }
-                if (entry_like
-                    && pending.created_position_side == PositionSide::FLAT) {
-                    pending_flat_market_pair_disqualified_bars_.insert(
-                        pending.created_bar);
-                }
-                if (pending.default_flat_market_gross_candidate) {
-                    default_flat_market_gross_disqualified_bars_.insert(
-                        pending.created_bar);
-                }
-                invalidate_pending_flat_market_pair(pending.created_seq);
-            }
-        }
+        for (const PendingOrder& pending : pending_orders_)
+            if(pending.id==id)invalidate_pending_flat_market_pair(pending.created_seq);
         pending_orders_.erase(
             std::remove_if(pending_orders_.begin(), pending_orders_.end(),
                 [&](const PendingOrder& o) { return o.id == id; }),
@@ -356,7 +267,8 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         // semantics and stays out of the frozen transaction.
         if (sbmt_over_cap && !sbmt_opp_market_pending) {
             if (!sbmt_opp_entry_pending) {
-                last_rejected_strategy_entry_call_bar_ = bar_index_;
+                command.outcome(admission::Outcome::RejectedFrozenMarketCap);
+
                 return;
             }
         }
@@ -485,14 +397,8 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             if (std::isfinite(required_margin)
                 && std::isfinite(placement_equity)
                 && required_margin > placement_equity + epsilon) {
-                last_rejected_strategy_entry_call_bar_ = bar_index_;
-                // A rejected third call leaves no PendingOrder or incarnation,
-                // but it still means the source body was not the clean exact
-                // two-call terminal-C shape. Preserve that invisible history.
-                if (pooc_coof_ordinary_flat_market_call) {
-                    pending_flat_market_pair_disqualified_bars_.insert(
-                        bar_index_);
-                }
+                command.outcome(admission::Outcome::RejectedAffordability);
+
                 if (!reversal) {
                     // round 7: a rejected same-id STOP re-issue also cancels
                     // the resting order of an earlier accepted issue
@@ -505,6 +411,7 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                 // The reversal's closing leg still executes: the order is
                 // kept as a close-only transaction.
                 affordability_close_only = true;
+                command.outcome(admission::Outcome::OpeningRejectedReductionAdmitted);
             }
             if (std::isfinite(placement_equity)) {
                 affordability_placement_equity = placement_equity;
@@ -548,7 +455,8 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         && position_entry_count_ >= pyramiding_;
     bool is_priced_entry = !std::isnan(limit_price) || !std::isnan(stop_price);
     if (is_priced_entry && !process_orders_on_close_ && over_pyramiding_cap) {
-        last_rejected_strategy_entry_call_bar_ = bar_index_;
+        command.outcome(admission::Outcome::RejectedPricedCap);
+
         return;
     }
 
@@ -556,9 +464,9 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
     order.id = id;
     order.from_entry = "";
     order.is_long = is_long;
-    order.trail_points = std::numeric_limits<double>::quiet_NaN();
-    order.trail_price = std::numeric_limits<double>::quiet_NaN();
-    order.trail_offset = std::numeric_limits<double>::quiet_NaN();
+    order.legs.set_trail_points(std::numeric_limits<double>::quiet_NaN());
+    order.legs.set_trail_price(std::numeric_limits<double>::quiet_NaN());
+    order.legs.set_trail_offset(std::numeric_limits<double>::quiet_NaN());
     order.qty = qty;
     order.qty_type = qty_type;
     order.qty_percent = 100.0;
@@ -627,8 +535,8 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
 
     if (!has_limit && !has_stop) {
         order.type = OrderType::MARKET;
-        order.limit_price = std::numeric_limits<double>::quiet_NaN();
-        order.stop_price = std::numeric_limits<double>::quiet_NaN();
+        order.legs.set_limit_price(std::numeric_limits<double>::quiet_NaN());
+        order.legs.set_stop_price(std::numeric_limits<double>::quiet_NaN());
         // design-market-entry-affordability: the placement snapshot the
         // fill-time half re-checks against, and the close-only verdict of a
         // reversal whose entry leg was already rejected above.
@@ -655,9 +563,8 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             order.pine_frozen_market_instruction = PineFrozenMarketInstruction::transaction(
                 sbmt_own_qty, sbmt_own_qty + held_opposite + sbmt_opp_pending_own);
         }
-        if (paired_flat_market_candidate) {
-            order.paired_flat_market_candidate = true;
-            order.paired_flat_market_own_qty = paired_flat_market_own_qty;
+        if (compat::pine::original_pair_call(command.input())) {
+            order.paired_flat_market_own_qty = command.input().quantized_fixed_quantity;
             order.paired_flat_market_signal_close = current_bar_.close;
             order.paired_flat_market_signal_equity = current_equity();
             order.paired_flat_market_signal_margin_pct =
@@ -700,58 +607,8 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
             order.sizing_equity =
                 percent_commission_live_equity(order.sizing_mark);
             order.sizing_fx = active_account_currency_fx();
-            // Direction-neutral: two fill-time consumers read this flag.
-            //   1. KI-61 entry-bar affordability trim (engine_fills.cpp):
-            //      re-checks the direction-appropriate margin at the fill
-            //      (long_full_margin_after_fill / the default short shapes,
-            //      round 7 family M), so the true-flat zero-fee exemption
-            //      remains invariant on either side.
-            //   2. gap-reject (design-cntvxiao-gap-reject, engine_fills.cpp):
-            //      direction-symmetric — drops a true-flat all-in entry, with
-            //      or without a commission, whose gapped fill notional exceeds
-            //      equity at all (round-7 market-entry-admission pin), on
-            //      EITHER side.
-            // The margin term is the direction-appropriate one so a short at
-            // margin_short==100 qualifies exactly as a long at margin_long==100.
-            const double affordability_margin =
-                is_long ? margin_long_ : margin_short_;
-            // The position-state-INDEPENDENT half of the all-in snapshot:
-            // percent_of_equity at exactly 100, direction-appropriate margin at
-            // exactly 100, and a complete finite freeze. Extracted so the
-            // pending-aware gross-admission candidate can share it without
-            // inheriting the true-flat creation requirement the fill-time
-            // exemption flag needs (see the widened scope in
-            // finalize_default_flat_market_gross_admission).
-            const bool default_all_in_sizing_snapshot =
-                default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-                && std::abs(default_qty_value_ - 100.0) < 1e-12
-                && std::isfinite(affordability_margin)
-                && std::abs(affordability_margin / 100.0 - 1.0) < 1e-12
-                && std::isfinite(order.frozen_default_qty)
-                && std::isfinite(order.sizing_equity)
-                && std::isfinite(order.sizing_price)
-                && std::isfinite(order.sizing_mark)
-                && std::isfinite(order.sizing_fx)
-                && order.sizing_fx > 0.0;
-            order.opening_affordability_exemption_candidate =
-                order.created_position_side == PositionSide::FLAT
-                && !order.created_after_position_close_in_bar
-                && default_all_in_sizing_snapshot;
-            // KI-65 pending-aware gross admission. The placement equity /
-            // signal-mark / frozen-qty triple is all the arithmetic needs, and
-            // it is identical whether the account was flat or already holding a
-            // position when the pair was queued. The creation position side is
-            // preserved on the order and consulted at the broker boundary, so
-            // the live-position case is decided there rather than excluded here.
-            order.default_flat_market_gross_candidate =
-                default_flat_market_gross_call
-                && default_all_in_sizing_snapshot
-                && std::isfinite(order.frozen_default_qty)
-                && order.frozen_default_qty > kQtyEpsilon
-                && std::isfinite(order.sizing_equity)
-                && order.sizing_equity > 0.0
-                && std::isfinite(order.sizing_mark)
-                && order.sizing_mark > 0.0;
+            // bind_market_command retains this original resolution. Later
+            // liquidation may revise executable sizing without rebasing it.
         }
         // design-explicit-qty-fill-admission: capture the true-flat EXPLICIT-
         // qty MARKET snapshot. Its fill-time admission is now the unified
@@ -771,21 +628,21 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                 current_equity() + open_profit(current_bar_.close);
             const double slipped_signal_close =
                 frozen_sizing_price(/*is_buy=*/is_long);
-            order.explicit_flat_admission_candidate =
+            const bool explicit_flat_qualification =
                 order.created_position_side == PositionSide::FLAT
                 && !order.created_after_position_close_in_bar
                 && std::isfinite(explicit_margin) && explicit_margin > 0.0
                 && std::isfinite(placement_equity)
                 && std::isfinite(slipped_signal_close);
-            if (order.explicit_flat_admission_candidate) {
+            if (explicit_flat_qualification) {
                 order.explicit_placement_equity = placement_equity;
                 order.explicit_slipped_signal_close = slipped_signal_close;
             }
         }
     } else {
         order.type = OrderType::ENTRY;
-        order.limit_price = level_on_price_grid(limit_price);
-        order.stop_price = level_on_price_grid(stop_price);
+        order.legs.set_limit_price(level_on_price_grid(limit_price));
+        order.legs.set_stop_price(level_on_price_grid(stop_price));
         // round 7: a pure STOP reversal whose entry leg was rejected at
         // placement rests as the reversal's closing leg only (consumed by
         // apply_entry_order_fill; its fill-time admission is skipped since
@@ -835,6 +692,7 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         }
     }
 
+    bind_market_command(order,command);
     pending_orders_.push_back(std::move(order));
     close_reservation_capture_populations(pending_orders_.back().incarnation);
 }
@@ -1005,11 +863,11 @@ void BacktestEngine::strategy_close(const std::string& id,
         for (PendingOrder& pending : pending_orders_) {
             const bool pure_stop_entry =
                 pending.type == OrderType::ENTRY
-                && std::isfinite(pending.stop_price)
-                && std::isnan(pending.limit_price)
-                && std::isnan(pending.trail_points)
-                && std::isnan(pending.trail_price)
-                && std::isnan(pending.trail_offset)
+                && std::isfinite(pending.legs.prices().stop_price)
+                && std::isnan(pending.legs.prices().limit_price)
+                && std::isnan(pending.legs.prices().trail_points)
+                && std::isnan(pending.legs.prices().trail_price)
+                && std::isnan(pending.legs.prices().trail_offset)
                 && !pending.stop_limit_activated;
             if (!pure_stop_entry
                 || pending.created_bar >= bar_index_
@@ -1856,13 +1714,12 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     uint64_t replaced_incarnation = 0;
     double preserved_reserved_qty = std::numeric_limits<double>::quiet_NaN();
     int cleared_leg_count = 0;
-    bool replaced_dormant = false;
-    double replaced_dormant_stop = std::numeric_limits<double>::quiet_NaN();
+    std::optional<exit_legs::Definition> replaced_definition;
     clear_existing_exit_order(id, from_entry, has_trail_request,
                               trail_points, trail_offset, trail_price,
                               preserved_seq, replaced_incarnation,
                               preserved_reserved_qty, cleared_leg_count,
-                              &replaced_dormant, &replaced_dormant_stop);
+                              &replaced_definition);
 
     double reserved_qty = std::numeric_limits<double>::quiet_NaN();
     bool capture_expansion = false;
@@ -1918,8 +1775,8 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
                 const PositionSide requested =
                     o.is_long ? PositionSide::LONG : PositionSide::SHORT;
                 if (position_side_ != requested) return false;  // flip/reversal
-                const bool o_priced = !std::isnan(o.limit_price)
-                                      || !std::isnan(o.stop_price);
+                const bool o_priced = !std::isnan(o.legs.prices().limit_price)
+                                      || !std::isnan(o.legs.prices().stop_price);
                 const bool flat_armed_priced =
                     o_priced && o.created_position_side == PositionSide::FLAT;
                 const bool pre_armed_opposite_priced =
@@ -2091,13 +1948,13 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     order.from_entry = from_entry;
     order.type = OrderType::EXIT;
     order.is_long = false;
-    order.limit_price = level_on_price_grid(limit_price);
-    order.stop_price = level_on_price_grid(stop_price);
-    order.trail_points = trail_points;
-    order.trail_price = trail_price;
-    order.trail_offset = trail_offset;
-    order.profit_ticks = profit_ticks;
-    order.loss_ticks = loss_ticks;
+    order.legs.set_limit_price(level_on_price_grid(limit_price));
+    order.legs.set_stop_price(level_on_price_grid(stop_price));
+    order.legs.set_trail_points(trail_points);
+    order.legs.set_trail_price(trail_price);
+    order.legs.set_trail_offset(trail_offset);
+    order.legs.set_profit_ticks(profit_ticks);
+    order.legs.set_loss_ticks(loss_ticks);
     order.qty = reserved_qty;
     order.qty_type = -1;
     order.qty_percent = qp;
@@ -2159,15 +2016,15 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     if (compat::pine::historical_cascade_reach(order) && !bar_magnifier_enabled_
         && coof_scheduler_active_ && std::isfinite(coof_cursor_price_)
         && position_side_ != PositionSide::FLAT
-        && (!std::isnan(order.stop_price) || !std::isnan(order.limit_price))
-        && std::isnan(order.trail_points) && std::isnan(order.trail_price)) {
+        && (!std::isnan(order.legs.prices().stop_price) || !std::isnan(order.legs.prices().limit_price))
+        && std::isnan(order.legs.prices().trail_points) && std::isnan(order.legs.prices().trail_price)) {
         const int si = coof_cascade_recalc_leg_;
         order.coof_cascade_seg_i =
             (si >= 0 && si <= 2) ? static_cast<int8_t>(si)
                                  : static_cast<int8_t>(-1);
         order.coof_cascade_inflight_fires = internal::cascade_exit_inflight_fires(
             current_bar_, coof_cursor_price_, si, position_side_,
-            order.stop_price, order.limit_price);
+            order.legs.prices().stop_price, order.legs.prices().limit_price);
         // The second fill at O has already consumed the only same-point refill
         // exception. A marketable LIMIT born from that refill is held through
         // O->W1 by the cascade gate, then gets one gap attempt at W1. STOP never
@@ -2191,10 +2048,10 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
     // live for the next bar (settle_dormant_bracket_reissues), which is
     // exactly the plain REVIVE-A replacement's timing. See
     // PendingOrder::dormant_reissue_pending. Extra legs copy the flags.
-    if (replaced_dormant && !effectively_flat) {
-        order.dormant_bracket = true;
-        order.dormant_reissue_pending = true;
-        order.dormant_original_stop_price = replaced_dormant_stop;
+    if (replaced_definition && !effectively_flat) {
+        const auto cause = next_leg_event();
+        apply_leg_action(order, exit_legs::StageReplacement{{replaced_incarnation,
+            *replaced_definition, {cause}}}, cause);
     }
 
     if (extra_leg_qtys.empty()) {
@@ -2233,101 +2090,51 @@ void BacktestEngine::strategy_exit(const std::string& id, const std::string& fro
         extra.quantity_request.reserve(leg_qty, live_pos_qty);
         extra.created_seq = next_order_seq_++;
         extra.incarnation = next_order_incarnation_++;
+        extra.legs.fork(extra.incarnation, position_cycle_seq_);
         extra.replaced_order_incarnation = 0;
         pending_orders_.push_back(std::move(extra));
     }
 }
 
 void BacktestEngine::strategy_cancel(const std::string& id) {
-    // Any cancel issued while a candidate book is live makes the original
-    // source body non-exact, even if the surviving book later has size 2.
-    for (const PendingOrder& order : pending_orders_) {
-        if (order.default_flat_market_gross_candidate) {
-            default_flat_market_gross_disqualified_bars_.insert(
-                order.created_bar);
-        }
+    auto command=begin_market_command(admission::CommandKind::Cancel,id,false,
+        std::numeric_limits<double>::quiet_NaN(),-1,
+        std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::quiet_NaN(),"",0);
+    command.outcome(admission::Outcome::CancelCompleted);
+    uint64_t surviving_exit_incarnation=0;int surviving_exit_count=0;
+    for(const auto& order:pending_orders_)if(order.type==OrderType::EXIT&&order.from_entry==id) {
+        ++surviving_exit_count;surviving_exit_incarnation=order.incarnation;
     }
-    uint64_t surviving_exit_incarnation = 0;
-    int surviving_exit_count = 0;
-    for (const PendingOrder& order : pending_orders_) {
-        if (order.type == OrderType::EXIT && order.from_entry == id) {
-            ++surviving_exit_count;
-            surviving_exit_incarnation = order.incarnation;
-        }
+    uint64_t removed_priced_entry_incarnation=0;
+    for(const auto& order:pending_orders_)if(order.id==id) {
+        if(order.type==OrderType::ENTRY&&order.incarnation!=0)removed_priced_entry_incarnation=order.incarnation;
+        invalidate_pending_flat_market_pair(order.created_seq);
     }
-    uint64_t removed_priced_entry_incarnation = 0;
-    for (const PendingOrder& order : pending_orders_) {
-        if (order.id == id) {
-            const bool entry_like =
-                order.type == OrderType::MARKET
-                || order.type == OrderType::ENTRY
-                || order.type == OrderType::RAW_ORDER;
-            if (entry_like) {
-                if (order.created_position_side == PositionSide::FLAT) {
-                    pending_flat_market_pair_disqualified_bars_.insert(
-                        order.created_bar);
-                }
-                if (process_orders_on_close_ && calc_on_order_fills_
-                    && !coof_fill_recalc_active_) {
-                    pending_flat_market_pair_disqualified_bars_.insert(
-                        bar_index_);
-                }
-            }
-            if (order.type == OrderType::ENTRY && order.incarnation != 0) {
-                removed_priced_entry_incarnation = order.incarnation;
-            }
-            invalidate_pending_flat_market_pair(order.created_seq);
-        }
-    }
-    if (removed_priced_entry_incarnation != 0
-        && surviving_exit_count == 1
-        && surviving_exit_incarnation != 0) {
-        named_entry_cancelled_incarnation_in_current_eval_[id] =
-            {removed_priced_entry_incarnation, surviving_exit_incarnation};
-    } else if (removed_priced_entry_incarnation != 0) {
-        named_entry_cancelled_incarnation_in_current_eval_.erase(id);
-    }
-    pending_orders_.erase(
-        std::remove_if(pending_orders_.begin(), pending_orders_.end(),
-            [&](const PendingOrder& o) { return o.id == id; }),
-        pending_orders_.end());
+    if(removed_priced_entry_incarnation!=0&&surviving_exit_count==1&&surviving_exit_incarnation!=0)
+        named_entry_cancelled_incarnation_in_current_eval_[id]={removed_priced_entry_incarnation,surviving_exit_incarnation};
+    else if(removed_priced_entry_incarnation!=0)named_entry_cancelled_incarnation_in_current_eval_.erase(id);
+    pending_orders_.erase(std::remove_if(pending_orders_.begin(),pending_orders_.end(),
+        [&](const auto& order){return order.id==id;}),pending_orders_.end());
 }
 
 void BacktestEngine::strategy_cancel_all() {
-    for (const PendingOrder& order : pending_orders_) {
-        if (order.default_flat_market_gross_candidate) {
-            default_flat_market_gross_disqualified_bars_.insert(
-                order.created_bar);
-        }
-        const bool entry_like =
-            order.type == OrderType::MARKET
-            || order.type == OrderType::ENTRY
-            || order.type == OrderType::RAW_ORDER;
-        if (entry_like) {
-            if (order.created_position_side == PositionSide::FLAT) {
-                pending_flat_market_pair_disqualified_bars_.insert(
-                    order.created_bar);
-            }
-            if (process_orders_on_close_ && calc_on_order_fills_
-                && !coof_fill_recalc_active_) {
-                pending_flat_market_pair_disqualified_bars_.insert(bar_index_);
-            }
-        }
-    }
+    auto command=begin_market_command(admission::CommandKind::CancelAll,"",false,
+        std::numeric_limits<double>::quiet_NaN(),-1,
+        std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::quiet_NaN(),"",0);
+    command.outcome(admission::Outcome::CancelCompleted);
     pending_orders_.clear();
 }
 
 void BacktestEngine::strategy_order(const std::string& id, bool is_long, double qty,
                                      double limit_price, double stop_price,
                                      const std::string& oca_name, int oca_type) {
-    if (!trading_is_active(current_bar_.timestamp, trade_start_time_, script_tf_seconds_)) return;
-    if (intraday_loss_orders_blocked()) return;  // strategy.risk.max_intraday_loss fired today
-    if (default_flat_market_gross_scope_is_live()) {
-        // strategy.order is outside the high-level two-entry oracle. Record
-        // the call before any same-id replacement or signal-time rejection can
-        // make it disappear from the final broker book.
-        default_flat_market_gross_disqualified_bars_.insert(
-            bar_index_);
+    auto command=begin_market_command(admission::CommandKind::Raw,id,is_long,qty,-1,
+                                      limit_price,stop_price,oca_name,oca_type);
+    if (!trading_is_active(current_bar_.timestamp, trade_start_time_, script_tf_seconds_)) {
+        command.outcome(admission::Outcome::IgnoredTradingWindow);return;
+    }
+    if (intraday_loss_orders_blocked()) {
+        command.outcome(admission::Outcome::IgnoredIntradayLoss);return;
     }
     int64_t preserved_seq = 0;
     uint64_t replaced_order_incarnation = 0;
@@ -2340,30 +2147,8 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
     }
 
     // Remove existing pending order with same id
-    for (const PendingOrder& pending : pending_orders_) {
-        if (pending.id == id) {
-            const bool entry_like =
-                pending.type == OrderType::MARKET
-                || pending.type == OrderType::ENTRY
-                || pending.type == OrderType::RAW_ORDER;
-            if (entry_like) {
-                if (pending.default_flat_market_gross_candidate) {
-                    default_flat_market_gross_disqualified_bars_.insert(
-                        pending.created_bar);
-                }
-                if (pending.created_position_side == PositionSide::FLAT) {
-                    pending_flat_market_pair_disqualified_bars_.insert(
-                        pending.created_bar);
-                }
-                if (process_orders_on_close_ && calc_on_order_fills_
-                    && !coof_fill_recalc_active_) {
-                    pending_flat_market_pair_disqualified_bars_.insert(
-                        bar_index_);
-                }
-            }
-            invalidate_pending_flat_market_pair(pending.created_seq);
-        }
-    }
+    for(const auto& pending:pending_orders_)if(pending.id==id)
+        invalidate_pending_flat_market_pair(pending.created_seq);
     pending_orders_.erase(
         std::remove_if(pending_orders_.begin(), pending_orders_.end(),
             [&](const PendingOrder& o) { return o.id == id; }),
@@ -2373,9 +2158,9 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
     order.id = id;
     order.from_entry = "";
     order.is_long = is_long;
-    order.trail_points = std::numeric_limits<double>::quiet_NaN();
-    order.trail_price = std::numeric_limits<double>::quiet_NaN();
-    order.trail_offset = std::numeric_limits<double>::quiet_NaN();
+    order.legs.set_trail_points(std::numeric_limits<double>::quiet_NaN());
+    order.legs.set_trail_price(std::numeric_limits<double>::quiet_NaN());
+    order.legs.set_trail_offset(std::numeric_limits<double>::quiet_NaN());
     order.qty = qty;
     order.qty_type = -1;
     order.qty_percent = 100.0;
@@ -2409,8 +2194,8 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
 
     if (!has_limit && !has_stop) {
         order.type = OrderType::RAW_ORDER;
-        order.limit_price = std::numeric_limits<double>::quiet_NaN();
-        order.stop_price = std::numeric_limits<double>::quiet_NaN();
+        order.legs.set_limit_price(std::numeric_limits<double>::quiet_NaN());
+        order.legs.set_stop_price(std::numeric_limits<double>::quiet_NaN());
         // Same signal-time freeze as strategy_entry's MARKET branch: a
         // default-sized strategy.order market order runs through the same
         // TV default-sizing engine, so its quantity is frozen at this
@@ -2437,10 +2222,11 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
         }
     } else {
         order.type = OrderType::RAW_ORDER;
-        order.limit_price = level_on_price_grid(limit_price);
-        order.stop_price = level_on_price_grid(stop_price);
+        order.legs.set_limit_price(level_on_price_grid(limit_price));
+        order.legs.set_stop_price(level_on_price_grid(stop_price));
     }
 
+    bind_market_command(order,command);
     pending_orders_.push_back(std::move(order));
     close_reservation_capture_populations(pending_orders_.back().incarnation);
 }
@@ -2643,15 +2429,8 @@ void BacktestEngine::hold_brackets_dormant_for_reversal_pair_close(
         const std::string& id) {
     for (PendingOrder& o : pending_orders_) {
         if (o.type != OrderType::EXIT || o.from_entry != id) continue;
-        if (!o.dormant_bracket) {
-            o.dormant_bracket = true;
-            o.dormant_hold_bar = bar_index_;
-            o.dormant_reissue_pending = false;
-            o.dormant_original_stop_price =
-                std::numeric_limits<double>::quiet_NaN();
-        } else {
-            o.dormant_reissue_pending = false;
-        }
+        const auto cause = next_leg_event();
+        apply_leg_action(o, compat::pine::select_pair_hold(o, cause), cause);
     }
 }
 
@@ -2784,11 +2563,11 @@ uint64_t BacktestEngine::queue_deferred_close_order(
     order.from_entry = close_entries_rule_any_ ? id : "";
     order.type = OrderType::EXIT;
     order.is_long = false;
-    order.limit_price = std::numeric_limits<double>::quiet_NaN();
-    order.stop_price = std::numeric_limits<double>::quiet_NaN();
-    order.trail_points = std::numeric_limits<double>::quiet_NaN();
-    order.trail_price = std::numeric_limits<double>::quiet_NaN();
-    order.trail_offset = std::numeric_limits<double>::quiet_NaN();
+    order.legs.set_limit_price(std::numeric_limits<double>::quiet_NaN());
+    order.legs.set_stop_price(std::numeric_limits<double>::quiet_NaN());
+    order.legs.set_trail_points(std::numeric_limits<double>::quiet_NaN());
+    order.legs.set_trail_price(std::numeric_limits<double>::quiet_NaN());
+    order.legs.set_trail_offset(std::numeric_limits<double>::quiet_NaN());
     if (closes_any_qty) {
         order.qty = std::numeric_limits<double>::quiet_NaN();
         order.qty_type = -1;
@@ -2805,12 +2584,12 @@ uint64_t BacktestEngine::queue_deferred_close_order(
     // against E2 can reserve 2 against new E4). Do not fabricate an original
     // Pine percentage, or an exposure-coverage receipt before that binding.
     order.quantity_request.request(QuantityIntent::units(qty_to_close));
-    bind_exit_activation(order);
     order.oca_name = "";
     order.oca_type = 0;
     order.created_bar = bar_index_;
     order.created_seq = next_order_seq_++;
     order.incarnation = next_order_incarnation_++;
+    bind_exit_activation(order);
     order.birth = capture_order_birth();
     order.pine_birth_reach = compat::pine::select_historical_birth_reach(
         order.birth, false);
@@ -2868,8 +2647,7 @@ void BacktestEngine::clear_existing_exit_order(const std::string& id,
                                                uint64_t& replaced_incarnation_out,
                                                double& preserved_reserved_qty_out,
                                                int& cleared_leg_count_out,
-                                               bool* replaced_dormant_out,
-                                               double* replaced_dormant_stop_out) {
+                                               std::optional<exit_legs::Definition>* replaced_definition_out) {
     bool had_existing_order = false;
     double resting_trail_points = std::numeric_limits<double>::quiet_NaN();
     double resting_trail_price = std::numeric_limits<double>::quiet_NaN();
@@ -2877,10 +2655,7 @@ void BacktestEngine::clear_existing_exit_order(const std::string& id,
     replaced_incarnation_out = 0;
     preserved_reserved_qty_out = std::numeric_limits<double>::quiet_NaN();
     cleared_leg_count_out = 0;
-    if (replaced_dormant_out) *replaced_dormant_out = false;
-    if (replaced_dormant_stop_out) {
-        *replaced_dormant_stop_out = std::numeric_limits<double>::quiet_NaN();
-    }
+    if (replaced_definition_out) replaced_definition_out->reset();
     for (const auto& o : pending_orders_) {
         if (o.type == OrderType::EXIT && o.id == id && o.from_entry == from_entry) {
             ++cleared_leg_count_out;
@@ -2889,14 +2664,8 @@ void BacktestEngine::clear_existing_exit_order(const std::string& id,
             // the ORIGINAL armed stop when the leg is itself an inheriting
             // re-issue of the same bar (two re-issues on one bar keep the
             // first armed price for REVIVE-B).
-            if (o.dormant_bracket && replaced_dormant_out
-                && !*replaced_dormant_out) {
-                *replaced_dormant_out = true;
-                if (replaced_dormant_stop_out) {
-                    *replaced_dormant_stop_out = o.dormant_reissue_pending
-                        ? o.dormant_original_stop_price : o.stop_price;
-                }
-            }
+            if (o.legs.dormant() && replaced_definition_out && !*replaced_definition_out)
+                *replaced_definition_out = compat::pine::select_replacement_revival_definition(o);
             if (had_existing_order) continue;
             // The FIRST leg owns the queue position and the frozen
             // reservation the caller carries forward; later legs are the
@@ -2907,8 +2676,8 @@ void BacktestEngine::clear_existing_exit_order(const std::string& id,
             if (!std::isnan(o.qty)) {
                 preserved_reserved_qty_out = o.qty;
             }
-            resting_trail_points = o.trail_points;
-            resting_trail_price = o.trail_price;
+            resting_trail_points = o.legs.prices().trail_points;
+            resting_trail_price = o.legs.prices().trail_price;
         }
     }
 

@@ -287,7 +287,7 @@ void hash_and_mirror_live_facts() {
 
     int count = 0;
     const auto* layout = pending_order_layout(&count);
-    CHECK(count == 155);
+    CHECK(count==PF_PENDING_ORDER_FIELD_COUNT);
     CHECK(std::strcmp(layout[149].name, "pine_frozen_market_instruction_kind") == 0);
 }
 

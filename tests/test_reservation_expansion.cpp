@@ -1,3 +1,4 @@
+#include "exit_lifecycle_fixture.hpp"
 // Ten literal native contracts, derived from causal facts and integer/dyadic
 // quantities. No canonical trades, tape, Pine/corpus, reference or grader.
 #include "reservation_expansion_test_access.hpp"
@@ -166,16 +167,16 @@ void cycle_retirement_and_dormancy() {
     CHECK(recaptured.get("A").created_position_cycle_seq==7);recaptured.fire("A");CHECK(recaptured.get("E").qty==22);
     Book retired;retired.standard();retired.retired.push_back(50);retired.fire("A",false);
     CHECK(retired.has("E") && retired.get("E").qty==10 && retired.quantity()==12);retired.finish();CHECK(!retired.has("E"));
-    Book dormant;dormant.standard();dormant.get("E").dormant_bracket=true;
+    Book dormant;dormant.standard();lifecycle_fixture::suspend(dormant.get("E"));
     dormant.fire("E",false);CHECK(dormant.retired.empty() && dormant.live_all());
-    dormant.fire("A");CHECK(dormant.get("E").qty==12 && dormant.get("E").dormant_bracket);
-    dormant.revive(100);CHECK(!dormant.get("E").dormant_bracket && dormant.live_all());
+    dormant.fire("A");CHECK(dormant.get("E").qty==12 && dormant.get("E").legs.dormant());
+    dormant.revive(100);CHECK(!dormant.get("E").legs.dormant() && dormant.live_all());
     dormant.fire("E");CHECK(dormant.quantity()==0 && !dormant.has("E"));
-    Book direct;direct.standard();direct.get("E").dormant_bracket=true;direct.revive(80);
+    Book direct;direct.standard();lifecycle_fixture::suspend(direct.get("E"));direct.revive(80);
     CHECK(direct.quantity()==0 && !direct.has("E")); // direct revival close erases receiver
     if(direct.has("A")){CHECK(direct.owner()==50);direct.fire("A");CHECK(!direct.has("E"));}
-    Book rearmed;rearmed.standard();rearmed.get("E").dormant_bracket=true;rearmed.exit();
-    CHECK(rearmed.get("E").dormant_bracket && rearmed.get("E").dormant_reissue_pending);
+    Book rearmed;rearmed.standard();lifecycle_fixture::suspend(rearmed.get("E"));rearmed.exit();
+    CHECK(rearmed.get("E").legs.dormant() && rearmed.get("E").legs.pending_replacement());
     CHECK(rearmed.owner()==rearmed.get("E").incarnation && rearmed.closure()==0);
     rearmed.fire("A");CHECK(rearmed.get("E").qty==12);
     Book copy;copy.standard();Book same=copy;CHECK(copy.broker_state_hash()==same.broker_state_hash());
@@ -219,7 +220,7 @@ void mirror_and_fingerprint() {
                                   reinterpret_cast<unsigned char*>(&after)+field->offset,field->size)!=0);
         ++mutation_index;std::printf("hash/mirror mutation: %s\n",test.first);
     }
-    int n=0;const auto* layout=pending_order_layout(&n);CHECK(n==155);
+    int n=0;const auto* layout=pending_order_layout(&n);CHECK(n==PF_PENDING_ORDER_FIELD_COUNT);
     int i=0;
 #define OLD_FIELD(field, ctype) CHECK(std::strcmp(layout[i].name,#field)==0); CHECK(std::strcmp(layout[i].type,ctype)==0); CHECK(layout[i].offset==offsetof(prior_growth_mirror::pf_pending_order_v1_t,field)); ++i;
 #include "fixtures/reservation_expansion/ff54-fields.inc"

@@ -120,6 +120,18 @@ and their trade fixtures remain. Those labels are not alternate model states.
 
 ## Current dispatch sequence
 
+Admission records the original command and its placement configuration separately
+from subsequent review and sizing receipts. The [admission model](@ref market_admission)
+describes their ownership and retention. Pine qualification predicates remain in
+the explicit adapter; recording a predicate's inputs does not establish that the
+predicate is a generic financial rule.
+
+The [trigger lifecycle](@ref exit_leg_lifecycle) owns immutable price definitions,
+working generations and exact suspension/replacement obligations. An unavailable
+stop, limit or trail cannot turn a conditional exit into an unpriced market close.
+Completion identifies the outstanding obligation and its occurrence separately
+from the processing receipt, with causal ordering checked before any mutation.
+
 The ordinary pending-order scan updates risk state, processes due opening work,
 finalizes source cohorts, updates trailing/relative prices and orders the book.
 It then classifies and matches an exact pending handle. A pre-exit margin slice

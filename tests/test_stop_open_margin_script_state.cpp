@@ -287,26 +287,26 @@ public:
         pending.id = "L";
         pending.type = OrderType::ENTRY;
         pending.is_long = true;
-        pending.limit_price = qnan;
-        pending.stop_price = 103;
-        pending.trail_points = pending.trail_price = pending.trail_offset = qnan;
+        pending.legs.set_limit_price(qnan);
+        pending.legs.set_stop_price(103);
+        pending.legs.set_trail_points(pending.legs.set_trail_price(pending.legs.set_trail_offset(qnan)));
         pending.qty = 0.1;
         pending.created_bar = 0;
         pending.incarnation = 8;
         switch (scenario) {
-        case 1: pending.stop_price = 100.01; break;
-        case 2: current_bar_.high = 100.006; pending.stop_price = 100.008; break;
+        case 1: pending.legs.set_stop_price(100.01); break;
+        case 2: current_bar_.high = 100.006; pending.legs.set_stop_price(100.008); break;
         case 3: pending.oca_name = "siblings"; break;
         case 4: pending.oca_type = 1; break;
-        case 5: pending.limit_price = 103; break;
+        case 5: pending.legs.set_limit_price(103); break;
         case 6: pending.stop_limit_activated = true; break;
         case 7: pending.created_after_position_close_in_bar = true; break;
         case 8: pending.created_position_side = PositionSide::SHORT; break;
         case 9: pending.created_bar = 1; break;
-        case 10: pending.trail_offset = 1; break;
+        case 10: pending.legs.set_trail_offset(1); break;
         case 11: pending.type = OrderType::MARKET; break;
         case 12: current_bar_.high = INFINITY; break;
-        case 13: pending.stop_price = INFINITY; break;
+        case 13: pending.legs.set_stop_price(INFINITY); break;
         case 14:
             pyramid_entries_[0].ordinary_stop_open = false;
             pyramid_entries_[0].ordinary_market_open = true;

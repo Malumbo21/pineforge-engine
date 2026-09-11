@@ -438,7 +438,7 @@ void test_sbmt_kernels() {
 PendingOrder make_order(const std::string& id, OrderType type, bool is_long, int created_bar) {
     PendingOrder o{};
     o.id = id; o.type = type; o.is_long = is_long;
-    o.limit_price = o.stop_price = o.trail_points = o.trail_offset = kNaN;
+    o.legs.set_limit_price(o.legs.set_stop_price(o.legs.set_trail_points(o.legs.set_trail_offset(kNaN))));
     o.qty = kNaN; o.qty_type = -1; o.qty_percent = 100.0; o.oca_type = 0;
     o.created_bar = created_bar;
     return o;

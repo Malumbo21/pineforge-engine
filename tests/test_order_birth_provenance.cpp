@@ -45,7 +45,7 @@ public:
     }
     void clear_trailing_trigger(const std::string& id) {
         for (auto& o : pending_orders_) if (o.id == id) {
-            o.trail_points = o.trail_price = nan;
+            o.legs.set_trail_points(o.legs.set_trail_price(nan));
             return;
         }
     }

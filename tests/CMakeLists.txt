@@ -1,8 +1,21 @@
 set(TEST_SOURCES
+    test_market_admission_causality
+    test_pending_order_mirror_no_alloc
+    test_market_admission_decisions
+    test_market_admission_state
+    test_market_admission_matrix
     test_reservation_expansion
     test_frozen_market_instruction
     test_pine_transaction_settlement
     test_exit_leg_activation
+    test_exit_leg_lifecycle
+    test_exit_leg_lifecycle_integration
+    test_root_cancel_sole_stop
+    test_root_barrier_targeted
+    test_exit_barrier_identity
+    test_exit_lifecycle_clock
+    test_exit_lifecycle_reflection
+    test_exit_lifecycle_availability
     test_exit_activation_routes
     test_pending_order_core
     test_pending_quantity_intent
@@ -255,6 +268,12 @@ set(TEST_SOURCES
 find_package(Threads REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+add_test(
+    NAME test_aggregate_cpp_versions
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_aggregate_cpp_versions.py
+)
+
 set(_pf_script_cpp_abi_flags)
 if(PINEFORGE_ENABLE_SANITIZERS)
     list(APPEND _pf_script_cpp_abi_flags --extra-flag=-fsanitize=address,undefined)
@@ -426,3 +445,9 @@ add_test(NAME test_c_abi COMMAND test_c_abi)
 # explicit Pine attachment as well as the unchanged bare-native test above.
 add_test(NAME test_pending_order_identity_pine
          COMMAND test_pending_order_identity --pine)
+
+add_test(NAME test_exit_leg_lifecycle_coverage COMMAND ${Python3_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/scripts/test_exit_leg_lifecycle_coverage.py)
+add_test(NAME test_market_admission_schema COMMAND ${Python3_EXECUTABLE}
+    ${PROJECT_SOURCE_DIR}/scripts/check_market_admission_schema.py)
+add_test(NAME test_market_admission_schema_mutations COMMAND ${Python3_EXECUTABLE}
+    ${PROJECT_SOURCE_DIR}/scripts/test_market_admission_schema.py)

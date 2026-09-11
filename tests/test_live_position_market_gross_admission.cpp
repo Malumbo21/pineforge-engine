@@ -156,7 +156,7 @@ struct Probe : public BacktestEngine {
             book_after_signal = pending_orders_.size();
             uint64_t earliest = 0;
             for (const PendingOrder& order : pending_orders_) {
-                if (order.default_flat_market_gross_candidate) {
+                if (compat::pine::awaits_default_review(order.market_admission)) {
                     ++candidates_after_signal;
                     if (earliest == 0 || order.incarnation < earliest) {
                         earliest = order.incarnation;

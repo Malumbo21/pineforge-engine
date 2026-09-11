@@ -1,3 +1,4 @@
+#include <pineforge/compat/pine/exit_lifecycle.hpp>
 /*
  * engine_orders.cpp — execute_market_* and partial-exit fill mechanics
  */
@@ -454,10 +455,10 @@ double BacktestEngine::cover_samebar_market_adds_on_exit(const PendingOrder& ord
     if (position_side_ == PositionSide::FLAT || pyramid_entries_.empty()) return 0.0;
     // Scope to a PRICED bracket (stop/limit/trail). A plain market close /
     // close_all already flattens the whole position through its own path.
-    bool priced_bracket = !std::isnan(order.stop_price)
-        || !std::isnan(order.limit_price)
-        || !std::isnan(order.trail_points)
-        || !std::isnan(order.trail_price);
+    bool priced_bracket = !std::isnan(order.legs.prices().stop_price)
+        || !std::isnan(order.legs.prices().limit_price)
+        || !std::isnan(order.legs.prices().trail_points)
+        || !std::isnan(order.legs.prices().trail_price);
     if (!priced_bracket) return 0.0;
 
     bool is_buy = (position_side_ == PositionSide::SHORT);
@@ -801,8 +802,50 @@ void BacktestEngine::settle_position_after_partial_exit(
 
 // Exposure transitions resolve activation once. Matchers never refresh a
 // deadline from whichever position happens to be current at read time.
+exit_legs::Frame BacktestEngine::next_leg_event(exit_legs::Phase phase) {
+    if (exit_leg_event_seq_ == UINT64_MAX) throw std::overflow_error("exit lifecycle event exhausted");
+    const auto domain = stream_phase_ != StreamPhase::IDLE ? exit_legs::Domain::RawTicks
+        : bar_magnifier_enabled_ ? (coof_scheduler_active_ ? exit_legs::Domain::MagnifierCoof : exit_legs::Domain::Magnifier)
+        : coof_scheduler_active_ ? exit_legs::Domain::Coof : exit_legs::Domain::Ordinary;
+    return {++exit_leg_event_seq_, bar_index_, domain, phase};
+}
+void BacktestEngine::apply_leg_action(PendingOrder& order, exit_legs::Operation operation,
+                                      std::optional<exit_legs::Frame> supplied) {
+    // Rebinding can require a later receipt event at this same hook. Preserve
+    // its phase when replacing that receipt; an after-margin completion must
+    // not be recorded as processed during the earlier observation phase.
+    const auto receipt_phase = supplied ? supplied->phase : exit_legs::Phase::Observation;
+    if (!order.legs.target().incarnation) order.legs.attach(order.incarnation, position_cycle_seq_);
+    if (order.legs.last_action()) {
+        exit_leg_event_seq_ = std::max(exit_leg_event_seq_, order.legs.last_action()->cause.event);
+        if (supplied && supplied->event <= order.legs.last_action()->cause.event) supplied.reset();
+    }
+    if (order.legs.target().incarnation != order.incarnation)
+        throw std::logic_error("stale exit lifecycle instruction");
+    // Current-owner selection is explicit. The legacy cause need not prove
+    // that its older bar-only producer owned this target's current cycle.
+    if (order.legs.target().owner != position_cycle_seq_) {
+        const auto bind_cause = next_leg_event(receipt_phase);
+        const exit_legs::Action bind{order.legs.target(), order.legs.revision(), bind_cause,
+                                    exit_legs::BindOwner{position_cycle_seq_}};
+        if (order.legs.apply(order.legs.target(), bind) != exit_legs::Result::Applied)
+            throw std::logic_error("exit lifecycle owner bind refused");
+        // A supplied batch cause predates this explicit rebind. The target
+        // receives a fresh operation receipt without asserting prior ownership.
+        supplied.reset();
+    }
+    const auto cause = supplied ? *supplied : next_leg_event(receipt_phase);
+    const exit_legs::Action action{order.legs.target(), order.legs.revision(), cause, std::move(operation)};
+    const auto result = order.legs.apply({order.incarnation, position_cycle_seq_}, action);
+    if (result != exit_legs::Result::Applied && result != exit_legs::Result::Replay)
+        throw std::logic_error("exit lifecycle action refused");
+}
+
 void BacktestEngine::bind_exit_activation(PendingOrder& order) {
     if (order.type != OrderType::EXIT) return;
+    if (!order.legs.target().incarnation) order.legs.attach(order.incarnation, position_cycle_seq_);
+    if (order.legs.target().owner != position_cycle_seq_)
+        apply_leg_action(order, exit_legs::BindOwner{position_cycle_seq_});
     if (position_side_ == PositionSide::FLAT || position_cycle_seq_ <= 0) {
         order.leg_activation.unbind();
         return;
@@ -815,7 +858,13 @@ void BacktestEngine::bind_retained_exit_activations() {
 }
 void BacktestEngine::unbind_exit_activations() {
     for (auto& order : pending_orders_) {
-        if (order.type == OrderType::EXIT) order.leg_activation.unbind();
+        if (order.type == OrderType::EXIT) {
+            order.leg_activation.unbind();
+            if (!order.legs.target().incarnation) order.legs.attach(order.incarnation, position_cycle_seq_);
+            const exit_legs::Action action{order.legs.target(), order.legs.revision(), next_leg_event(), exit_legs::BindOwner{0}};
+            if (order.legs.apply(order.legs.target(), action) != exit_legs::Result::Applied)
+                throw std::logic_error("exit lifecycle flat unbind refused");
+        }
     }
 }
 

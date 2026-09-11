@@ -1,3 +1,4 @@
+#include "exit_lifecycle_fixture.hpp"
 // R23 TradingView controls: a full opening-bar short liquidation is visible
 // to the close-time script; a replacement may receive its own explicit bracket.
 // Compact command fixtures use synthetic timestamps and fixed exit distances.
@@ -281,18 +282,19 @@ public:
         }
         if (scenario >= 11) {
             PendingOrder order{};
-            order.trail_points = order.trail_offset = qnan;
+            order.legs.set_trail_points(order.legs.set_trail_offset(qnan));
             order.id = "Exit";
+            order.incarnation = 8; // native synthetic checkpoint identity
             order.type = OrderType::EXIT;
             order.from_entry = "Short";
-            order.stop_price = 102.0;
-            order.limit_price = 98.0;
+            order.legs.set_stop_price(102.0);
+            order.legs.set_limit_price(98.0);
             if (scenario == 11) { order.type = OrderType::MARKET; order.id = "Next"; }
             if (scenario == 12) order.from_entry = "Foreign";
             if (scenario == 13) order.from_entry.clear();
-            if (scenario == 14) order.trail_points = 10.0;
-            if (scenario == 15) order.trail_points = INFINITY;
-            if (scenario == 16) order.dormant_bracket = true;
+            if (scenario == 14) order.legs.set_trail_points(10.0);
+            if (scenario == 15) order.legs.set_trail_points(INFINITY);
+            if (scenario == 16) lifecycle_fixture::suspend(order);
             pending_orders_.push_back(order);
         }
     }

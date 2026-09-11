@@ -1,3 +1,4 @@
+#include <pineforge/compat/pine/exit_lifecycle.hpp>
 /*
  * engine_fills.cpp — process_pending_orders — the bar-pump fill loop
  */
@@ -67,11 +68,11 @@ bool preserves_same_id_stop_across_deferred_close_all(
         && order.is_long == exit_closed_was_long
         && order.created_position_side == closed_side
         && !order.over_pyramiding_cap_at_placement
-        && std::isfinite(order.stop_price)
-        && std::isnan(order.limit_price)
-        && std::isnan(order.trail_points)
-        && std::isnan(order.trail_price)
-        && std::isnan(order.trail_offset)
+        && std::isfinite(order.legs.prices().stop_price)
+        && std::isnan(order.legs.prices().limit_price)
+        && std::isnan(order.legs.prices().trail_points)
+        && std::isnan(order.legs.prices().trail_price)
+        && std::isnan(order.legs.prices().trail_offset)
         && !order.stop_limit_activated;
 }
 
@@ -98,11 +99,11 @@ bool is_true_flat_unlinked_stop_pair(
         if (!entry_like) continue;
 
         const bool pure_stop = order.type == OrderType::ENTRY
-            && std::isfinite(order.stop_price)
-            && std::isnan(order.limit_price)
-            && std::isnan(order.trail_points)
-            && std::isnan(order.trail_price)
-            && std::isnan(order.trail_offset)
+            && std::isfinite(order.legs.prices().stop_price)
+            && std::isnan(order.legs.prices().limit_price)
+            && std::isnan(order.legs.prices().trail_points)
+            && std::isnan(order.legs.prices().trail_price)
+            && std::isnan(order.legs.prices().trail_offset)
             && !order.stop_limit_activated;
         if (!pure_stop
             || order.created_position_side != PositionSide::FLAT
@@ -241,27 +242,27 @@ void BacktestEngine::process_carried_long_money_before_priced_orders(
     if (order.type != OrderType::EXIT || entry.entry_id.empty()
         || order.from_entry != entry.entry_id
         || order.created_bar >= bar_index_
-        || order.dormant_bracket || order.dormant_reissue_pending
+        || order.legs.dormant() || order.legs.pending_replacement()
         || order.suppress_as_declined_reversal_close
         || !order.oca_name.empty() || order.oca_type != 0
-        || !std::isnan(order.trail_points)
-        || !std::isnan(order.trail_offset) || !std::isnan(order.trail_price)
-        || (!std::isnan(order.limit_price) && !std::isfinite(order.limit_price))
-        || (!std::isnan(order.stop_price) && !std::isfinite(order.stop_price))) return;
+        || !std::isnan(order.legs.prices().trail_points)
+        || !std::isnan(order.legs.prices().trail_offset) || !std::isnan(order.legs.prices().trail_price)
+        || (!std::isnan(order.legs.prices().limit_price) && !std::isfinite(order.legs.prices().limit_price))
+        || (!std::isnan(order.legs.prices().stop_price) && !std::isfinite(order.legs.prices().stop_price))) return;
     // The covered book has one ordinary own full-position reservation. Keep
     // partial-reservation and sibling ownership races on their existing path.
     if (std::isnan(order.qty)) {
         if (!std::isfinite(order.qty_percent) || order.qty_percent < 100.0) return;
     } else if (!std::isfinite(order.qty)
                || order.qty < position_qty_ - kQtyEpsilon) return;
-    const bool has_limit = std::isfinite(order.limit_price) && order.limit_price > 0.0;
-    const bool has_stop = std::isfinite(order.stop_price) && order.stop_price > 0.0;
+    const bool has_limit = std::isfinite(order.legs.prices().limit_price) && order.legs.prices().limit_price > 0.0;
+    const bool has_stop = std::isfinite(order.legs.prices().stop_price) && order.legs.prices().stop_price > 0.0;
     if (!has_limit && !has_stop) return;
     const double open = broker_trigger_bar(bar).open;
     // Every finite leg participates in opening marketability. A nonpositive
     // limit can still be marketable; do not ignore it beside a valid stop.
-    if ((std::isfinite(order.limit_price) && open >= order.limit_price)
-        || (std::isfinite(order.stop_price) && open <= order.stop_price)) return;
+    if ((std::isfinite(order.legs.prices().limit_price) && open >= order.legs.prices().limit_price)
+        || (std::isfinite(order.legs.prices().stop_price) && open <= order.legs.prices().stop_price)) return;
 
     // Only the opening checkpoint precedes every eligible exit. The normal
     // end-of-bar call owns later waypoints; a successful trim already records
@@ -540,16 +541,16 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 continue;
             }
             if (pending.type != OrderType::ENTRY
-                || std::isnan(pending.stop_price)
-                || std::isnan(pending.limit_price)
+                || std::isnan(pending.legs.prices().stop_price)
+                || std::isnan(pending.legs.prices().limit_price)
                 || pending.stop_limit_activated) {
                 continue;
             }
             bool activated = false;
             double ignored_fill = 0.0;
             resolve_entry_stop_limit_fill(
-                traversed, pending.is_long, pending.stop_price,
-                pending.limit_price, &ignored_fill, &activated);
+                traversed, pending.is_long, pending.legs.prices().stop_price,
+                pending.legs.prices().limit_price, &ignored_fill, &activated);
             pending.stop_limit_activated = activated;
         }
     };
@@ -585,10 +586,10 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
             if (eligibility == OrderEligibility::Skip) continue;
 
             const bool has_priced_leg =
-                !std::isnan(order.stop_price)
-                || !std::isnan(order.limit_price)
-                || !std::isnan(order.trail_points)
-                || !std::isnan(order.trail_price);
+                !std::isnan(order.legs.prices().stop_price)
+                || !std::isnan(order.legs.prices().limit_price)
+                || !std::isnan(order.legs.prices().trail_points)
+                || !std::isnan(order.legs.prices().trail_price);
             if (!allow_market_orders && !has_priced_leg) {
                 continue;
             }
@@ -609,10 +610,10 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 // or rolls).
                 const bool priced_exit =
                     order.type == OrderType::EXIT
-                    && (!std::isnan(order.stop_price)
-                        || !std::isnan(order.limit_price))
-                    && std::isnan(order.trail_points)
-                    && std::isnan(order.trail_price);
+                    && (!std::isnan(order.legs.prices().stop_price)
+                        || !std::isnan(order.legs.prices().limit_price))
+                    && std::isnan(order.legs.prices().trail_points)
+                    && std::isnan(order.legs.prices().trail_price);
                 if (!priced_exit) {
                     // ENTRY / market-close / trailing cascade order: eligible
                     // ONLY at the remaining extreme waypoints (W1/W2); never
@@ -667,11 +668,13 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 && position_entry_count_ == 1 && pyramid_entries_.size() == 1
                 && pyramiding_ == 0 && order.type == OrderType::EXIT
                 && order.created_bar < bar_index_ && !order.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
-                && (order.created_position_side != PositionSide::FLAT) && !order.dormant_bracket
+                && (order.created_position_side != PositionSide::FLAT)
+                && (order.legs.available(exit_legs::Leg::Stop, bar_index_)
+                    || order.legs.available(exit_legs::Leg::Limit, bar_index_))
                 && !order.from_entry.empty()
                 && order.from_entry == pyramid_entries_.front().entry_id
-                && std::isnan(order.trail_points) && std::isnan(order.trail_price)
-                && std::isnan(order.trail_offset)
+                && std::isnan(order.legs.prices().trail_points) && std::isnan(order.legs.prices().trail_price)
+                && std::isnan(order.legs.prices().trail_offset)
                 && std::isfinite(bar.open) && bar.open == bar.high
                 && bar.open == bar.low && bar.open == bar.close) {
                 double chart_path[4];
@@ -683,18 +686,20 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                     const bool upper = raw == chart_bar->high && tick > raw;
                     const bool lower = raw == chart_bar->low && tick < raw;
                     const bool long_position = position_side_ == PositionSide::LONG;
-                    const bool stop_touch = std::isfinite(order.stop_price)
+                    const bool stop_touch = std::isfinite(order.legs.prices().stop_price)
+                        && order.legs.available(exit_legs::Leg::Stop, bar_index_)
                         && order.leg_activation.stop_ready(position_cycle_seq_, bar_index_)
-                        && ((!long_position && upper && raw < order.stop_price
-                             && order.stop_price <= tick)
-                            || (long_position && lower && tick <= order.stop_price
-                                && order.stop_price < raw));
-                    const bool limit_touch = std::isfinite(order.limit_price)
+                        && ((!long_position && upper && raw < order.legs.prices().stop_price
+                             && order.legs.prices().stop_price <= tick)
+                            || (long_position && lower && tick <= order.legs.prices().stop_price
+                                && order.legs.prices().stop_price < raw));
+                    const bool limit_touch = std::isfinite(order.legs.prices().limit_price)
+                        && order.legs.available(exit_legs::Leg::Limit, bar_index_)
                         && order.leg_activation.limit_ready(position_cycle_seq_, bar_index_)
-                        && ((long_position && upper && raw < order.limit_price
-                             && order.limit_price <= tick)
-                            || (!long_position && lower && tick <= order.limit_price
-                                && order.limit_price < raw));
+                        && ((long_position && upper && raw < order.legs.prices().limit_price
+                             && order.legs.prices().limit_price <= tick)
+                            || (!long_position && lower && tick <= order.legs.prices().limit_price
+                                && order.legs.prices().limit_price < raw));
                     if (stop_touch || limit_touch) {
                         fill = {FillEvaluation::Kind::Fill,
                                 bar_fill_price(raw), limit_touch};
@@ -755,10 +760,10 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 if (pending.type != OrderType::EXIT
                     || pending.from_entry != entry_id || entry_id.empty()
                     || pending.created_bar >= bar_index_
-                    || pending.dormant_bracket || !pending.oca_name.empty()
-                    || !std::isfinite(pending.stop_price)
-                    || !std::isnan(pending.trail_points)
-                    || !std::isnan(pending.trail_price)
+                    || pending.legs.dormant() || !pending.oca_name.empty()
+                    || !std::isfinite(pending.legs.prices().stop_price)
+                    || !std::isnan(pending.legs.prices().trail_points)
+                    || !std::isnan(pending.legs.prices().trail_price)
                     || !std::isfinite(pending.qty) || pending.qty <= 0)
                     return false;
                 reserved += pending.qty;
@@ -770,9 +775,9 @@ BacktestEngine::CoofFillResult BacktestEngine::process_next_pending_order(
                 const PendingOrder& pending = pending_orders_[index];
                 if (candidate.was_trail || candidate.fill.is_limit_fill
                     || !candidate.fill.exit_path_fill
-                    || pending.stop_price > bar.open
-                    || pending.stop_price < bar.close
-                    || std::abs(candidate.fill.fill_price - pending.stop_price)
+                    || pending.legs.prices().stop_price > bar.open
+                    || pending.legs.prices().stop_price < bar.close
+                    || std::abs(candidate.fill.fill_price - pending.legs.prices().stop_price)
                            > kSegmentDenomEps) return false;
             }
             return true;
@@ -1231,12 +1236,12 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
                 || order.created_position_side != PositionSide::FLAT
                 || order.created_after_position_close_in_bar
                 || order.birth.from_fill()
-                || !std::isfinite(order.stop_price)
-                || !std::isnan(order.limit_price)
+                || !std::isfinite(order.legs.prices().stop_price)
+                || !std::isnan(order.legs.prices().limit_price)
                 || order.stop_limit_activated
-                || !std::isnan(order.trail_points)
-                || !std::isnan(order.trail_price)
-                || !std::isnan(order.trail_offset)
+                || !std::isnan(order.legs.prices().trail_points)
+                || !std::isnan(order.legs.prices().trail_price)
+                || !std::isnan(order.legs.prices().trail_offset)
                 || !order.oca_name.empty() || order.oca_type != 0
                 || !std::isfinite(trigger_bar.open)
                 || !std::isfinite(trigger_bar.high)
@@ -1244,7 +1249,7 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
                 || !std::isfinite(trigger_bar.close)
                 || internal::entry_stop_first_touch(
                     trigger_bar, internal::bar_path_uses_high_first(bar),
-                    order.stop_price, order.is_long, &pending_touch)) {
+                    order.legs.prices().stop_price, order.is_long, &pending_touch)) {
                 return;
             }
             continue;
@@ -1253,11 +1258,11 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
         // dormant bracket predates the script. Unknown/old dormancy and
         // close-time holds/reissues retain their existing scheduler.
         const bool opening_decline_bracket = integer_market
-            && order.dormant_reversal_kill_bar == bar_index_
-            && order.dormant_hold_bar == -1
-            && !order.dormant_reissue_pending
-            && std::isnan(order.trail_offset)
-            && std::isfinite(order.stop_price)
+            && order.legs.excluded_bar() == bar_index_
+            && order.legs.hold_bar() == -1
+            && !order.legs.pending_replacement()
+            && std::isnan(order.legs.prices().trail_offset)
+            && std::isfinite(order.legs.prices().stop_price)
             && (std::isnan(order.qty)
                 ? std::isfinite(order.qty_percent)
                     && order.qty_percent >= 100.0 - internal::kFullPercentEps
@@ -1268,12 +1273,12 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
         // unchanged margin machinery actually records a liquidation.
         if (order.type != OrderType::EXIT
             || order.from_entry != pyramid_entries_.front().entry_id
-            || (order.dormant_bracket && !opening_decline_bracket)
-            || order.dormant_reissue_pending
-            || !std::isnan(order.trail_points)
-            || !std::isnan(order.trail_price)
-            || (!std::isfinite(order.limit_price)
-                && !std::isfinite(order.stop_price))) {
+            || (order.legs.dormant() && !opening_decline_bracket)
+            || order.legs.pending_replacement()
+            || !std::isnan(order.legs.prices().trail_points)
+            || !std::isnan(order.legs.prices().trail_price)
+            || (!std::isfinite(order.legs.prices().limit_price)
+                && !std::isfinite(order.legs.prices().stop_price))) {
             return;
         }
     }
@@ -1335,15 +1340,15 @@ void BacktestEngine::process_carried_pooc_short_margin_before_script(const Bar& 
         // The completed old-order pass proved this bracket unfilled. Reject
         // competing entries/closes, foreign/global owners and deferred order
         // lifecycles; none of those transactions is part of this checkpoint.
-        const bool priced = std::isfinite(order.limit_price)
-            || std::isfinite(order.stop_price);
-        const bool trailing = std::isfinite(order.trail_offset)
-            && (std::isfinite(order.trail_points) || std::isfinite(order.trail_price));
+        const bool priced = std::isfinite(order.legs.prices().limit_price)
+            || std::isfinite(order.legs.prices().stop_price);
+        const bool trailing = std::isfinite(order.legs.prices().trail_offset)
+            && (std::isfinite(order.legs.prices().trail_points) || std::isfinite(order.legs.prices().trail_price));
         if (order.type != OrderType::EXIT
             || order.from_entry != pyramid_entries_.front().entry_id
             || order.created_bar >= bar_index_
-            || order.dormant_bracket || order.dormant_reissue_pending
-            || !std::isnan(order.profit_ticks) || !std::isnan(order.loss_ticks)
+            || order.legs.dormant() || order.legs.pending_replacement()
+            || !std::isnan(order.legs.prices().profit_ticks) || !std::isnan(order.legs.prices().loss_ticks)
             || (!priced && !trailing)) {
             return;
         }
@@ -1354,9 +1359,9 @@ void BacktestEngine::process_carried_pooc_short_margin_before_script(const Bar& 
             ? order.qty >= position_qty_
             : std::isnan(order.qty) && std::isfinite(order.qty_percent)
                 && order.qty_percent >= 100.0;
-        if (!full_position || !std::isfinite(order.trail_offset)
-            || !(order.trail_offset > 0.0)
-            || !std::isnan(order.stop_price) || !std::isnan(order.limit_price)) {
+        if (!full_position || !std::isfinite(order.legs.prices().trail_offset)
+            || !(order.legs.prices().trail_offset > 0.0)
+            || !std::isnan(order.legs.prices().stop_price) || !std::isnan(order.legs.prices().limit_price)) {
             return;
         }
         double stop = 0.0, limit = 0.0, activation = 0.0;
@@ -1981,13 +1986,13 @@ bool BacktestEngine::pooc_trail_money_pre_exit_scope(
         || !(exit_path_position > kPathPosEps) || exit_path_position > 3.0 + kPathPosEps
         || order.type != OrderType::EXIT
         || order.from_entry != pyramid_entries_.front().entry_id
-        || order.created_bar >= bar_index_ || order.dormant_bracket
-        || order.dormant_reissue_pending || order.suppress_as_declined_reversal_close
+        || order.created_bar >= bar_index_ || order.legs.dormant()
+        || order.legs.pending_replacement() || order.suppress_as_declined_reversal_close
         || !order.oca_name.empty() || order.oca_type != 0
-        || !std::isnan(order.stop_price) || !std::isnan(order.limit_price)
-        || !std::isnan(order.profit_ticks) || !std::isnan(order.loss_ticks)
-        || !std::isfinite(order.trail_offset) || !(order.trail_offset > 0.0)
-        || (!std::isfinite(order.trail_points) && !std::isfinite(order.trail_price))) {
+        || !std::isnan(order.legs.prices().stop_price) || !std::isnan(order.legs.prices().limit_price)
+        || !std::isnan(order.legs.prices().profit_ticks) || !std::isnan(order.legs.prices().loss_ticks)
+        || !std::isfinite(order.legs.prices().trail_offset) || !(order.legs.prices().trail_offset > 0.0)
+        || (!std::isfinite(order.legs.prices().trail_points) && !std::isfinite(order.legs.prices().trail_price))) {
         return false;
     }
     const bool full_position = std::isfinite(order.qty)
@@ -1999,8 +2004,8 @@ bool BacktestEngine::pooc_trail_money_pre_exit_scope(
         if (&other == &order) continue;
         if (other.type != OrderType::EXIT || other.from_entry.empty()
             || cycle_filled_entry_ids_.count(other.from_entry) != 0
-            || other.created_bar >= bar_index_ || other.dormant_bracket
-            || other.dormant_reissue_pending) return false;
+            || other.created_bar >= bar_index_ || other.legs.dormant()
+            || other.legs.pending_replacement()) return false;
     }
     return true;
 }
@@ -2257,13 +2262,13 @@ void BacktestEngine::revive_position_brackets_after_margin_call_partial(
         if (o.suppress_as_declined_reversal_close) continue;
         if (o.id.size() >= kClosePrefix.size()
             && o.id.compare(0, kClosePrefix.size(), kClosePrefix) == 0) continue;
-        if (!o.dormant_bracket) continue;
+        if (!o.legs.dormant()) continue;
         // Round 9 family V: a dormancy imposed by THIS bar's close-time
         // script (the reversal pair's strategy.close) post-dates the bar's
         // extreme — the pass here models an event that already happened
         // before the script ran. Not revivable on this bar; the pair's fate
         // is decided at the next open (see PendingOrder::dormant_hold_bar).
-        if (o.dormant_hold_bar == bar_index_) continue;
+        if (o.legs.hold_bar() == bar_index_) continue;
         // finding-347: mirror the dormancy predicate — position-cycle
         // provenance, not bucket residency, so a leg orphaned by a sibling's
         // FIFO drain revives with its siblings.
@@ -2276,19 +2281,9 @@ void BacktestEngine::revive_position_brackets_after_margin_call_partial(
         // the re-issue has not happened yet when the extreme is marked (the
         // original is kept even when a same-bar pair close superseded the
         // re-issue's settle, round 9 family V).
-        const double revive_stop = std::isfinite(o.dormant_original_stop_price)
-            ? o.dormant_original_stop_price : o.stop_price;
-        o.dormant_bracket = false;
-        o.dormant_hold_bar = -1;
-        o.dormant_reissue_pending = false;
-        o.dormant_original_stop_price =
-            std::numeric_limits<double>::quiet_NaN();
-        // A revived bracket is whole again: its trail leg rides the
-        // position's extreme (round 10 family AE fields cleared).
-        o.dormant_reversal_kill_bar = -1;
-        o.dormant_trail_best = std::numeric_limits<double>::quiet_NaN();
-        o.dormant_trail_best_start = std::numeric_limits<double>::quiet_NaN();
-        o.dormant_trail_leg_dead = false;
+        const double revive_stop = compat::pine::select_margin_revival_stop(o);
+        apply_leg_action(o, exit_legs::Restore{{exit_legs::Leg::Stop,
+            exit_legs::Leg::Limit, exit_legs::Leg::Trail}});
         // Marketable at the margin-call event price? Whole-position brackets
         // only — the TV-pinned shape: a deferred default leg (qty NaN, 100%)
         // or, round 7 family N mechanism 2 (fast-scalper 07-21 13:30Z, TV
@@ -2337,21 +2332,12 @@ void BacktestEngine::revive_position_brackets_after_margin_call_partial(
 // once the bar's forced-liquidation pass has run, a re-issued bracket that
 // inherited its predecessor's dormancy and was not revived there is the
 // close-time script's fresh order — live from the next bar on.
-void BacktestEngine::settle_dormant_bracket_reissues() {
-    for (PendingOrder& o : pending_orders_) {
-        // Round 9 family V: the close-time hold's stamp lives only through
-        // this bar's pass; from the next open the bracket is plainly dormant
-        // (killed for a declined reversal's bar, purged with an admitted one).
-        o.dormant_hold_bar = -1;
-        if (!o.dormant_reissue_pending) continue;
-        o.dormant_reissue_pending = false;
-        o.dormant_bracket = false;
-        o.dormant_original_stop_price =
-            std::numeric_limits<double>::quiet_NaN();
-        o.dormant_reversal_kill_bar = -1;
-        o.dormant_trail_best = std::numeric_limits<double>::quiet_NaN();
-        o.dormant_trail_best_start = std::numeric_limits<double>::quiet_NaN();
-        o.dormant_trail_leg_dead = false;
+void BacktestEngine::settle_dormant_bracket_reissues(exit_legs::Domain domain) {
+    auto completed = next_leg_event(exit_legs::Phase::AfterMargin);
+    completed.domain = domain;
+    for (PendingOrder& order : pending_orders_) {
+        const auto completion = compat::pine::select_exit_completion(order, completed);
+        if (completion) apply_leg_action(order, *completion, completed);
     }
 }
 
@@ -2799,8 +2785,8 @@ bool BacktestEngine::whole_position_market_close_rests_for_open() const {
         if (o.suppress_as_declined_reversal_close) continue;
         // Rests from a prior bar: a market close fills at this bar's open.
         if (o.created_bar >= bar_index_) continue;
-        if (!std::isnan(o.stop_price) || !std::isnan(o.limit_price)
-            || !std::isnan(o.trail_points) || !std::isnan(o.trail_price)) {
+        if (!std::isnan(o.legs.prices().stop_price) || !std::isnan(o.legs.prices().limit_price)
+            || !std::isnan(o.legs.prices().trail_points) || !std::isnan(o.legs.prices().trail_price)) {
             continue;
         }
         // The whole position: a default-FIFO / close_all full close carries
@@ -3016,18 +3002,14 @@ void BacktestEngine::update_trail_best_for_bar_open(const Bar& bar) {
     // as the position's own trail_best_path_state is snapshotted before this
     // function folds the bar in.
     for (PendingOrder& o : pending_orders_) {
-        if (!o.dormant_bracket || o.type != OrderType::EXIT) continue;
-        if (o.dormant_reversal_kill_bar < 0
-            || o.dormant_reversal_kill_bar >= bar_index_) continue;
-        if (std::isnan(o.trail_points) && std::isnan(o.trail_price)) continue;
-        if (first_fold_this_bar) o.dormant_trail_best_start = o.dormant_trail_best;
-        if (position_side_ == PositionSide::LONG) {
-            if (std::isnan(o.dormant_trail_best) || bar.high > o.dormant_trail_best)
-                o.dormant_trail_best = bar.high;
-        } else if (position_side_ == PositionSide::SHORT) {
-            if (std::isnan(o.dormant_trail_best) || bar.low < o.dormant_trail_best)
-                o.dormant_trail_best = bar.low;
-        }
+        if (!o.legs.dormant() || o.type != OrderType::EXIT) continue;
+        if (o.legs.excluded_bar() < 0
+            || o.legs.excluded_bar() >= bar_index_) continue;
+        if (std::isnan(o.legs.prices().trail_points) && std::isnan(o.legs.prices().trail_price)) continue;
+        if (position_side_ == PositionSide::LONG || position_side_ == PositionSide::SHORT)
+            apply_leg_action(o, exit_legs::Observe{bar.high, bar.low,
+                position_side_ == PositionSide::LONG ? 1 : -1,
+                first_fold_this_bar ? exit_legs::Fold::Prefix : exit_legs::Fold::Continue});
     }
 }
 
@@ -3066,8 +3048,8 @@ void BacktestEngine::sort_exit_siblings_by_path_fill(const Bar& bar) {
             };
             bool a_full = qp(a) >= 100.0 - kFullPercentEps;
             bool b_full = qp(b) >= 100.0 - kFullPercentEps;
-            const bool a_trail = !std::isnan(a.trail_points) || !std::isnan(a.trail_price);
-            const bool b_trail = !std::isnan(b.trail_points) || !std::isnan(b.trail_price);
+            const bool a_trail = !std::isnan(a.legs.prices().trail_points) || !std::isnan(a.legs.prices().trail_price);
+            const bool b_trail = !std::isnan(b.legs.prices().trail_points) || !std::isnan(b.legs.prices().trail_price);
             if (a_trail || b_trail) {
                 if (a_full != b_full) {
                     return a_full;
@@ -3183,49 +3165,29 @@ bool BacktestEngine::default_flat_market_gross_scope_is_live()
 // sees it; anything this one admits reaches the fill-time gate with its own
 // unmodified quantity.
 void BacktestEngine::finalize_default_flat_market_gross_admission() {
+    auto review=begin_market_review(admission::Checkpoint::DefaultGross);
     std::vector<size_t> group;
     group.reserve(2);
     for (size_t i = 0; i < pending_orders_.size(); ++i) {
-        if (pending_orders_[i]
-                .default_flat_market_gross_candidate) {
+        if (compat::pine::awaits_default_review(pending_orders_[i].market_admission)) {
             group.push_back(i);
         }
     }
 
-    if (group.empty()) {
-        for (auto it =
-                 default_flat_market_gross_disqualified_bars_.begin();
-             it != default_flat_market_gross_disqualified_bars_.end();) {
-            if (*it < bar_index_) {
-                it = default_flat_market_gross_disqualified_bars_
-                         .erase(it);
-            } else {
-                ++it;
-            }
-        }
-        return;
-    }
+    if (group.empty()) return;
 
     std::unordered_set<int> candidate_source_bars;
     for (size_t index : group) {
         candidate_source_bars.insert(pending_orders_[index].created_bar);
         // One broker boundary owns one adjudication. An admitted/non-exact
         // order must never be reconsidered on a later bar.
-        pending_orders_[index]
-            .default_flat_market_gross_candidate = false;
+        pending_orders_[index].market_admission.reviewed(
+            review.receipt_for(pending_orders_[index].market_admission));
     }
-
-    auto consume_source_tombstones = [&]() {
-        for (int source_bar : candidate_source_bars) {
-            default_flat_market_gross_disqualified_bars_.erase(
-                source_bar);
-        }
-    };
 
     if (!default_flat_market_gross_scope_is_live()
         || group.size() != 2
         || candidate_source_bars.size() != 1) {
-        consume_source_tombstones();
         return;
     }
 
@@ -3256,22 +3218,22 @@ void BacktestEngine::finalize_default_flat_market_gross_admission() {
     for (size_t i = 0; i < pending_orders_.size(); ++i) {
         if (group_indices.count(i) != 0) continue;
         const PendingOrder& other = pending_orders_[i];
+        const auto prices=admission_current_prices(other);
         const bool same_bar_market_close =
             other.type == OrderType::EXIT
             && other.created_bar == source_bar
             && other.id.rfind("__close__", 0) == 0
             && other.oca_name.empty()
-            && std::isnan(other.limit_price)
-            && std::isnan(other.stop_price)
-            && std::isnan(other.trail_points)
-            && std::isnan(other.trail_price)
-            && std::isnan(other.trail_offset)
+            && std::isnan(prices.limit)
+            && std::isnan(prices.stop)
+            && std::isnan(prices.trail_points)
+            && std::isnan(prices.trail_price)
+            && std::isnan(prices.trail_offset)
             && !other.birth.from_fill()
             && !other.birth.at_terminal_fill()
             && !compat::pine::historical_cascade_reach(other);
         if (!same_bar_market_close) {
-            consume_source_tombstones();
-            return;
+                return;
         }
         if (other.incarnation > first->incarnation
             && other.incarnation < second->incarnation) {
@@ -3294,8 +3256,8 @@ void BacktestEngine::finalize_default_flat_market_gross_admission() {
             && std::isfinite(order.sizing_price)
             && std::isfinite(order.sizing_fx)
             && order.sizing_fx > 0.0
-            && !order.explicit_flat_admission_candidate
-            && !order.paired_flat_market_candidate
+            && !compat::pine::explicit_qualification(order.market_admission)
+            && !compat::pine::awaits_pair_review(order.market_admission)
             && order.paired_flat_market_peer_seq == 0
             && order.oca_name.empty()
             && order.created_bar == source_bar
@@ -3311,9 +3273,8 @@ void BacktestEngine::finalize_default_flat_market_gross_admission() {
             && order.sizing_mark > 0.0;
     };
 
-    const bool source_bar_disqualified =
-        default_flat_market_gross_disqualified_bars_.erase(
-            source_bar) > 0;
+    const auto history=compat::pine::admission_history(market_admission_journal_);
+    const bool source_bar_disqualified=history.default_causes.count(source_bar)!=0;
     if (source_bar_disqualified
         || !eligible(*first)
         || !eligible(*second)
@@ -3392,6 +3353,7 @@ void BacktestEngine::finalize_default_flat_market_gross_admission() {
     if (!(gross_required > equity + equity_guard)) return;
 
     const uint64_t rejected_incarnation = second->incarnation;
+    review.reject(rejected_incarnation);
     invalidate_pending_flat_market_pair(second->created_seq);
     pending_orders_.erase(
         std::remove_if(
@@ -3429,17 +3391,9 @@ void BacktestEngine::finalize_default_flat_market_gross_admission() {
 // calls, magnifier, slippage, custom margin, commission, or non-default risk
 // policy.
 void BacktestEngine::apply_pooc_coof_explicit_flat_market_gross_admission() {
-    for (auto it = pending_flat_market_pair_disqualified_bars_.begin();
-         it != pending_flat_market_pair_disqualified_bars_.end();) {
-        if (*it < bar_index_) {
-            it = pending_flat_market_pair_disqualified_bars_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    const bool source_bar_disqualified =
-        pending_flat_market_pair_disqualified_bars_.find(bar_index_)
-        != pending_flat_market_pair_disqualified_bars_.end();
+    auto review=begin_market_review(admission::Checkpoint::TerminalGross);
+    const auto history=compat::pine::admission_history(market_admission_journal_);
+    const bool source_bar_disqualified=history.pair_causes.count(bar_index_)!=0;
     if (!process_orders_on_close_
         || !calc_on_order_fills_
         || bar_magnifier_enabled_
@@ -3465,7 +3419,7 @@ void BacktestEngine::apply_pooc_coof_explicit_flat_market_gross_admission() {
 
     auto eligible = [&](const PendingOrder& order) {
         return order.type == OrderType::MARKET
-            && order.explicit_flat_admission_candidate
+            && compat::pine::explicit_qualification(order.market_admission)
             && std::isfinite(order.qty)
             && order.qty > kQtyEpsilon
             && (order.qty_type < 0
@@ -3527,6 +3481,7 @@ void BacktestEngine::apply_pooc_coof_explicit_flat_market_gross_admission() {
     if (!(required_margin > equity + equity_guard)) return;
 
     const uint64_t rejected_incarnation = second->incarnation;
+    review.reject(rejected_incarnation);
     invalidate_pending_flat_market_pair(second->created_seq);
     pending_orders_.erase(
         std::remove_if(
@@ -3543,12 +3498,14 @@ void BacktestEngine::apply_pooc_coof_explicit_flat_market_gross_admission() {
 // opposite calls form a pair; larger/other sets are deliberately ordinary.
 // The later call alone receives the pending-aware GROSS admission check.
 void BacktestEngine::finalize_pending_flat_market_pairs(const Bar& bar) {
+    auto review=begin_market_review(admission::Checkpoint::ExplicitPair);
+    auto history=compat::pine::admission_history(market_admission_journal_);
     std::vector<int64_t> rejected_seqs;
     std::unordered_set<int> finalized_bars;
 
     for (size_t seed = 0; seed < pending_orders_.size(); ++seed) {
         PendingOrder& seed_order = pending_orders_[seed];
-        if (!seed_order.paired_flat_market_candidate) continue;
+        if (!compat::pine::awaits_pair_review(seed_order.market_admission)) continue;
         const int source_bar = seed_order.created_bar;
         if (!finalized_bars.insert(source_bar).second) continue;
 
@@ -3561,17 +3518,18 @@ void BacktestEngine::finalize_pending_flat_market_pairs(const Bar& bar) {
                 || order.type == OrderType::ENTRY
                 || order.type == OrderType::RAW_ORDER;
             if (entry_like) ++pending_entry_like_orders;
-            if (order.paired_flat_market_candidate
+            if (compat::pine::awaits_pair_review(order.market_admission)
                 && order.created_bar == source_bar) {
                 group.push_back(i);
             }
         }
         for (size_t i : group) {
-            pending_orders_[i].paired_flat_market_candidate = false;
+            pending_orders_[i].market_admission.reviewed(
+                review.receipt_for(pending_orders_[i].market_admission));
         }
 
         const bool source_bar_disqualified =
-            pending_flat_market_pair_disqualified_bars_.erase(source_bar) > 0;
+            history.pair_causes.erase(source_bar) > 0;
         if (group.size() != 2
             || pending_entry_like_orders != 2
             || source_bar_disqualified
@@ -3617,6 +3575,7 @@ void BacktestEngine::finalize_pending_flat_market_pairs(const Bar& bar) {
             1e-9, std::abs(second->paired_flat_market_signal_equity) * 1e-12);
         if (required_margin
             > second->paired_flat_market_signal_equity + epsilon) {
+            review.reject(second->incarnation);
             rejected_seqs.push_back(second->created_seq);
             continue;
         }
@@ -3657,16 +3616,21 @@ void BacktestEngine::finalize_pending_flat_market_pairs(const Bar& bar) {
                 1e-9,
                 std::abs(buy->paired_flat_market_signal_equity) * 1e-12);
             if (fill_notional > threshold + gap_epsilon) {
+                review.reject(buy->incarnation);
                 rejected_seqs.push_back(buy->created_seq);
                 continue;
             }
         }
 
-        first->paired_flat_market_peer_seq = second->created_seq;
-        first->paired_flat_market_transaction_qty =
-            first->paired_flat_market_own_qty;
-        second->paired_flat_market_peer_seq = first->created_seq;
-        second->paired_flat_market_transaction_qty = gross_qty;
+        const auto first_instruction=review.transaction(first->incarnation,second->incarnation,
+            first->created_seq,second->created_seq,first->paired_flat_market_own_qty);
+        const auto second_instruction=review.transaction(second->incarnation,first->incarnation,
+            second->created_seq,first->created_seq,gross_qty);
+        // The existing settlement kernel consumes these exact resolved facts.
+        first->paired_flat_market_peer_seq=first_instruction.peer_priority;
+        first->paired_flat_market_transaction_qty=first_instruction.transaction_quantity;
+        second->paired_flat_market_peer_seq=second_instruction.peer_priority;
+        second->paired_flat_market_transaction_qty=second_instruction.transaction_quantity;
     }
 
     if (!rejected_seqs.empty()) {
@@ -3679,17 +3643,7 @@ void BacktestEngine::finalize_pending_flat_market_pairs(const Bar& bar) {
                 }),
             pending_orders_.end());
     }
-    // A bar whose candidates were all canceled has no seed above to consume
-    // its tombstone. Once broker processing advances beyond that source bar it
-    // can no longer form a MARKET pair, so prune the stale taint cheaply.
-    for (auto it = pending_flat_market_pair_disqualified_bars_.begin();
-         it != pending_flat_market_pair_disqualified_bars_.end();) {
-        if (*it < bar_index_) {
-            it = pending_flat_market_pair_disqualified_bars_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+
 }
 
 // Sort by the first possible fill point, then by PineScript source order.
@@ -3763,14 +3717,14 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && order.created_position_side == PositionSide::FLAT
                 && order.created_bar < bar_index_
                 && !order.birth.from_fill()
-                && std::isfinite(order.limit_price)
-                && std::isnan(order.stop_price)
-                && std::isnan(order.trail_points)
-                && std::isnan(order.trail_price)
-                && std::isnan(order.trail_offset);
+                && std::isfinite(order.legs.prices().limit_price)
+                && std::isnan(order.legs.prices().stop_price)
+                && std::isnan(order.legs.prices().trail_points)
+                && std::isnan(order.legs.prices().trail_price)
+                && std::isnan(order.legs.prices().trail_offset);
             const bool fills_at_open = pure_limit_parent
-                && (order.is_long ? tick_open <= order.limit_price
-                                  : tick_open >= order.limit_price);
+                && (order.is_long ? tick_open <= order.legs.prices().limit_price
+                                  : tick_open >= order.legs.prices().limit_price);
             if (pure_limit_parent && !fills_at_open) {
                 non_gap_limit_parents.emplace(
                     order.id,
@@ -3802,13 +3756,13 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && exit_children_by_parent[order.from_entry] == 1
                 && order.created_bar >= parent->second.created_bar
                 && parent->second.created_seq < order.created_seq
-                && std::isnan(order.limit_price)
-                && std::isnan(order.stop_price)
-                && std::isnan(order.trail_points)
-                && std::isnan(order.trail_price)
-                && std::isnan(order.trail_offset)
-                && (std::isfinite(order.profit_ticks)
-                    || std::isfinite(order.loss_ticks));
+                && std::isnan(order.legs.prices().limit_price)
+                && std::isnan(order.legs.prices().stop_price)
+                && std::isnan(order.legs.prices().trail_points)
+                && std::isnan(order.legs.prices().trail_price)
+                && std::isnan(order.legs.prices().trail_offset)
+                && (std::isfinite(order.legs.prices().profit_ticks)
+                    || std::isfinite(order.legs.prices().loss_ticks));
             if (exact_relative_child) {
                 relative_limit_child_incarnations.insert(order.incarnation);
             }
@@ -3907,13 +3861,13 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && std::isnan(order.qty)
                 && order.qty_type == -1
                 && default_sizing_shape
-                && std::isnan(order.limit_price)
-                && std::isnan(order.stop_price)
-                && std::isnan(order.trail_points)
-                && std::isnan(order.trail_price)
-                && std::isnan(order.trail_offset)
-                && std::isnan(order.profit_ticks)
-                && std::isnan(order.loss_ticks)
+                && std::isnan(order.legs.prices().limit_price)
+                && std::isnan(order.legs.prices().stop_price)
+                && std::isnan(order.legs.prices().trail_points)
+                && std::isnan(order.legs.prices().trail_price)
+                && std::isnan(order.legs.prices().trail_offset)
+                && std::isnan(order.legs.prices().profit_ticks)
+                && std::isnan(order.legs.prices().loss_ticks)
                 && !order.created_after_position_close_in_bar;
         };
         const auto exact_full_fifo_close_short =
@@ -3926,13 +3880,13 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && !order.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
                 && std::isnan(order.qty)
                 && std::abs(order.qty_percent - 100.0) <= kFullPercentEps
-                && std::isnan(order.limit_price)
-                && std::isnan(order.stop_price)
-                && std::isnan(order.trail_points)
-                && std::isnan(order.trail_price)
-                && std::isnan(order.trail_offset)
-                && std::isnan(order.profit_ticks)
-                && std::isnan(order.loss_ticks)
+                && std::isnan(order.legs.prices().limit_price)
+                && std::isnan(order.legs.prices().stop_price)
+                && std::isnan(order.legs.prices().trail_points)
+                && std::isnan(order.legs.prices().trail_price)
+                && std::isnan(order.legs.prices().trail_offset)
+                && std::isnan(order.legs.prices().profit_ticks)
+                && std::isnan(order.legs.prices().loss_ticks)
                 && !order.reservation_expansion.capture()
                 && !order.suppress_as_declined_reversal_close
                 && std::isfinite(order.suppressed_close_consumed_ledger_qty)
@@ -4044,7 +3998,7 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
             // keep those configurations on the ordinary broker path.
             && slippage_ == 0
             && commission_value_ == 0.0
-            && last_rejected_strategy_entry_call_bar_ != source_bar
+            && compat::pine::last_rejected_command_bar(market_admission_journal_) != source_bar
             && source[0]->created_seq + 1 == source[1]->created_seq
             && source[1]->created_seq + 1 == source[2]->created_seq
             && source[0]->incarnation + 1 == source[1]->incarnation
@@ -4120,13 +4074,13 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 // Round 9 family X: a dormant bracket's stop / limit legs
                 // are dead (finding-311 leg-scoped) — only its trail leg
                 // can still fill, on the path.
-                bool has_stop = !std::isnan(o.stop_price)
-                    && !o.dormant_bracket
+                bool has_stop = !std::isnan(o.legs.prices().stop_price)
+                    && o.legs.available(exit_legs::Leg::Stop, bar_index_)
                     && (!exit_style || o.leg_activation.stop_ready(position_cycle_seq_, bar_index_));
-                bool has_limit = !std::isnan(o.limit_price)
-                    && !o.dormant_bracket
+                bool has_limit = !std::isnan(o.legs.prices().limit_price)
+                    && o.legs.available(exit_legs::Leg::Limit, bar_index_)
                     && (!exit_style || o.leg_activation.limit_ready(position_cycle_seq_, bar_index_));
-                bool has_trail = !std::isnan(o.trail_points) || !std::isnan(o.trail_price);
+                bool has_trail = !std::isnan(o.legs.prices().trail_points) || !std::isnan(o.legs.prices().trail_price);
 
                 if (o.type == OrderType::MARKET
                     || (!has_stop && !has_limit && !has_trail)) {
@@ -4135,21 +4089,21 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
 
                 if (exit_style) {
                     if (position_side_ == PositionSide::LONG) {
-                        if (has_stop && tick_open <= o.stop_price) return 0;
-                        if (has_limit && tick_open >= o.limit_price) return 0;
+                        if (has_stop && tick_open <= o.legs.prices().stop_price) return 0;
+                        if (has_limit && tick_open >= o.legs.prices().limit_price) return 0;
                     } else if (position_side_ == PositionSide::SHORT) {
-                        if (has_stop && tick_open >= o.stop_price) return 0;
-                        if (has_limit && tick_open <= o.limit_price) return 0;
+                        if (has_stop && tick_open >= o.legs.prices().stop_price) return 0;
+                        if (has_limit && tick_open <= o.legs.prices().limit_price) return 0;
                     }
                     return 1;
                 }
 
                 if (o.is_long) {
-                    if (has_stop && tick_open >= o.stop_price) return 0;
-                    if (has_limit && tick_open <= o.limit_price) return 0;
+                    if (has_stop && tick_open >= o.legs.prices().stop_price) return 0;
+                    if (has_limit && tick_open <= o.legs.prices().limit_price) return 0;
                 } else {
-                    if (has_stop && tick_open <= o.stop_price) return 0;
-                    if (has_limit && tick_open >= o.limit_price) return 0;
+                    if (has_stop && tick_open <= o.legs.prices().stop_price) return 0;
+                    if (has_limit && tick_open >= o.legs.prices().limit_price) return 0;
                 }
                 return 1;
             };
@@ -4194,10 +4148,10 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                         if (o.type != OrderType::EXIT) return 0;
                         if (!order_is_exit_style(o, position_side_)) return 0;
                         if (o.suppress_as_declined_reversal_close) return 0;
-                        const bool priced = !std::isnan(o.stop_price)
-                            || !std::isnan(o.limit_price)
-                            || !std::isnan(o.trail_points)
-                            || !std::isnan(o.trail_price);
+                        const bool priced = !std::isnan(o.legs.prices().stop_price)
+                            || !std::isnan(o.legs.prices().limit_price)
+                            || !std::isnan(o.legs.prices().trail_points)
+                            || !std::isnan(o.legs.prices().trail_price);
                         return priced ? 1 : 0;
                     };
                     const int ga = gapped_bracket_rank(a);
@@ -4235,24 +4189,24 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 if (ex.type != OrderType::EXIT) return -1;
                 if (ex.from_entry.empty() || ex.from_entry != add.id) return -1;
                 // The add must be a pure market order (no priced/trail leg).
-                if (!std::isnan(add.stop_price) || !std::isnan(add.limit_price)
-                    || !std::isnan(add.trail_points)
-                    || !std::isnan(add.trail_price)) {
+                if (!std::isnan(add.legs.prices().stop_price) || !std::isnan(add.legs.prices().limit_price)
+                    || !std::isnan(add.legs.prices().trail_points)
+                    || !std::isnan(add.legs.prices().trail_price)) {
                     return -1;
                 }
-                bool ex_stop = !std::isnan(ex.stop_price);
-                bool ex_limit = !std::isnan(ex.limit_price);
-                bool ex_trail = !std::isnan(ex.trail_points)
-                    || !std::isnan(ex.trail_price);
+                bool ex_stop = !std::isnan(ex.legs.prices().stop_price);
+                bool ex_limit = !std::isnan(ex.legs.prices().limit_price);
+                bool ex_trail = !std::isnan(ex.legs.prices().trail_points)
+                    || !std::isnan(ex.legs.prices().trail_price);
                 if (ex_trail || (!ex_stop && !ex_limit)) return -1;
                 int exit_prio;
                 if (position_side_ == PositionSide::LONG) {
-                    if (ex_stop && tick_open <= ex.stop_price) exit_prio = 2;
-                    else if (ex_limit && tick_open >= ex.limit_price) exit_prio = 3;
+                    if (ex_stop && tick_open <= ex.legs.prices().stop_price) exit_prio = 2;
+                    else if (ex_limit && tick_open >= ex.legs.prices().limit_price) exit_prio = 3;
                     else return -1;   // not gapped through a leg at the open
                 } else {  // SHORT
-                    if (ex_stop && tick_open >= ex.stop_price) exit_prio = 1;
-                    else if (ex_limit && tick_open <= ex.limit_price) exit_prio = 3;
+                    if (ex_stop && tick_open >= ex.legs.prices().stop_price) exit_prio = 1;
+                    else if (ex_limit && tick_open <= ex.legs.prices().limit_price) exit_prio = 3;
                     else return -1;
                 }
                 int add_prio = add.is_long ? 1 : 2;
@@ -4281,9 +4235,9 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
             // close-driven exit's deferred-flip carry.
             auto is_full_market_exit = [&](const PendingOrder& o) {
                 if (o.type != OrderType::EXIT) return false;
-                bool has_stop = !std::isnan(o.stop_price);
-                bool has_limit = !std::isnan(o.limit_price);
-                bool has_trail = !std::isnan(o.trail_points) || !std::isnan(o.trail_price);
+                bool has_stop = !std::isnan(o.legs.prices().stop_price);
+                bool has_limit = !std::isnan(o.legs.prices().limit_price);
+                bool has_trail = !std::isnan(o.legs.prices().trail_points) || !std::isnan(o.legs.prices().trail_price);
                 if (has_stop || has_limit || has_trail) return false;
                 double qp = std::isnan(o.qty_percent) ? 100.0 : o.qty_percent;
                 return qp >= 100.0 - kFullPercentEps;
@@ -4614,8 +4568,8 @@ bool BacktestEngine::prearmed_market_parent_bracket_gaps_at_open(
         || order.birth.from_fill()
         || order.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
         || order.qty_percent < 100.0 - kFullPercentEps
-        || (!std::isfinite(order.stop_price)
-            && !std::isfinite(order.limit_price))) {
+        || (!std::isfinite(order.legs.prices().stop_price)
+            && !std::isfinite(order.legs.prices().limit_price))) {
         return false;
     }
     // A trail leg (trail_points / trail_price) on the same bracket does not
@@ -4649,14 +4603,16 @@ bool BacktestEngine::prearmed_market_parent_bracket_gaps_at_open(
     const bool live_long = position_side_ == PositionSide::LONG;
     // Apply readiness before precedence so a held stop cannot hide a ready
     // limit or acquire a fill merely because an independent trail is present.
-    const bool stop_gapped = std::isfinite(order.stop_price)
+    const bool stop_gapped = std::isfinite(order.legs.prices().stop_price)
+        && order.legs.available(exit_legs::Leg::Stop, bar_index_)
         && order.leg_activation.stop_ready(position_cycle_seq_, bar_index_)
-        && (live_long ? bar.open <= order.stop_price
-                      : bar.open >= order.stop_price);
-    const bool limit_marketable = std::isfinite(order.limit_price)
+        && (live_long ? bar.open <= order.legs.prices().stop_price
+                      : bar.open >= order.legs.prices().stop_price);
+    const bool limit_marketable = std::isfinite(order.legs.prices().limit_price)
+        && order.legs.available(exit_legs::Leg::Limit, bar_index_)
         && order.leg_activation.limit_ready(position_cycle_seq_, bar_index_)
-        && (live_long ? bar.open >= order.limit_price
-                      : bar.open <= order.limit_price);
+        && (live_long ? bar.open >= order.legs.prices().limit_price
+                      : bar.open <= order.legs.prices().limit_price);
     if (!stop_gapped && !limit_marketable) return false;
     if (limit_leg != nullptr) *limit_leg = limit_marketable && !stop_gapped;
 
@@ -4770,8 +4726,8 @@ void BacktestEngine::compact_filled_pending_orders(
         bool resting_limit_entry_carry =
             pending_orders_[read].type == OrderType::ENTRY
             && pending_orders_[read].created_bar < bar_index_
-            && !std::isnan(pending_orders_[read].limit_price)
-            && std::isnan(pending_orders_[read].stop_price);
+            && !std::isnan(pending_orders_[read].legs.prices().limit_price)
+            && std::isnan(pending_orders_[read].legs.prices().stop_price);
         // Mirror classify_order_eligibility's M1v2 narrowed co-queue exemption
         // (they MUST stay in lockstep): a same-direction entry co-queued on the
         // close's own call bar survives ONLY if it was within the pyramiding cap
@@ -4808,6 +4764,7 @@ void BacktestEngine::compact_filled_pending_orders(
         }
     }
     pending_orders_.resize(write);
+    reclaim_market_admission();
 }
 
 
@@ -4833,7 +4790,7 @@ bool BacktestEngine::flat_dual_stop_opposite_is_live(
         const PendingOrder& order, bool flat_dual_stop_pair) const {
     return flat_dual_stop_pair
         && order.type == OrderType::ENTRY
-        && std::isfinite(order.stop_price) && std::isnan(order.limit_price)
+        && std::isfinite(order.legs.prices().stop_price) && std::isnan(order.legs.prices().limit_price)
         && order.created_position_side == PositionSide::FLAT
         && !order.created_after_position_close_in_bar
         && position_side_ != PositionSide::FLAT
@@ -4847,8 +4804,8 @@ bool BacktestEngine::use_default_stop_placement_qty(
         const PendingOrder& order, double fill_price,
         bool flat_dual_stop_pair) const {
     if (order.type != OrderType::ENTRY
-        || std::isnan(order.stop_price)
-        || !std::isnan(order.limit_price)
+        || std::isnan(order.legs.prices().stop_price)
+        || !std::isnan(order.legs.prices().limit_price)
         || !std::isnan(order.qty)
         || order.affordability_close_only) {
         return false;
@@ -4899,7 +4856,7 @@ int BacktestEngine::probe_fill_qty(int index, double fill_price, double* qty,
     // this only moves the slippage on a default percent/cash sizing basis.
     const bool limit_route =
         (o.type == OrderType::ENTRY || o.type == OrderType::RAW_ORDER)
-        && !std::isnan(o.limit_price);
+        && !std::isnan(o.legs.prices().limit_price);
     const double sized_price = limit_route
         ? apply_limit_fill(fill_price, o.is_long)
         : apply_slippage(fill_price, o.is_long);
@@ -5025,7 +4982,7 @@ int BacktestEngine::probe_fill_qty(int index, double fill_price, double* qty,
             && (o.qty_type < 0
                 || o.qty_type == static_cast<int>(QtyType::FIXED));
         const bool priced_entry =
-            !std::isnan(o.stop_price) || !std::isnan(o.limit_price);
+            !std::isnan(o.legs.prices().stop_price) || !std::isnan(o.legs.prices().limit_price);
         const double fixed_own_qty = explicit_fixed_qty
             ? std::abs(apply_qty_step(o.qty))
             : std::numeric_limits<double>::quiet_NaN();
@@ -5070,8 +5027,8 @@ int BacktestEngine::pending_order_effective_levels(int index, double* stop,
     }
     const PendingOrder& o = pending_orders_[static_cast<size_t>(index)];
     const double nan = std::numeric_limits<double>::quiet_NaN();
-    *stop = o.stop_price;
-    *limit = o.limit_price;
+    *stop = o.legs.prices().stop_price;
+    *limit = o.legs.prices().limit_price;
     *trail_activation = nan;
     // The offsets resolve against the live position exactly where the fill
     // path resolves them: materialize_relative_exit_prices_for_live_position
@@ -5089,25 +5046,25 @@ int BacktestEngine::pending_order_effective_levels(int index, double* stop,
     const bool is_long = position_side_ == PositionSide::LONG;
     const double dir = is_long ? 1.0 : -1.0;
     if (o.type == OrderType::EXIT && resolved) {
-        if (std::isnan(o.limit_price) && !std::isnan(o.profit_ticks)) {
+        if (std::isnan(o.legs.prices().limit_price) && !std::isnan(o.legs.prices().profit_ticks)) {
             *limit = level_on_price_grid(
-                position_entry_price_ + dir * o.profit_ticks * syminfo_mintick_);
+                position_entry_price_ + dir * o.legs.prices().profit_ticks * syminfo_mintick_);
         }
-        if (std::isnan(o.stop_price) && !std::isnan(o.loss_ticks)) {
+        if (std::isnan(o.legs.prices().stop_price) && !std::isnan(o.legs.prices().loss_ticks)) {
             *stop = level_on_price_grid(
-                position_entry_price_ - dir * o.loss_ticks * syminfo_mintick_);
+                position_entry_price_ - dir * o.legs.prices().loss_ticks * syminfo_mintick_);
         }
     }
-    if (!std::isnan(o.trail_points)) {
+    if (!std::isnan(o.legs.prices().trail_points)) {
         if (resolved) {
-            const double ticks = internal::trail_points_to_ticks(o.trail_points);
+            const double ticks = internal::trail_points_to_ticks(o.legs.prices().trail_points);
             *trail_activation = internal::snap_trail_level_to_tick_grid(
                 is_long ? position_entry_price_ + ticks * syminfo_mintick_
                         : position_entry_price_ - ticks * syminfo_mintick_,
                 syminfo_mintick_);
         }
     } else {
-        *trail_activation = o.trail_price;
+        *trail_activation = o.legs.prices().trail_price;
     }
     return 0;
 }
@@ -5200,8 +5157,8 @@ bool BacktestEngine::stop_entry_margin_admission_declines(
         const PendingOrder& order, double fill_price, const Bar& /*bar*/,
         bool flat_dual_stop_pair) const {
     if (order.type != OrderType::ENTRY
-        || std::isnan(order.stop_price)
-        || !std::isnan(order.limit_price)
+        || std::isnan(order.legs.prices().stop_price)
+        || !std::isnan(order.legs.prices().limit_price)
         || order.affordability_close_only) {
         return false;
     }
@@ -5300,7 +5257,9 @@ void BacktestEngine::apply_filled_order_to_state(
     // Round 9 family X: a dormant order whose TRAIL leg is live fills
     // through this kernel like any other trail exit (its stop / limit were
     // masked when the candidate was evaluated).
-    if (order.dormant_bracket && !dormant_bracket_trail_leg_live(order)) {
+    if (order.legs.suspended(exit_legs::Leg::Stop)
+        && order.legs.suspended(exit_legs::Leg::Limit)
+        && !dormant_bracket_trail_leg_live(order)) {
         return;
     }
     if (order.type == OrderType::MARKET || order.type == OrderType::ENTRY) {
@@ -5947,7 +5906,7 @@ void BacktestEngine::apply_filled_order_to_state(
         //     checks above and skip this gap-only decline. The old blanket
         //     claim that a POOC shortfall must be zero was too strong.
         //     Other classes keep the established on-tick gap checks.
-        if (order.opening_affordability_exemption_candidate
+        if (compat::pine::opening_qualification(order.market_admission)
             && position_side_ == PositionSide::FLAT
             && !same_dir && !reversal
             && order.type == OrderType::MARKET) {
@@ -6144,7 +6103,7 @@ void BacktestEngine::apply_filled_order_to_state(
     // fill moves the frozen GROSS transaction and keeps the pinned pair
     // admission below (test_dual_entry_placement_sizing).
     const bool paired_flat_market_fill_admission =
-        order.explicit_flat_admission_candidate
+        compat::pine::explicit_qualification(order.market_admission)
         && order.type == OrderType::MARKET
         && pending_flat_market_pair_is_live(order);
     if (order.type == OrderType::MARKET
@@ -6325,9 +6284,9 @@ void BacktestEngine::apply_filled_order_to_state(
     // boundary (open / close) where the boundary sampling already covers
     // the trade's bars, so the flag stays false for them.
     fold_exit_path_extremes_ =
-        !std::isnan(order.stop_price) || !std::isnan(order.limit_price)
-        || !std::isnan(order.trail_points) || !std::isnan(order.trail_price)
-        || !std::isnan(order.trail_offset);
+        !std::isnan(order.legs.prices().stop_price) || !std::isnan(order.legs.prices().limit_price)
+        || !std::isnan(order.legs.prices().trail_points) || !std::isnan(order.legs.prices().trail_price)
+        || !std::isnan(order.legs.prices().trail_offset);
     // Route LIMIT-triggered fills onto the unslipped limit-or-better
     // price path (apply_fill_slippage). RAII guard scoped strictly to the
     // dispatch block below: the intraday-cap synthetic close further down
@@ -6347,9 +6306,9 @@ void BacktestEngine::apply_filled_order_to_state(
         // TRAIL fills retrace exactly trail_offset from the armed peak, so
         // peak = fill +/- offset — a pre-fill favorable excursion of the
         // closing trade that no bar-boundary sample ever sees.
-        double off = std::isnan(order.trail_offset)
+        double off = std::isnan(order.legs.prices().trail_offset)
                          ? 0.0
-                         : internal::trail_offset_to_ticks(order.trail_offset)
+                         : internal::trail_offset_to_ticks(order.legs.prices().trail_offset)
                                * syminfo_mintick_;
         fold_exit_trail_peak_ = (position_side_ == PositionSide::LONG)
                                     ? fill_price + off
@@ -6383,12 +6342,12 @@ void BacktestEngine::apply_filled_order_to_state(
             // bracket scans, and a reversal remains linear in queue size.
             std::unordered_map<std::string, int64_t> full_bracket_child_seq;
             for (const PendingOrder& child : pending_orders_) {
-                const bool actionable = !std::isnan(child.limit_price)
-                    || !std::isnan(child.stop_price)
-                    || !std::isnan(child.trail_points)
-                    || !std::isnan(child.trail_price)
-                    || !std::isnan(child.profit_ticks)
-                    || !std::isnan(child.loss_ticks);
+                const bool actionable = !std::isnan(child.legs.prices().limit_price)
+                    || !std::isnan(child.legs.prices().stop_price)
+                    || !std::isnan(child.legs.prices().trail_points)
+                    || !std::isnan(child.legs.prices().trail_price)
+                    || !std::isnan(child.legs.prices().profit_ticks)
+                    || !std::isnan(child.legs.prices().loss_ticks);
                 const double qp = std::isnan(child.qty_percent)
                     ? 100.0 : child.qty_percent;
                 if (child.type != OrderType::EXIT
@@ -6508,12 +6467,12 @@ void BacktestEngine::apply_filled_order_to_state(
             pyramid_entries_.front().ordinary_market_open = true;
         }
         if (order.type == OrderType::ENTRY
-            && std::isfinite(order.stop_price)
-            && std::isnan(order.limit_price)
+            && std::isfinite(order.legs.prices().stop_price)
+            && std::isnan(order.legs.prices().limit_price)
             && !order.stop_limit_activated
-            && std::isnan(order.trail_points)
-            && std::isnan(order.trail_price)
-            && std::isnan(order.trail_offset)
+            && std::isnan(order.legs.prices().trail_points)
+            && std::isnan(order.legs.prices().trail_price)
+            && std::isnan(order.legs.prices().trail_offset)
             && order.oca_name.empty() && order.oca_type == 0
             && !process_orders_on_close_ && !calc_on_order_fills_
             && !bar_magnifier_enabled_ && !coof_scheduler_active_
@@ -6725,7 +6684,7 @@ void BacktestEngine::apply_filled_order_to_state(
             // are queued without a commission (round 7 family M).
             const bool frozen_all_in_true_flat_exemption =
                 successful_fresh_open
-                && order.opening_affordability_exemption_candidate
+                && compat::pine::opening_qualification(order.market_admission)
                 && order.type == OrderType::MARKET
                 && std::isnan(order.qty)
                 && std::isfinite(order.frozen_default_qty)
@@ -6957,17 +6916,17 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
     for (const PendingOrder& other : pending_orders_) {
         if (same_pending_order(other, order)) continue;
         if (other.type == OrderType::EXIT) {
-            const bool bracket = std::isfinite(other.stop_price)
-                || std::isfinite(other.limit_price)
-                || std::isfinite(other.profit_ticks)
-                || std::isfinite(other.loss_ticks);
+            const bool bracket = std::isfinite(other.legs.prices().stop_price)
+                || std::isfinite(other.legs.prices().limit_price)
+                || std::isfinite(other.legs.prices().profit_ticks)
+                || std::isfinite(other.legs.prices().loss_ticks);
             if (other.from_entry.empty() || other.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
                 || !std::isnan(other.qty) || other.qty_percent != 100
                 || !bracket || other.suppress_as_declined_reversal_close
                 || !other.oca_name.empty()
-                || !std::isnan(other.trail_points)
-                || !std::isnan(other.trail_price)
-                || !std::isnan(other.trail_offset)) return false;
+                || !std::isnan(other.legs.prices().trail_points)
+                || !std::isnan(other.legs.prices().trail_price)
+                || !std::isnan(other.legs.prices().trail_offset)) return false;
             continue;
         }
         // A competing earlier entry, other direction, explicit size, or
@@ -7287,7 +7246,7 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
         && (order.qty_type < 0
             || order.qty_type == static_cast<int>(QtyType::FIXED));
     const bool priced_entry =
-        !std::isnan(order.stop_price) || !std::isnan(order.limit_price);
+        !std::isnan(order.legs.prices().stop_price) || !std::isnan(order.legs.prices().limit_price);
     const double fixed_own_qty = explicit_fixed_qty
         ? std::abs(apply_qty_step(order.qty))
         : std::numeric_limits<double>::quiet_NaN();
@@ -7391,24 +7350,24 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
                 // same-bar bracket in.
                 const Bar trigger_bar = broker_trigger_bar(bar);
                 const bool high_first = internal::bar_path_uses_high_first(bar);
-                if (!std::isnan(order.stop_price)
-                    && std::isnan(order.limit_price)) {
+                if (!std::isnan(order.legs.prices().stop_price)
+                    && std::isnan(order.legs.prices().limit_price)) {
                     double entry_path_position = 0.0;
                     if (internal::entry_stop_first_touch(
-                            trigger_bar, high_first, order.stop_price,
+                            trigger_bar, high_first, order.legs.prices().stop_price,
                             order.is_long, &entry_path_position)) {
                         pyramid_entries_.back().entry_path_position =
                             entry_path_position;
                     }
-                } else if (std::isnan(order.stop_price)
-                           && !std::isnan(order.limit_price)) {
+                } else if (std::isnan(order.legs.prices().stop_price)
+                           && !std::isnan(order.legs.prices().limit_price)) {
                     double entry_path_position = 0.0;
                     const bool fills_at_open = order.is_long
-                        ? trigger_bar.open <= order.limit_price
-                        : trigger_bar.open >= order.limit_price;
+                        ? trigger_bar.open <= order.legs.prices().limit_price
+                        : trigger_bar.open >= order.legs.prices().limit_price;
                     if (fills_at_open
                         || internal::first_touch_position(
-                            trigger_bar, high_first, order.limit_price,
+                            trigger_bar, high_first, order.legs.prices().limit_price,
                             &entry_path_position)) {
                         pyramid_entries_.back().entry_path_position =
                             entry_path_position;
@@ -7727,13 +7686,13 @@ void BacktestEngine::reconcile_deferred_layered_exits(
             // compact it at the caller's normal safe point.
             o.qty = 0.0;
             o.qty_percent = 0.0;
-            o.limit_price = std::numeric_limits<double>::quiet_NaN();
-            o.stop_price = std::numeric_limits<double>::quiet_NaN();
-            o.profit_ticks = std::numeric_limits<double>::quiet_NaN();
-            o.loss_ticks = std::numeric_limits<double>::quiet_NaN();
-            o.trail_points = std::numeric_limits<double>::quiet_NaN();
-            o.trail_price = std::numeric_limits<double>::quiet_NaN();
-            o.trail_offset = std::numeric_limits<double>::quiet_NaN();
+            o.legs.set_limit_price(std::numeric_limits<double>::quiet_NaN());
+            o.legs.set_stop_price(std::numeric_limits<double>::quiet_NaN());
+            o.legs.set_profit_ticks(std::numeric_limits<double>::quiet_NaN());
+            o.legs.set_loss_ticks(std::numeric_limits<double>::quiet_NaN());
+            o.legs.set_trail_points(std::numeric_limits<double>::quiet_NaN());
+            o.legs.set_trail_price(std::numeric_limits<double>::quiet_NaN());
+            o.legs.set_trail_offset(std::numeric_limits<double>::quiet_NaN());
             zero_reservation_incarnations.push_back(o.incarnation);
             continue;
         }
@@ -7783,7 +7742,7 @@ void BacktestEngine::apply_raw_order_fill(PendingOrder& order, double fill_price
         id_unclosed_qty_[order.id] += qty;
         cycle_filled_entry_ids_.insert(order.id);
         bind_retained_exit_activations();
-        if (!std::isnan(order.stop_price) || !std::isnan(order.limit_price)) {
+        if (!std::isnan(order.legs.prices().stop_price) || !std::isnan(order.legs.prices().limit_price)) {
             set_entry_fill_excursion_masks(pyramid_entries_.back(), current_bar_, fill_price);
         }
         trail_best_path_state = trail_best_price_;
@@ -7810,8 +7769,8 @@ void BacktestEngine::apply_raw_order_fill(PendingOrder& order, double fill_price
             // does not carry an explicit qty_type and lacks the
             // execute_market_entry preamble (carry consumption, risk
             // gating, etc.) that the high-level helper assumes.
-            bool is_priced_entry = !std::isnan(order.limit_price)
-                                   || !std::isnan(order.stop_price);
+            bool is_priced_entry = !std::isnan(order.legs.prices().limit_price)
+                                   || !std::isnan(order.legs.prices().stop_price);
             bool flat_armed_priced =
                 is_priced_entry && order.created_position_side == PositionSide::FLAT;
             bool pre_armed_opposite_priced =
@@ -7868,13 +7827,13 @@ void BacktestEngine::materialize_relative_exit_prices_for_live_position() {
             && cycle_filled_entry_ids_.count(order.from_entry) == 0) {
             continue;
         }
-        if (std::isnan(order.limit_price) && !std::isnan(order.profit_ticks)) {
-            order.limit_price = level_on_price_grid(
-                position_entry_price_ + dir * order.profit_ticks * syminfo_mintick_);
+        if (std::isnan(order.legs.prices().limit_price) && !std::isnan(order.legs.prices().profit_ticks)) {
+            order.legs.set_limit_price(level_on_price_grid(
+                position_entry_price_ + dir * order.legs.prices().profit_ticks * syminfo_mintick_));
         }
-        if (std::isnan(order.stop_price) && !std::isnan(order.loss_ticks)) {
-            order.stop_price = level_on_price_grid(
-                position_entry_price_ - dir * order.loss_ticks * syminfo_mintick_);
+        if (std::isnan(order.legs.prices().stop_price) && !std::isnan(order.legs.prices().loss_ticks)) {
+            order.legs.set_stop_price(level_on_price_grid(
+                position_entry_price_ - dir * order.legs.prices().loss_ticks * syminfo_mintick_));
         }
     }
 }
@@ -7965,92 +7924,24 @@ bool BacktestEngine::dormant_bracket_trail_leg_live(const PendingOrder& o) const
     // declined at the 22:30 open; TV holds through the 22:30 crash and exits
     // at the 22:45 re-issue @2553.52; 5d73b5d fired at the 2599.44 activation
     // on 22:30). AAPL/XAUUSD/F fire on a LATER bar, unaffected.
-    return o.dormant_bracket
+    return o.legs.dormant()
         && o.type == OrderType::EXIT
-        && !o.dormant_trail_leg_dead
-        && o.dormant_reversal_kill_bar != bar_index_
-        && (!std::isnan(o.trail_points) || !std::isnan(o.trail_price));
+        && o.legs.available(exit_legs::Leg::Trail, bar_index_)
+        && (!std::isnan(o.legs.prices().trail_points) || !std::isnan(o.legs.prices().trail_price));
 }
 
 void BacktestEngine::mark_position_brackets_dormant_on_declined_reversal(const Bar& bar) {
     if (position_side_ == PositionSide::FLAT) return;
-    // Round 7 family N mechanism 2 (note log-20260905t112259z-33f32db4; lab
-    // tv tape scratchpad/r7/pins/aapl15-mcopen1-stop-algoai + the algoai
-    // probe's 10-30 13:30Z rows): on a bar whose open carried BOTH the
-    // finding-430 margin slice and a declined all-in reversal, TradingView's
-    // chronology is decline -> brackets dormant -> open slice -> REVIVE-B, so
-    // the standing stop is live for the rest of the bar and fills at its
-    // level (1 @271.96 'Margin call', then 'X' 2814 @273.69 — the same rows
-    // the tape prints with no reversal at all). The engine's open slice runs
-    // at the broker-open boundary before the order loop reaches the
-    // reversal, so its revive found nothing dormant and this kill then
-    // silenced the stop for the bar (176 @274.11 at the cascade and a
-    // next-bar close). The kill and the revive cancel: leave the brackets
-    // live. A marketable-at-open bracket is filled by the order loop itself.
-    if (open_margin_slice_bar_ == bar_index_) return;
-    // The live position's entry ids (pyramid lots) — a bracket is "standing"
-    // when its from_entry names one of them, or when it is a global
-    // (from_entry-less) exit. Stale exits bound to a not-yet-filled entry id
-    // (e.g. the declined reversal's own strategy.exit) are NOT standing
-    // brackets and stay untouched (the #147 stale-exit family).
-    for (PendingOrder& o : pending_orders_) {
-        if (o.type != OrderType::EXIT) continue;
-        if (o.suppress_as_declined_reversal_close) continue;
-        // strategy.close instructions (targeted "__close__X" AND the bare
-        // "__close__" close_all) are NOT brackets — never dormant.
-        if (o.id.size() >= kClosePrefix.size()
-            && o.id.compare(0, kClosePrefix.size(), kClosePrefix) == 0) continue;
-        // Only priced strategy.exit brackets (stop/limit/trail legs) die.
-        const bool priced = !std::isnan(o.stop_price)
-            || !std::isnan(o.limit_price)
-            || !std::isnan(o.trail_points)
-            || !std::isnan(o.trail_price);
-        if (!priced) continue;
-        // finding-347: a standing bracket is one whose from_entry filled in
-        // THIS position cycle (or a global from_entry-less exit) — not one
-        // whose bucket still holds units. A leg orphaned by a sibling's FIFO
-        // drain is still standing and must go dormant with its siblings.
-        const bool bound = o.from_entry.empty()
-            || cycle_filled_entry_ids_.count(o.from_entry) != 0;
-        if (!bound) continue;
-        o.dormant_bracket = true;
-        // The decline is TradingView's own kill at this bar's open — a
-        // margin-call slice at this bar's extreme revives it (round 7 family
-        // M mechanism 2a), unlike a close-time pair hold (round 9 family V).
-        o.dormant_hold_bar = -1;
-        // A decline that comes AFTER a same-bar re-issue (the POOC step-4
-        // shape) kills the fresh order outright: it must not go live at the
-        // bar's end on the strength of the re-issue it superseded.
-        o.dormant_reissue_pending = false;
-        o.dormant_original_stop_price =
-            std::numeric_limits<double>::quiet_NaN();
-        // Round 9 family X: the bar the decline killed this bracket on. Its
-        // trail leg is held for the rest of THIS bar and resumes next bar
-        // (dormant_bracket_trail_leg_live).
-        o.dormant_reversal_kill_bar = bar_index_;
-        // Round 10 family AE (PendingOrder::dormant_trail_best /
-        // dormant_trail_leg_dead): the surviving trail leg restarts from the
-        // position's extreme BEFORE this bar — the decline bar's own path
-        // never arms it — and a leg whose activation this bar's open already
-        // sits past dies with the stop and limit legs.
-        const bool has_trail = !std::isnan(o.trail_points) || !std::isnan(o.trail_price);
-        if (!has_trail) continue;
-        o.dormant_trail_best = trail_best_before_bar_index_ == bar_index_
-            ? trail_best_before_bar_ : trail_best_price_;
-        o.dormant_trail_best_start = o.dormant_trail_best;
-        const bool is_long = position_side_ == PositionSide::LONG;
-        double activation = o.trail_price;
-        if (!std::isnan(o.trail_points)) {
-            const double ticks = internal::trail_points_to_ticks(o.trail_points);
-            activation = internal::snap_trail_level_to_tick_grid(
-                is_long ? position_entry_price_ + ticks * syminfo_mintick_
-                        : position_entry_price_ - ticks * syminfo_mintick_,
-                syminfo_mintick_);
-        }
-        if (std::isfinite(activation) && std::isfinite(bar.open)
-            && (is_long ? bar.open >= activation : bar.open <= activation)) {
-            o.dormant_trail_leg_dead = true;
-        }
+    const auto cause = next_leg_event();
+    for (PendingOrder& order : pending_orders_) {
+        const bool standing = order.from_entry.empty()
+            || cycle_filled_entry_ids_.count(order.from_entry) != 0;
+        const auto selected = compat::pine::select_exit_suspension(order,
+            {cause, position_side_ == PositionSide::LONG ? 1 : -1,
+             position_entry_price_, syminfo_mintick_, bar.open,
+             trail_best_before_bar_index_ == bar_index_ ? trail_best_before_bar_ : trail_best_price_,
+             open_margin_slice_bar_ == bar_index_, standing});
+        if (selected) apply_leg_action(order, *selected, cause);
     }
 }
 
@@ -8076,7 +7967,7 @@ double BacktestEngine::pooc_short_exit_trigger_close(
         && order.type == OrderType::EXIT && !order.is_long
         && order.created_bar == bar_index_ && !order.birth.from_fill()
         && (order.replaced_order_incarnation != 0)
-        && (order.created_position_side != PositionSide::FLAT) && !order.dormant_bracket
+        && (order.created_position_side != PositionSide::FLAT) && !order.legs.dormant()
         && !order.from_entry.empty()
         && order.from_entry == pyramid_entries_.front().entry_id
         && order.quantity_request.requests_all()
@@ -8084,8 +7975,8 @@ double BacktestEngine::pooc_short_exit_trigger_close(
         && std::isfinite(order.qty)
         && std::abs(order.qty - position_qty_) <= kQtyEpsilon
         && order.oca_name.empty()
-        && std::isnan(order.trail_points) && std::isnan(order.trail_price)
-        && std::isnan(order.trail_offset)
+        && std::isnan(order.legs.prices().trail_points) && std::isnan(order.legs.prices().trail_price)
+        && std::isnan(order.legs.prices().trail_offset)
         && slippage_ == 0 && commission_type_ == CommissionType::PERCENT
         && syminfo_.pointvalue == 1 && account_currency_fx_ == 1
         && account_currency_fx_timestamps_.empty()
@@ -8132,7 +8023,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     // family M mechanism 2a holds the pair's brackets dormant at placement):
     // stale like any bracket bound to a finished cycle, Remove it here since
     // the ordinary stale-cycle check below sits behind this Skip.
-    if (order.dormant_bracket) {
+    if (order.legs.dormant()) {
         if (order.type == OrderType::EXIT && !order.from_entry.empty()
             && cycle_filled_entry_ids_.count(order.from_entry) == 0) {
             return OrderEligibility::Remove;
@@ -8143,7 +8034,9 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     // offset) keeps resolving, so a dormant order that carries one stays
     // eligible and evaluate_fill_price masks its stop / limit (see
     // dormant_bracket_trail_leg_live).
-    if (order.dormant_bracket && !dormant_bracket_trail_leg_live(order)) {
+    if (order.legs.suspended(exit_legs::Leg::Stop)
+        && order.legs.suspended(exit_legs::Leg::Limit)
+        && !dormant_bracket_trail_leg_live(order)) {
         return OrderEligibility::Skip;
     }
     if (opposing_pass == 1) {
@@ -8185,10 +8078,10 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         if (order.created_bar == bar_index_) {
             return OrderEligibility::Skip;
         }
-        const bool market_order = std::isnan(order.stop_price)
-            && std::isnan(order.limit_price)
-            && std::isnan(order.trail_points)
-            && std::isnan(order.trail_price);
+        const bool market_order = std::isnan(order.legs.prices().stop_price)
+            && std::isnan(order.legs.prices().limit_price)
+            && std::isnan(order.legs.prices().trail_points)
+            && std::isnan(order.legs.prices().trail_price);
         if (process_orders_on_close_ && market_order) {
             return OrderEligibility::Remove;
         }
@@ -8252,8 +8145,8 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
             // No frozen-qty lookup here: this branch is reached only for
             // OrderType::ENTRY (priced entries), and frozen_default_qty is set
             // solely on MARKET / RAW_ORDER placements, so it is always NaN.
-            double approx_price = !std::isnan(order.stop_price) ? order.stop_price
-                : (!std::isnan(order.limit_price) ? order.limit_price : bar.close);
+            double approx_price = !std::isnan(order.legs.prices().stop_price) ? order.legs.prices().stop_price
+                : (!std::isnan(order.legs.prices().limit_price) ? order.legs.prices().limit_price : bar.close);
             double approx_tx_qty = calc_qty_for_type(approx_price, order.qty, order.qty_type);
             if (approx_tx_qty > position_qty_ + kQtyEpsilon) {
                 flat_armed_opposite_close = false;
@@ -8278,8 +8171,8 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         // same-bar stop-entry throttle (probes 80/92) is untouched.
         bool resting_limit_entry =
             order.created_bar < bar_index_
-            && !std::isnan(order.limit_price)
-            && std::isnan(order.stop_price);
+            && !std::isnan(order.legs.prices().limit_price)
+            && std::isnan(order.legs.prices().stop_price);
         if (!flat_armed_opposite_close && !flat_armed_same_dir_pyramid
             && !pre_armed_opposite_sibling && !resting_limit_entry) {
             return OrderEligibility::Skip;
@@ -8307,8 +8200,8 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     bool resting_limit_entry_carry =
         order.type == OrderType::ENTRY
         && order.created_bar < bar_index_
-        && !std::isnan(order.limit_price)
-        && std::isnan(order.stop_price);
+        && !std::isnan(order.legs.prices().limit_price)
+        && std::isnan(order.legs.prices().stop_price);
     // M1v2 narrowed co-queue exemption (pyramid-deferred-flip-close-all-01):
     // a same-direction entry co-queued on the close's OWN call bar
     // (order.created_bar == exit_closed_from_bar, where exit_closed_from_bar is
@@ -8368,29 +8261,29 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     // branches for the matching same-bar fill-price rules.
     if (process_orders_on_close_ && order.created_bar == bar_index_
         && !order.birth.from_fill()) {
-        bool has_stop_or_trail = !std::isnan(order.stop_price)
-                                 || !std::isnan(order.trail_points)
-                                 || !std::isnan(order.trail_price);
+        bool has_stop_or_trail = !std::isnan(order.legs.prices().stop_price)
+                                 || !std::isnan(order.legs.prices().trail_points)
+                                 || !std::isnan(order.legs.prices().trail_price);
         bool pure_limit_entry = order.type == OrderType::ENTRY
                                 && !exit_style
                                 && !has_stop_or_trail
-                                && !std::isnan(order.limit_price);
+                                && !std::isnan(order.legs.prices().limit_price);
         bool exit_marketable_at_close = false;
         const double trigger_close = pooc_short_exit_trigger_close(order, bar);
-        if (exit_style && std::isnan(order.trail_points) && std::isnan(order.trail_price)) {
-            if (!std::isnan(order.stop_price)) {
+        if (exit_style && std::isnan(order.legs.prices().trail_points) && std::isnan(order.legs.prices().trail_price)) {
+            if (!std::isnan(order.legs.prices().stop_price)) {
                 exit_marketable_at_close = order.is_long
-                    ? (trigger_close <= order.stop_price)
-                    : (trigger_close >= order.stop_price);
+                    ? (trigger_close <= order.legs.prices().stop_price)
+                    : (trigger_close >= order.legs.prices().stop_price);
             }
-            if (!exit_marketable_at_close && !std::isnan(order.limit_price)) {
+            if (!exit_marketable_at_close && !std::isnan(order.legs.prices().limit_price)) {
                 exit_marketable_at_close = order.is_long
-                    ? (trigger_close >= order.limit_price)
-                    : (trigger_close <= order.limit_price);
+                    ? (trigger_close >= order.legs.prices().limit_price)
+                    : (trigger_close <= order.legs.prices().limit_price);
             }
         }
         if (!pure_limit_entry && !exit_marketable_at_close
-            && (has_stop_or_trail || !std::isnan(order.limit_price))) {
+            && (has_stop_or_trail || !std::isnan(order.legs.prices().limit_price))) {
             return OrderEligibility::Skip;
         }
     }
@@ -8442,8 +8335,8 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     // exits fire at entry price as TV reports them.
     bool is_entry_bar = (exit_style && position_open_bar_ == bar_index_);
     if (is_entry_bar) {
-        bool has_price = !std::isnan(order.stop_price) || !std::isnan(order.limit_price)
-                         || !std::isnan(order.trail_points) || !std::isnan(order.trail_price);
+        bool has_price = !std::isnan(order.legs.prices().stop_price) || !std::isnan(order.legs.prices().limit_price)
+                         || !std::isnan(order.legs.prices().trail_points) || !std::isnan(order.legs.prices().trail_price);
         if (!has_price) {
             // Legacy/default mode skips a market exit on the entry bar because
             // no strategy execution occurs between its open fill and the bar
@@ -8466,11 +8359,11 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
                  && order.birth.from_fill())) {
             double ep = position_entry_price_;
             if (position_side_ == PositionSide::LONG) {
-                if (!std::isnan(order.stop_price) && order.stop_price > ep) return OrderEligibility::Skip;
-                if (!std::isnan(order.limit_price) && order.limit_price < ep) return OrderEligibility::Skip;
+                if (!std::isnan(order.legs.prices().stop_price) && order.legs.prices().stop_price > ep) return OrderEligibility::Skip;
+                if (!std::isnan(order.legs.prices().limit_price) && order.legs.prices().limit_price < ep) return OrderEligibility::Skip;
             } else if (position_side_ == PositionSide::SHORT) {
-                if (!std::isnan(order.stop_price) && order.stop_price < ep) return OrderEligibility::Skip;
-                if (!std::isnan(order.limit_price) && order.limit_price > ep) return OrderEligibility::Skip;
+                if (!std::isnan(order.legs.prices().stop_price) && order.legs.prices().stop_price < ep) return OrderEligibility::Skip;
+                if (!std::isnan(order.legs.prices().limit_price) && order.legs.prices().limit_price > ep) return OrderEligibility::Skip;
             }
         }
     }
@@ -8495,16 +8388,23 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
     // Round 9 family X (finding-311 is leg-scoped): a bracket killed by a
     // declined reversal reaches this kernel only for its live TRAIL leg;
     // its stop and limit legs stay dead until REVIVE-A/B.
-    const bool dormant_priced_legs = order.dormant_bracket;
-    const double stop_price = (suppress_stop || dormant_priced_legs)
-        ? std::numeric_limits<double>::quiet_NaN() : order.stop_price;
-    const double limit_price = (suppress_limit || dormant_priced_legs)
-        ? std::numeric_limits<double>::quiet_NaN() : order.limit_price;
+    const double stop_price = (suppress_stop || !order.legs.available(exit_legs::Leg::Stop, bar_index_))
+        ? std::numeric_limits<double>::quiet_NaN() : order.legs.prices().stop_price;
+    const double limit_price = (suppress_limit || !order.legs.available(exit_legs::Leg::Limit, bar_index_))
+        ? std::numeric_limits<double>::quiet_NaN() : order.legs.prices().limit_price;
     bool has_stop = !std::isnan(stop_price);
     bool has_limit = !std::isnan(limit_price);
-    bool has_trail = !std::isnan(order.trail_points) || !std::isnan(order.trail_price);
+    bool has_trail = order.legs.available(exit_legs::Leg::Trail, bar_index_)
+        && (!std::isnan(order.legs.prices().trail_points) || !std::isnan(order.legs.prices().trail_price));
 
     last_exit_fill_was_trail_ = false;
+    const auto& definition = order.legs.prices();
+    const bool conditional_exit = order.type == OrderType::EXIT
+        && (!std::isnan(definition.stop_price) || !std::isnan(definition.limit_price)
+            || !std::isnan(definition.trail_points) || !std::isnan(definition.trail_price)
+            || !std::isnan(definition.profit_ticks) || !std::isnan(definition.loss_ticks));
+    if (conditional_exit && !has_stop && !has_limit && !has_trail)
+        return {FillEvaluation::Kind::NoFill, 0.0};
 
     // design-stop-tick-rounding: every resting stop / limit trigger test in
     // this function runs on the tick-quantized bar (broker_trigger_bar,
@@ -8547,7 +8447,7 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
     // If every non-trailing priced leg is suppressed on the entry bar, the
     // order is dormant rather than becoming a market exit. The original
     // prices remain stored on PendingOrder and become active next bar.
-    if (exit_style && !has_stop && !has_limit && !has_trail
+    if (order.type != OrderType::EXIT && exit_style && !has_stop && !has_limit && !has_trail
         && (suppress_stop || suppress_limit)) {
         return {FillEvaluation::Kind::NoFill, 0.0};
     }
@@ -8599,8 +8499,8 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
             && order.type == OrderType::EXIT
             && !order.from_entry.empty()
             && (order.created_position_side == PositionSide::FLAT)
-            && std::isnan(order.trail_points)
-            && std::isnan(order.trail_price)
+            && std::isnan(order.legs.prices().trail_points)
+            && std::isnan(order.legs.prices().trail_price)
             && !bar_magnifier_enabled_
             && !(calc_on_order_fills_ && coof_scheduler_active_)) {
             int matching_exit_orders = 0;
@@ -8646,7 +8546,7 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
         // their existing state and chronology.
         if (has_trail && order.type == OrderType::EXIT
             && process_orders_on_close_ && !calc_on_order_fills_
-            && !bar_magnifier_enabled_ && !order.dormant_bracket
+            && !bar_magnifier_enabled_ && !order.legs.dormant()
             && !is_entry_bar && order.created_bar < bar_index_
             && trail_close_restart_bar_ != bar_index_
             && trail_best_before_bar_index_ == bar_index_
@@ -8661,17 +8561,17 @@ BacktestEngine::FillEvaluation BacktestEngine::evaluate_fill_price(
             position_side_,
             stop_price,
             limit_price,
-            order.trail_points,
-            order.trail_price,
-            order.trail_offset,
+            has_trail ? order.legs.prices().trail_points : std::numeric_limits<double>::quiet_NaN(),
+            has_trail ? order.legs.prices().trail_price : std::numeric_limits<double>::quiet_NaN(),
+            order.legs.prices().trail_offset,
             position_entry_price_,
             // Round 10 family AE: a trail leg revived after a declined
             // reversal reads its own pre-bar extreme, which skips the decline
             // bar. Only that shape -- a bracket dormant from a margin call
             // (dormant_reversal_kill_bar < 0) keeps the position's extreme.
-            (order.dormant_bracket && order.dormant_reversal_kill_bar >= 0
-             && std::isfinite(order.dormant_trail_best_start))
-                ? order.dormant_trail_best_start
+            (order.legs.dormant() && order.legs.excluded_bar() >= 0
+             && std::isfinite(order.legs.trail_prefix()))
+                ? order.legs.trail_prefix()
                 : trail_best_path_state,
             is_entry_bar,
             bar_magnifier_enabled_,

@@ -427,7 +427,7 @@ static void test_MM_HSF_interleaved_brackets_keep_fill_iteration_stable() {
                 queued_after_signal = pending_orders_.size();
                 for (const PendingOrder& order : pending_orders_) {
                     if (order.type == OrderType::MARKET
-                        && order.paired_flat_market_candidate) {
+                        && compat::pine::awaits_pair_review(order.market_admission)) {
                         ++candidate_market_orders;
                     }
                 }

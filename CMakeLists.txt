@@ -80,6 +80,7 @@ add_library(pineforge STATIC
     src/c_abi.cpp
     src/compat/pine/order_birth.cpp
     src/compat/pine/exit_activation.cpp
+    src/compat/pine/exit_lifecycle.cpp
     src/compat/pine/order_priority.cpp
     src/engine_aux_security.cpp
     src/engine_fills.cpp
@@ -93,6 +94,9 @@ add_library(pineforge STATIC
     src/engine_security.cpp
     src/engine_state_hash.cpp
     src/engine_stream.cpp
+    src/market_admission.cpp
+    src/engine_market_admission.cpp
+    src/compat/pine/market_admission.cpp
     src/engine_strategy_commands.cpp
     src/engine_trade_accessors.cpp
     src/reservation_expansion.cpp

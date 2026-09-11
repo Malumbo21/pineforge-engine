@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <string_view>
 #include <type_traits>
 
 static_assert(std::is_standard_layout<pf_pending_order_v1_t>::value,
@@ -16,12 +17,12 @@ namespace {
 
 // NUL-terminated copy of the first STR_CAP-1 bytes + FNV-1a 64 of the
 // whole string, so a consumer can still match an over-long id exactly.
-void copy_str(const std::string& s, char* dst, uint8_t* truncated, uint64_t* hash) {
+void copy_str(std::string_view s, char* dst, uint8_t* truncated, uint64_t* hash) {
     uint64_t h = 1469598103934665603ULL;
     for (unsigned char ch : s) { h ^= ch; h *= 1099511628211ULL; }
     *hash = h;
     const size_t n = s.size() < 63 ? s.size() : 63;
-    std::memcpy(dst, s.data(), n);
+    if (n != 0) std::memcpy(dst, s.data(), n);
     dst[n] = 0;
     *truncated = s.size() > 63 ? 1 : 0;
 }
@@ -36,13 +37,13 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     copy_str(src.from_entry, out->from_entry, &out->from_entry_truncated, &out->from_entry_hash64);
     out->type = (int32_t)src.type;
     out->is_long = src.is_long ? 1 : 0;
-    out->limit_price = src.limit_price;
-    out->stop_price = src.stop_price;
-    out->trail_points = src.trail_points;
-    out->trail_price = src.trail_price;
-    out->trail_offset = src.trail_offset;
-    out->profit_ticks = src.profit_ticks;
-    out->loss_ticks = src.loss_ticks;
+    out->limit_price = src.legs.prices().limit_price;
+    out->stop_price = src.legs.prices().stop_price;
+    out->trail_points = src.legs.prices().trail_points;
+    out->trail_price = src.legs.prices().trail_price;
+    out->trail_offset = src.legs.prices().trail_offset;
+    out->profit_ticks = src.legs.prices().profit_ticks;
+    out->loss_ticks = src.legs.prices().loss_ticks;
     out->qty = src.qty;
     out->qty_type = (int32_t)src.qty_type;
     out->qty_percent = src.qty_percent;
@@ -72,7 +73,7 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->same_id_stop_deferred_close_all_bar = (int32_t)src.same_id_stop_deferred_close_all_bar;
     out->same_id_stop_deferred_close_all_incarnation = src.same_id_stop_deferred_close_all_incarnation;
     out->reverses_same_bar_market_from_flat = src.reverses_same_bar_market_from_flat ? 1 : 0;
-    out->paired_flat_market_candidate = src.paired_flat_market_candidate ? 1 : 0;
+    out->paired_flat_market_candidate = compat::pine::awaits_pair_review(src.market_admission) ? 1 : 0;
     out->paired_flat_market_own_qty = src.paired_flat_market_own_qty;
     out->paired_flat_market_signal_close = src.paired_flat_market_signal_close;
     out->paired_flat_market_signal_equity = src.paired_flat_market_signal_equity;
@@ -81,7 +82,7 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->paired_flat_market_signal_fx = src.paired_flat_market_signal_fx;
     out->paired_flat_market_peer_seq = src.paired_flat_market_peer_seq;
     out->paired_flat_market_transaction_qty = src.paired_flat_market_transaction_qty;
-    out->default_flat_market_gross_candidate = src.default_flat_market_gross_candidate ? 1 : 0;
+    out->default_flat_market_gross_candidate = compat::pine::awaits_default_review(src.market_admission) ? 1 : 0;
     out->tv_carry_qty = src.tv_carry_qty;
     out->frozen_default_qty = src.frozen_default_qty;
     out->default_stop_placement_qty = src.default_stop_placement_qty;
@@ -92,8 +93,8 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->sizing_price = src.sizing_price;
     out->sizing_fx = src.sizing_fx;
     out->sizing_mark = src.sizing_mark;
-    out->opening_affordability_exemption_candidate = src.opening_affordability_exemption_candidate ? 1 : 0;
-    out->explicit_flat_admission_candidate = src.explicit_flat_admission_candidate ? 1 : 0;
+    out->opening_affordability_exemption_candidate = compat::pine::opening_qualification(src.market_admission) ? 1 : 0;
+    out->explicit_flat_admission_candidate = compat::pine::explicit_qualification(src.market_admission) ? 1 : 0;
     out->explicit_placement_equity = src.explicit_placement_equity;
     out->explicit_slipped_signal_close = src.explicit_slipped_signal_close;
     out->affordability_placement_equity = src.affordability_placement_equity;
@@ -119,14 +120,14 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->sbmt_close_qty = src.pine_frozen_market_instruction.targeted_close() ? src.quantity_request.intent()->units() : std::numeric_limits<double>::quiet_NaN();
     out->sbmt_close_buy = src.pine_frozen_market_instruction.targeted_close() && src.created_position_side == PositionSide::SHORT ? 1 : 0;
     out->suppress_as_declined_reversal_close = src.suppress_as_declined_reversal_close ? 1 : 0;
-    out->dormant_bracket = src.dormant_bracket ? 1 : 0;
-    out->dormant_reissue_pending = src.dormant_reissue_pending ? 1 : 0;
-    out->dormant_original_stop_price = src.dormant_original_stop_price;
-    out->dormant_hold_bar = (int32_t)src.dormant_hold_bar;
-    out->dormant_reversal_kill_bar = (int32_t)src.dormant_reversal_kill_bar;
-    out->dormant_trail_best = src.dormant_trail_best;
-    out->dormant_trail_best_start = src.dormant_trail_best_start;
-    out->dormant_trail_leg_dead = src.dormant_trail_leg_dead ? 1 : 0;
+    out->dormant_bracket = src.legs.dormant() ? 1 : 0;
+    out->dormant_reissue_pending = src.legs.pending_replacement() ? 1 : 0;
+    out->dormant_original_stop_price = src.legs.original_stop();
+    out->dormant_hold_bar = src.legs.hold_bar();
+    out->dormant_reversal_kill_bar = src.legs.excluded_bar();
+    out->dormant_trail_best = src.legs.trail_best();
+    out->dormant_trail_best_start = src.legs.trail_prefix();
+    out->dormant_trail_leg_dead = src.legs.retired(exit_legs::Leg::Trail) ? 1 : 0;
     out->suppressed_close_consumed_ledger_qty = src.suppressed_close_consumed_ledger_qty;
     out->suppressed_close_retired_ledger_qty = src.suppressed_close_retired_ledger_qty;
     out->short_seed_collision_role = (int32_t)src.short_seed_collision_role;
@@ -174,7 +175,244 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->pine_frozen_market_instruction_kind = static_cast<uint64_t>(src.pine_frozen_market_instruction.kind());
     out->pine_frozen_market_instruction_own_units = src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->own_units : 0.0;
     out->pine_frozen_market_instruction_transaction_units = src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->transaction_units : 0.0;
-    copy_str(src.pine_frozen_market_instruction.targeted_close() ? src.pine_frozen_market_instruction.targeted_close()->target_id : std::string(), out->pine_frozen_market_instruction_target_id, &out->pine_frozen_market_instruction_target_id_truncated, &out->pine_frozen_market_instruction_target_id_hash64);
+    copy_str(src.pine_frozen_market_instruction.targeted_close() ? std::string_view(src.pine_frozen_market_instruction.targeted_close()->target_id) : std::string_view(), out->pine_frozen_market_instruction_target_id, &out->pine_frozen_market_instruction_target_id_truncated, &out->pine_frozen_market_instruction_target_id_hash64);
+    out->legs_target_incarnation = (true) ? ((src.legs.target()).incarnation) : (0);
+    out->legs_target_owner = (true) ? ((src.legs.target()).owner) : (0);
+    out->legs_revision = (true) ? (src.legs.revision()) : (0);
+    out->legs_definition_incarnation = (true) ? ((src.legs.current_definition()).incarnation()) : (0);
+    out->legs_definition_revision = (true) ? ((src.legs.current_definition()).revision()) : (0);
+    out->legs_definition_value_present = (true) ? ((src.legs.current_definition()).has_value() ? 1 : 0) : (0);
+    out->legs_definition_limit_price = ((true) && (src.legs.current_definition()).has_value()) ? ((src.legs.current_definition()).prices().limit_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_definition_stop_price = ((true) && (src.legs.current_definition()).has_value()) ? ((src.legs.current_definition()).prices().stop_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_definition_trail_points = ((true) && (src.legs.current_definition()).has_value()) ? ((src.legs.current_definition()).prices().trail_points) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_definition_trail_price = ((true) && (src.legs.current_definition()).has_value()) ? ((src.legs.current_definition()).prices().trail_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_definition_trail_offset = ((true) && (src.legs.current_definition()).has_value()) ? ((src.legs.current_definition()).prices().trail_offset) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_definition_profit_ticks = ((true) && (src.legs.current_definition()).has_value()) ? ((src.legs.current_definition()).prices().profit_ticks) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_definition_loss_ticks = ((true) && (src.legs.current_definition()).has_value()) ? ((src.legs.current_definition()).prices().loss_ticks) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_generation0 = (true) ? (src.legs.generation(static_cast<exit_legs::Leg>(0))) : (0);
+    out->legs_retirement0_present = (true) ? ((src.legs.retirements()[0]).has_value() ? 1 : 0) : (0);
+    out->legs_retirement0_generation = ((true) && (src.legs.retirements()[0]).has_value()) ? (((*(src.legs.retirements()[0]))).generation) : (0);
+    out->legs_retirement0_cause_event = ((true) && (src.legs.retirements()[0]).has_value()) ? ((((*(src.legs.retirements()[0]))).cause).event) : (0);
+    out->legs_retirement0_cause_bar = ((true) && (src.legs.retirements()[0]).has_value()) ? ((((*(src.legs.retirements()[0]))).cause).bar) : (0);
+    out->legs_retirement0_cause_domain = ((true) && (src.legs.retirements()[0]).has_value()) ? (static_cast<uint32_t>((((*(src.legs.retirements()[0]))).cause).domain)) : (0);
+    out->legs_retirement0_cause_phase = ((true) && (src.legs.retirements()[0]).has_value()) ? (static_cast<uint32_t>((((*(src.legs.retirements()[0]))).cause).phase)) : (0);
+    out->legs_generation1 = (true) ? (src.legs.generation(static_cast<exit_legs::Leg>(1))) : (0);
+    out->legs_retirement1_present = (true) ? ((src.legs.retirements()[1]).has_value() ? 1 : 0) : (0);
+    out->legs_retirement1_generation = ((true) && (src.legs.retirements()[1]).has_value()) ? (((*(src.legs.retirements()[1]))).generation) : (0);
+    out->legs_retirement1_cause_event = ((true) && (src.legs.retirements()[1]).has_value()) ? ((((*(src.legs.retirements()[1]))).cause).event) : (0);
+    out->legs_retirement1_cause_bar = ((true) && (src.legs.retirements()[1]).has_value()) ? ((((*(src.legs.retirements()[1]))).cause).bar) : (0);
+    out->legs_retirement1_cause_domain = ((true) && (src.legs.retirements()[1]).has_value()) ? (static_cast<uint32_t>((((*(src.legs.retirements()[1]))).cause).domain)) : (0);
+    out->legs_retirement1_cause_phase = ((true) && (src.legs.retirements()[1]).has_value()) ? (static_cast<uint32_t>((((*(src.legs.retirements()[1]))).cause).phase)) : (0);
+    out->legs_generation2 = (true) ? (src.legs.generation(static_cast<exit_legs::Leg>(2))) : (0);
+    out->legs_retirement2_present = (true) ? ((src.legs.retirements()[2]).has_value() ? 1 : 0) : (0);
+    out->legs_retirement2_generation = ((true) && (src.legs.retirements()[2]).has_value()) ? (((*(src.legs.retirements()[2]))).generation) : (0);
+    out->legs_retirement2_cause_event = ((true) && (src.legs.retirements()[2]).has_value()) ? ((((*(src.legs.retirements()[2]))).cause).event) : (0);
+    out->legs_retirement2_cause_bar = ((true) && (src.legs.retirements()[2]).has_value()) ? ((((*(src.legs.retirements()[2]))).cause).bar) : (0);
+    out->legs_retirement2_cause_domain = ((true) && (src.legs.retirements()[2]).has_value()) ? (static_cast<uint32_t>((((*(src.legs.retirements()[2]))).cause).domain)) : (0);
+    out->legs_retirement2_cause_phase = ((true) && (src.legs.retirements()[2]).has_value()) ? (static_cast<uint32_t>((((*(src.legs.retirements()[2]))).cause).phase)) : (0);
+    out->legs_suspension_present = (true) ? ((src.legs.suspension()).has_value() ? 1 : 0) : (0);
+    out->legs_suspension_cause_event = ((true) && (src.legs.suspension()).has_value()) ? ((((*(src.legs.suspension()))).cause).event) : (0);
+    out->legs_suspension_cause_bar = ((true) && (src.legs.suspension()).has_value()) ? ((((*(src.legs.suspension()))).cause).bar) : (0);
+    out->legs_suspension_cause_domain = ((true) && (src.legs.suspension()).has_value()) ? (static_cast<uint32_t>((((*(src.legs.suspension()))).cause).domain)) : (0);
+    out->legs_suspension_cause_phase = ((true) && (src.legs.suspension()).has_value()) ? (static_cast<uint32_t>((((*(src.legs.suspension()))).cause).phase)) : (0);
+    out->legs_suspension_legs_count = ((true) && (src.legs.suspension()).has_value()) ? (static_cast<uint32_t>((((*(src.legs.suspension()))).legs).size())) : (0);
+    out->legs_suspension_legs_item0 = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).legs).size() > 0) ? (static_cast<uint32_t>((((*(src.legs.suspension()))).legs)[0])) : (UINT32_MAX);
+    out->legs_suspension_legs_item1 = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).legs).size() > 1) ? (static_cast<uint32_t>((((*(src.legs.suspension()))).legs)[1])) : (UINT32_MAX);
+    out->legs_suspension_legs_item2 = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).legs).size() > 2) ? (static_cast<uint32_t>((((*(src.legs.suspension()))).legs)[2])) : (UINT32_MAX);
+    out->legs_suspension_hold_present = ((true) && (src.legs.suspension()).has_value()) ? ((((*(src.legs.suspension()))).hold).has_value() ? 1 : 0) : (0);
+    out->legs_suspension_hold_requested_event = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).hold).has_value()) ? ((((*(((*(src.legs.suspension()))).hold))).requested).event) : (0);
+    out->legs_suspension_hold_requested_bar = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).hold).has_value()) ? ((((*(((*(src.legs.suspension()))).hold))).requested).bar) : (0);
+    out->legs_suspension_hold_requested_domain = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).hold).has_value()) ? (static_cast<uint32_t>((((*(((*(src.legs.suspension()))).hold))).requested).domain)) : (0);
+    out->legs_suspension_hold_requested_phase = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).hold).has_value()) ? (static_cast<uint32_t>((((*(((*(src.legs.suspension()))).hold))).requested).phase)) : (0);
+    out->legs_suspension_hold_target_incarnation = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).hold).has_value()) ? ((((*(((*(src.legs.suspension()))).hold))).target).incarnation) : (0);
+    out->legs_suspension_hold_target_owner = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).hold).has_value()) ? ((((*(((*(src.legs.suspension()))).hold))).target).owner) : (0);
+    out->legs_suspension_hold_revision = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).hold).has_value()) ? (((*(((*(src.legs.suspension()))).hold))).revision) : (0);
+    out->legs_suspension_revival_definition_present = ((true) && (src.legs.suspension()).has_value()) ? ((((*(src.legs.suspension()))).revival_definition).has_value() ? 1 : 0) : (0);
+    out->legs_suspension_revival_definition_incarnation = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).incarnation()) : (0);
+    out->legs_suspension_revival_definition_revision = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).revision()) : (0);
+    out->legs_suspension_revival_definition_value_present = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).has_value() ? 1 : 0) : (0);
+    out->legs_suspension_revival_definition_limit_price = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) && ((*(((*(src.legs.suspension()))).revival_definition))).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).prices().limit_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_revival_definition_stop_price = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) && ((*(((*(src.legs.suspension()))).revival_definition))).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).prices().stop_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_revival_definition_trail_points = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) && ((*(((*(src.legs.suspension()))).revival_definition))).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).prices().trail_points) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_revival_definition_trail_price = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) && ((*(((*(src.legs.suspension()))).revival_definition))).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).prices().trail_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_revival_definition_trail_offset = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) && ((*(((*(src.legs.suspension()))).revival_definition))).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).prices().trail_offset) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_revival_definition_profit_ticks = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) && ((*(((*(src.legs.suspension()))).revival_definition))).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).prices().profit_ticks) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_revival_definition_loss_ticks = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).revival_definition).has_value()) && ((*(((*(src.legs.suspension()))).revival_definition))).has_value()) ? (((*(((*(src.legs.suspension()))).revival_definition))).prices().loss_ticks) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_replacement_present = ((true) && (src.legs.suspension()).has_value()) ? ((((*(src.legs.suspension()))).replacement).has_value() ? 1 : 0) : (0);
+    out->legs_suspension_replacement_queue_predecessor = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? (((*(((*(src.legs.suspension()))).replacement))).queue_predecessor) : (0);
+    out->legs_suspension_replacement_revival_definition_incarnation = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).incarnation()) : (0);
+    out->legs_suspension_replacement_revival_definition_revision = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).revision()) : (0);
+    out->legs_suspension_replacement_revival_definition_value_present = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).has_value() ? 1 : 0) : (0);
+    out->legs_suspension_replacement_revival_definition_limit_price = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) && (((*(((*(src.legs.suspension()))).replacement))).revival_definition).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).prices().limit_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_replacement_revival_definition_stop_price = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) && (((*(((*(src.legs.suspension()))).replacement))).revival_definition).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).prices().stop_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_replacement_revival_definition_trail_points = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) && (((*(((*(src.legs.suspension()))).replacement))).revival_definition).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).prices().trail_points) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_replacement_revival_definition_trail_price = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) && (((*(((*(src.legs.suspension()))).replacement))).revival_definition).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).prices().trail_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_replacement_revival_definition_trail_offset = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) && (((*(((*(src.legs.suspension()))).replacement))).revival_definition).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).prices().trail_offset) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_replacement_revival_definition_profit_ticks = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) && (((*(((*(src.legs.suspension()))).replacement))).revival_definition).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).prices().profit_ticks) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_replacement_revival_definition_loss_ticks = ((((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) && (((*(((*(src.legs.suspension()))).replacement))).revival_definition).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).revival_definition).prices().loss_ticks) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_replacement_release_requested_event = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? (((((*(((*(src.legs.suspension()))).replacement))).release).requested).event) : (0);
+    out->legs_suspension_replacement_release_requested_bar = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? (((((*(((*(src.legs.suspension()))).replacement))).release).requested).bar) : (0);
+    out->legs_suspension_replacement_release_requested_domain = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? (static_cast<uint32_t>(((((*(((*(src.legs.suspension()))).replacement))).release).requested).domain)) : (0);
+    out->legs_suspension_replacement_release_requested_phase = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? (static_cast<uint32_t>(((((*(((*(src.legs.suspension()))).replacement))).release).requested).phase)) : (0);
+    out->legs_suspension_replacement_release_target_incarnation = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? (((((*(((*(src.legs.suspension()))).replacement))).release).target).incarnation) : (0);
+    out->legs_suspension_replacement_release_target_owner = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? (((((*(((*(src.legs.suspension()))).replacement))).release).target).owner) : (0);
+    out->legs_suspension_replacement_release_revision = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).replacement).has_value()) ? ((((*(((*(src.legs.suspension()))).replacement))).release).revision) : (0);
+    out->legs_suspension_window_present = ((true) && (src.legs.suspension()).has_value()) ? ((((*(src.legs.suspension()))).window).has_value() ? 1 : 0) : (0);
+    out->legs_suspension_window_excluded_event = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).window).has_value()) ? ((((*(((*(src.legs.suspension()))).window))).excluded).event) : (0);
+    out->legs_suspension_window_excluded_bar = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).window).has_value()) ? ((((*(((*(src.legs.suspension()))).window))).excluded).bar) : (0);
+    out->legs_suspension_window_excluded_domain = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).window).has_value()) ? (static_cast<uint32_t>((((*(((*(src.legs.suspension()))).window))).excluded).domain)) : (0);
+    out->legs_suspension_window_excluded_phase = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).window).has_value()) ? (static_cast<uint32_t>((((*(((*(src.legs.suspension()))).window))).excluded).phase)) : (0);
+    out->legs_suspension_window_best = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).window).has_value()) ? (((*(((*(src.legs.suspension()))).window))).best) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_suspension_window_prefix = (((true) && (src.legs.suspension()).has_value()) && (((*(src.legs.suspension()))).window).has_value()) ? (((*(((*(src.legs.suspension()))).window))).prefix) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_present = (true) ? ((src.legs.last_action()).has_value() ? 1 : 0) : (0);
+    out->legs_last_target_incarnation = ((true) && (src.legs.last_action()).has_value()) ? ((((*(src.legs.last_action()))).target).incarnation) : (0);
+    out->legs_last_target_owner = ((true) && (src.legs.last_action()).has_value()) ? ((((*(src.legs.last_action()))).target).owner) : (0);
+    out->legs_last_expected_revision = ((true) && (src.legs.last_action()).has_value()) ? (((*(src.legs.last_action()))).expected_revision) : (0);
+    out->legs_last_cause_event = ((true) && (src.legs.last_action()).has_value()) ? ((((*(src.legs.last_action()))).cause).event) : (0);
+    out->legs_last_cause_bar = ((true) && (src.legs.last_action()).has_value()) ? ((((*(src.legs.last_action()))).cause).bar) : (0);
+    out->legs_last_cause_domain = ((true) && (src.legs.last_action()).has_value()) ? (static_cast<uint32_t>((((*(src.legs.last_action()))).cause).domain)) : (0);
+    out->legs_last_cause_phase = ((true) && (src.legs.last_action()).has_value()) ? (static_cast<uint32_t>((((*(src.legs.last_action()))).cause).phase)) : (0);
+    out->legs_last_operation = ((true) && (src.legs.last_action()).has_value()) ? (static_cast<uint32_t>(((*(src.legs.last_action()))).operation.index())) : (0);
+    out->legs_last_bind_owner = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::BindOwner>(((*(src.legs.last_action()))).operation)) ? ((std::get<exit_legs::BindOwner>(((*(src.legs.last_action()))).operation)).owner) : (0);
+    out->legs_last_suspend_legs_count = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) ? (static_cast<uint32_t>(((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).legs).size())) : (0);
+    out->legs_last_suspend_legs_item0 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).legs).size() > 0) ? (static_cast<uint32_t>(((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).legs)[0])) : (UINT32_MAX);
+    out->legs_last_suspend_legs_item1 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).legs).size() > 1) ? (static_cast<uint32_t>(((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).legs)[1])) : (UINT32_MAX);
+    out->legs_last_suspend_legs_item2 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).legs).size() > 2) ? (static_cast<uint32_t>(((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).legs)[2])) : (UINT32_MAX);
+    out->legs_last_suspend_hold_present = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) ? (((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold).has_value() ? 1 : 0) : (0);
+    out->legs_last_suspend_hold_requested_event = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold).has_value()) ? ((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold))).requested).event) : (0);
+    out->legs_last_suspend_hold_requested_bar = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold).has_value()) ? ((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold))).requested).bar) : (0);
+    out->legs_last_suspend_hold_requested_domain = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold).has_value()) ? (static_cast<uint32_t>((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold))).requested).domain)) : (0);
+    out->legs_last_suspend_hold_requested_phase = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold).has_value()) ? (static_cast<uint32_t>((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold))).requested).phase)) : (0);
+    out->legs_last_suspend_hold_target_incarnation = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold).has_value()) ? ((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold))).target).incarnation) : (0);
+    out->legs_last_suspend_hold_target_owner = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold).has_value()) ? ((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold))).target).owner) : (0);
+    out->legs_last_suspend_hold_revision = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold).has_value()) ? (((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).hold))).revision) : (0);
+    out->legs_last_suspend_window_present = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) ? (((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window).has_value() ? 1 : 0) : (0);
+    out->legs_last_suspend_window_excluded_event = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window).has_value()) ? ((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window))).excluded).event) : (0);
+    out->legs_last_suspend_window_excluded_bar = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window).has_value()) ? ((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window))).excluded).bar) : (0);
+    out->legs_last_suspend_window_excluded_domain = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window).has_value()) ? (static_cast<uint32_t>((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window))).excluded).domain)) : (0);
+    out->legs_last_suspend_window_excluded_phase = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window).has_value()) ? (static_cast<uint32_t>((((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window))).excluded).phase)) : (0);
+    out->legs_last_suspend_window_best = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window).has_value()) ? (((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window))).best) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_suspend_window_prefix = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window).has_value()) ? (((*((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).window))).prefix) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_suspend_retire_count = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) ? (static_cast<uint32_t>(((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).retire).size())) : (0);
+    out->legs_last_suspend_retire_item0 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).retire).size() > 0) ? (static_cast<uint32_t>(((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).retire)[0])) : (UINT32_MAX);
+    out->legs_last_suspend_retire_item1 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).retire).size() > 1) ? (static_cast<uint32_t>(((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).retire)[1])) : (UINT32_MAX);
+    out->legs_last_suspend_retire_item2 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).retire).size() > 2) ? (static_cast<uint32_t>(((std::get<exit_legs::Suspend>(((*(src.legs.last_action()))).operation)).retire)[2])) : (UINT32_MAX);
+    out->legs_last_stage_queue_predecessor = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? (((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).queue_predecessor) : (0);
+    out->legs_last_stage_revival_definition_incarnation = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).incarnation()) : (0);
+    out->legs_last_stage_revival_definition_revision = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).revision()) : (0);
+    out->legs_last_stage_revival_definition_value_present = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).has_value() ? 1 : 0) : (0);
+    out->legs_last_stage_revival_definition_limit_price = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) && (((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).has_value()) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).prices().limit_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_stage_revival_definition_stop_price = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) && (((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).has_value()) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).prices().stop_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_stage_revival_definition_trail_points = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) && (((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).has_value()) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).prices().trail_points) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_stage_revival_definition_trail_price = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) && (((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).has_value()) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).prices().trail_price) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_stage_revival_definition_trail_offset = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) && (((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).has_value()) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).prices().trail_offset) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_stage_revival_definition_profit_ticks = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) && (((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).has_value()) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).prices().profit_ticks) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_stage_revival_definition_loss_ticks = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) && (((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).has_value()) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).revival_definition).prices().loss_ticks) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_stage_release_requested_event = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? (((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).release).requested).event) : (0);
+    out->legs_last_stage_release_requested_bar = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? (((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).release).requested).bar) : (0);
+    out->legs_last_stage_release_requested_domain = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? (static_cast<uint32_t>(((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).release).requested).domain)) : (0);
+    out->legs_last_stage_release_requested_phase = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? (static_cast<uint32_t>(((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).release).requested).phase)) : (0);
+    out->legs_last_stage_release_target_incarnation = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? (((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).release).target).incarnation) : (0);
+    out->legs_last_stage_release_target_owner = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? (((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).release).target).owner) : (0);
+    out->legs_last_stage_release_revision = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)) ? ((((std::get<exit_legs::StageReplacement>(((*(src.legs.last_action()))).operation)).relation).release).revision) : (0);
+    out->legs_last_restore_legs_count = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Restore>(((*(src.legs.last_action()))).operation)) ? (static_cast<uint32_t>(((std::get<exit_legs::Restore>(((*(src.legs.last_action()))).operation)).legs).size())) : (0);
+    out->legs_last_restore_legs_item0 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Restore>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Restore>(((*(src.legs.last_action()))).operation)).legs).size() > 0) ? (static_cast<uint32_t>(((std::get<exit_legs::Restore>(((*(src.legs.last_action()))).operation)).legs)[0])) : (UINT32_MAX);
+    out->legs_last_restore_legs_item1 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Restore>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Restore>(((*(src.legs.last_action()))).operation)).legs).size() > 1) ? (static_cast<uint32_t>(((std::get<exit_legs::Restore>(((*(src.legs.last_action()))).operation)).legs)[1])) : (UINT32_MAX);
+    out->legs_last_restore_legs_item2 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Restore>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Restore>(((*(src.legs.last_action()))).operation)).legs).size() > 2) ? (static_cast<uint32_t>(((std::get<exit_legs::Restore>(((*(src.legs.last_action()))).operation)).legs)[2])) : (UINT32_MAX);
+    out->legs_last_complete_completed_event = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) ? (((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).completed).event) : (0);
+    out->legs_last_complete_completed_bar = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) ? (((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).completed).bar) : (0);
+    out->legs_last_complete_completed_domain = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) ? (static_cast<uint32_t>(((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).completed).domain)) : (0);
+    out->legs_last_complete_completed_phase = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) ? (static_cast<uint32_t>(((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).completed).phase)) : (0);
+    out->legs_last_complete_requested_present = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) ? (((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested).has_value() ? 1 : 0) : (0);
+    out->legs_last_complete_requested_requested_event = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested).has_value()) ? ((((*((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested))).requested).event) : (0);
+    out->legs_last_complete_requested_requested_bar = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested).has_value()) ? ((((*((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested))).requested).bar) : (0);
+    out->legs_last_complete_requested_requested_domain = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested).has_value()) ? (static_cast<uint32_t>((((*((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested))).requested).domain)) : (0);
+    out->legs_last_complete_requested_requested_phase = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested).has_value()) ? (static_cast<uint32_t>((((*((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested))).requested).phase)) : (0);
+    out->legs_last_complete_requested_target_incarnation = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested).has_value()) ? ((((*((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested))).target).incarnation) : (0);
+    out->legs_last_complete_requested_target_owner = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested).has_value()) ? ((((*((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested))).target).owner) : (0);
+    out->legs_last_complete_requested_revision = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested).has_value()) ? (((*((std::get<exit_legs::CompleteBarrier>(((*(src.legs.last_action()))).operation)).requested))).revision) : (0);
+    out->legs_last_observe_high = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Observe>(((*(src.legs.last_action()))).operation)) ? ((std::get<exit_legs::Observe>(((*(src.legs.last_action()))).operation)).high) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_observe_low = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Observe>(((*(src.legs.last_action()))).operation)) ? ((std::get<exit_legs::Observe>(((*(src.legs.last_action()))).operation)).low) : (std::numeric_limits<double>::quiet_NaN());
+    out->legs_last_observe_direction = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Observe>(((*(src.legs.last_action()))).operation)) ? ((std::get<exit_legs::Observe>(((*(src.legs.last_action()))).operation)).direction) : (0);
+    out->legs_last_observe_fold = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Observe>(((*(src.legs.last_action()))).operation)) ? (static_cast<uint32_t>((std::get<exit_legs::Observe>(((*(src.legs.last_action()))).operation)).fold)) : (0);
+    out->legs_last_cancel_legs_count = (((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size())) : (0);
+    out->legs_last_cancel_legs_item0 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size() > 0) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs)[0])) : (UINT32_MAX);
+    out->legs_last_cancel_legs_item1 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size() > 1) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs)[1])) : (UINT32_MAX);
+    out->legs_last_cancel_legs_item2 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size() > 2) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs)[2])) : (UINT32_MAX);
+    out->market_admission_observation_present = src.market_admission.observation() ? 1 : 0;
+    out->market_admission_observation_command = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->command) : 0;
+    out->market_admission_observation_kind = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->kind) : 0;
+    out->market_admission_observation_birth_cause = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->birth.cause()) : 0;
+    out->market_admission_observation_birth_bar = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->birth.bar()) : 0;
+    out->market_admission_observation_birth_timestamp = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->birth.timestamp()) : 0;
+    out->market_admission_observation_birth_cursor_domain = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->birth.cursor().domain()) : 0;
+    out->market_admission_observation_birth_cursor_position = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->birth.cursor().position()) : 0;
+    out->market_admission_observation_birth_cursor_index = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->birth.cursor().index()) : 0;
+    out->market_admission_observation_birth_cursor_count = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->birth.cursor().count()) : 0;
+    out->market_admission_observation_birth_cursor_price = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->birth.cursor_price()) : 0;
+    out->market_admission_observation_birth_first_fill = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->birth.first_fill()) : 0;
+    out->market_admission_observation_birth_last_fill = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->birth.last_fill()) : 0;
+    out->market_admission_observation_birth_evaluation_ordinal = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->birth.evaluation_ordinal()) : 0;
+    copy_str(src.market_admission.observation() ? std::string_view(src.market_admission.observation()->id) : std::string_view(), out->market_admission_observation_id, &out->market_admission_observation_id_truncated, &out->market_admission_observation_id_hash64);
+    out->market_admission_observation_requested_quantity = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->requested_quantity) : 0;
+    out->market_admission_observation_quantity_type = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->quantity_type) : 0;
+    out->market_admission_observation_buy = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->buy) : 0;
+    out->market_admission_observation_prices_limit = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->prices.limit) : 0;
+    out->market_admission_observation_prices_stop = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->prices.stop) : 0;
+    copy_str(src.market_admission.observation() ? std::string_view(src.market_admission.observation()->oca_name) : std::string_view(), out->market_admission_observation_oca_name, &out->market_admission_observation_oca_name_truncated, &out->market_admission_observation_oca_name_hash64);
+    out->market_admission_observation_oca_type = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->oca_type) : 0;
+    out->market_admission_observation_configuration_process_on_close = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->configuration.process_on_close) : 0;
+    out->market_admission_observation_configuration_calc_on_fills = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->configuration.calc_on_fills) : 0;
+    out->market_admission_observation_configuration_magnifier = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->configuration.magnifier) : 0;
+    out->market_admission_observation_configuration_fill_recalculation = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->configuration.fill_recalculation) : 0;
+    out->market_admission_observation_configuration_scheduler = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->configuration.scheduler) : 0;
+    out->market_admission_observation_configuration_slippage = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->configuration.slippage) : 0;
+    out->market_admission_observation_configuration_pyramiding = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->configuration.pyramiding) : 0;
+    out->market_admission_observation_configuration_default_quantity_type = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->configuration.default_quantity_type) : 0;
+    out->market_admission_observation_configuration_default_quantity_value = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.default_quantity_value) : 0;
+    out->market_admission_observation_configuration_long_margin = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.long_margin) : 0;
+    out->market_admission_observation_configuration_short_margin = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.short_margin) : 0;
+    out->market_admission_observation_configuration_commission_value = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.commission_value) : 0;
+    out->market_admission_observation_configuration_commission_type = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->configuration.commission_type) : 0;
+    out->market_admission_observation_configuration_pointvalue = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.pointvalue) : 0;
+    out->market_admission_observation_configuration_fx = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.fx) : 0;
+    out->market_admission_observation_configuration_quantity_step = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.quantity_step) : 0;
+    out->market_admission_observation_configuration_mintick = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.mintick) : 0;
+    out->market_admission_observation_configuration_risk_direction = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->configuration.risk_direction) : 0;
+    out->market_admission_observation_configuration_loss_days_limit = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->configuration.loss_days_limit) : 0;
+    out->market_admission_observation_configuration_drawdown_limit = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.drawdown_limit) : 0;
+    out->market_admission_observation_configuration_intraday_loss_limit = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.intraday_loss_limit) : 0;
+    out->market_admission_observation_configuration_position_limit = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->configuration.position_limit) : 0;
+    out->market_admission_observation_configuration_fill_cap_active = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->configuration.fill_cap_active) : 0;
+    out->market_admission_observation_configuration_risk_halted = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->configuration.risk_halted) : 0;
+    out->market_admission_observation_bar = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->bar) : 0;
+    out->market_admission_observation_placement_side = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->placement_side) : 0;
+    out->market_admission_observation_placement_cycle = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->placement_cycle) : 0;
+    out->market_admission_observation_prior_close_quantity = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->prior_close_quantity) : 0;
+    out->market_admission_observation_held_quantity = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->held_quantity) : 0;
+    out->market_admission_observation_held_entries = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->held_entries) : 0;
+    out->market_admission_observation_realized_equity = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->realized_equity) : 0;
+    out->market_admission_observation_placement_equity = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->placement_equity) : 0;
+    out->market_admission_observation_signal_close = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->signal_close) : 0;
+    out->market_admission_observation_quantized_fixed_quantity = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->quantized_fixed_quantity) : 0;
+    out->market_admission_observation_original_sizing_present = src.market_admission.observation() && src.market_admission.observation()->original_sizing.has_value() ? 1 : 0;
+    out->market_admission_observation_original_sizing_quantity = src.market_admission.observation() && src.market_admission.observation()->original_sizing ? static_cast<double>(src.market_admission.observation()->original_sizing->quantity) : 0;
+    out->market_admission_observation_original_sizing_equity = src.market_admission.observation() && src.market_admission.observation()->original_sizing ? static_cast<double>(src.market_admission.observation()->original_sizing->equity) : 0;
+    out->market_admission_observation_original_sizing_price = src.market_admission.observation() && src.market_admission.observation()->original_sizing ? static_cast<double>(src.market_admission.observation()->original_sizing->price) : 0;
+    out->market_admission_observation_original_sizing_mark = src.market_admission.observation() && src.market_admission.observation()->original_sizing ? static_cast<double>(src.market_admission.observation()->original_sizing->mark) : 0;
+    out->market_admission_observation_original_sizing_fx = src.market_admission.observation() && src.market_admission.observation()->original_sizing ? static_cast<double>(src.market_admission.observation()->original_sizing->fx) : 0;
+    out->market_admission_observation_explicit_equity = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->explicit_equity) : 0;
+    out->market_admission_observation_explicit_price = src.market_admission.observation() ? static_cast<double>(src.market_admission.observation()->explicit_price) : 0;
+    out->market_admission_review_present = src.market_admission.review() ? 1 : 0;
+    out->market_admission_review_sequence = src.market_admission.review() ? static_cast<uint64_t>(src.market_admission.review()->sequence) : 0;
+    out->market_admission_review_checkpoint = src.market_admission.review() ? static_cast<int64_t>(src.market_admission.review()->checkpoint) : 0;
+    out->market_admission_review_bar = src.market_admission.review() ? static_cast<int64_t>(src.market_admission.review()->bar) : 0;
+    out->market_admission_sizing_revision_present = src.market_admission.sizing_revision() ? 1 : 0;
+    out->market_admission_sizing_revision_sequence = src.market_admission.sizing_revision() ? static_cast<uint64_t>(src.market_admission.sizing_revision()->sequence) : 0;
+    out->market_admission_sizing_revision_cause_fill = src.market_admission.sizing_revision() ? static_cast<uint64_t>(src.market_admission.sizing_revision()->cause_fill) : 0;
+    out->market_admission_sizing_revision_bar = src.market_admission.sizing_revision() ? static_cast<int64_t>(src.market_admission.sizing_revision()->bar) : 0;
+    out->market_admission_review_target_command = src.market_admission.review() ? static_cast<uint64_t>(src.market_admission.review()->target_command) : 0;
+    out->market_admission_sizing_revision_target_command = src.market_admission.sizing_revision() ? static_cast<uint64_t>(src.market_admission.sizing_revision()->target_command) : 0;
 }
 
 namespace {
@@ -339,6 +577,247 @@ const pf_field_desc_t kLayout[] = {
     PF_PO_FIELD(pine_frozen_market_instruction_target_id, "char[64]"),
     PF_PO_FIELD(pine_frozen_market_instruction_target_id_truncated, "uint8_t"),
     PF_PO_FIELD(pine_frozen_market_instruction_target_id_hash64, "uint64_t"),
+    PF_PO_FIELD(legs_target_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_target_owner, "int64_t"),
+    PF_PO_FIELD(legs_revision, "uint64_t"),
+    PF_PO_FIELD(legs_definition_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_definition_revision, "uint64_t"),
+    PF_PO_FIELD(legs_definition_value_present, "uint8_t"),
+    PF_PO_FIELD(legs_definition_limit_price, "double"),
+    PF_PO_FIELD(legs_definition_stop_price, "double"),
+    PF_PO_FIELD(legs_definition_trail_points, "double"),
+    PF_PO_FIELD(legs_definition_trail_price, "double"),
+    PF_PO_FIELD(legs_definition_trail_offset, "double"),
+    PF_PO_FIELD(legs_definition_profit_ticks, "double"),
+    PF_PO_FIELD(legs_definition_loss_ticks, "double"),
+    PF_PO_FIELD(legs_generation0, "uint64_t"),
+    PF_PO_FIELD(legs_retirement0_present, "uint8_t"),
+    PF_PO_FIELD(legs_retirement0_generation, "uint64_t"),
+    PF_PO_FIELD(legs_retirement0_cause_event, "uint64_t"),
+    PF_PO_FIELD(legs_retirement0_cause_bar, "int64_t"),
+    PF_PO_FIELD(legs_retirement0_cause_domain, "uint32_t"),
+    PF_PO_FIELD(legs_retirement0_cause_phase, "uint32_t"),
+    PF_PO_FIELD(legs_generation1, "uint64_t"),
+    PF_PO_FIELD(legs_retirement1_present, "uint8_t"),
+    PF_PO_FIELD(legs_retirement1_generation, "uint64_t"),
+    PF_PO_FIELD(legs_retirement1_cause_event, "uint64_t"),
+    PF_PO_FIELD(legs_retirement1_cause_bar, "int64_t"),
+    PF_PO_FIELD(legs_retirement1_cause_domain, "uint32_t"),
+    PF_PO_FIELD(legs_retirement1_cause_phase, "uint32_t"),
+    PF_PO_FIELD(legs_generation2, "uint64_t"),
+    PF_PO_FIELD(legs_retirement2_present, "uint8_t"),
+    PF_PO_FIELD(legs_retirement2_generation, "uint64_t"),
+    PF_PO_FIELD(legs_retirement2_cause_event, "uint64_t"),
+    PF_PO_FIELD(legs_retirement2_cause_bar, "int64_t"),
+    PF_PO_FIELD(legs_retirement2_cause_domain, "uint32_t"),
+    PF_PO_FIELD(legs_retirement2_cause_phase, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_present, "uint8_t"),
+    PF_PO_FIELD(legs_suspension_cause_event, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_cause_bar, "int64_t"),
+    PF_PO_FIELD(legs_suspension_cause_domain, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_cause_phase, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_legs_count, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_legs_item0, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_legs_item1, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_legs_item2, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_hold_present, "uint8_t"),
+    PF_PO_FIELD(legs_suspension_hold_requested_event, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_hold_requested_bar, "int64_t"),
+    PF_PO_FIELD(legs_suspension_hold_requested_domain, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_hold_requested_phase, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_hold_target_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_hold_target_owner, "int64_t"),
+    PF_PO_FIELD(legs_suspension_hold_revision, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_revival_definition_present, "uint8_t"),
+    PF_PO_FIELD(legs_suspension_revival_definition_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_revival_definition_revision, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_revival_definition_value_present, "uint8_t"),
+    PF_PO_FIELD(legs_suspension_revival_definition_limit_price, "double"),
+    PF_PO_FIELD(legs_suspension_revival_definition_stop_price, "double"),
+    PF_PO_FIELD(legs_suspension_revival_definition_trail_points, "double"),
+    PF_PO_FIELD(legs_suspension_revival_definition_trail_price, "double"),
+    PF_PO_FIELD(legs_suspension_revival_definition_trail_offset, "double"),
+    PF_PO_FIELD(legs_suspension_revival_definition_profit_ticks, "double"),
+    PF_PO_FIELD(legs_suspension_revival_definition_loss_ticks, "double"),
+    PF_PO_FIELD(legs_suspension_replacement_present, "uint8_t"),
+    PF_PO_FIELD(legs_suspension_replacement_queue_predecessor, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_revision, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_value_present, "uint8_t"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_limit_price, "double"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_stop_price, "double"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_trail_points, "double"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_trail_price, "double"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_trail_offset, "double"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_profit_ticks, "double"),
+    PF_PO_FIELD(legs_suspension_replacement_revival_definition_loss_ticks, "double"),
+    PF_PO_FIELD(legs_suspension_replacement_release_requested_event, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_replacement_release_requested_bar, "int64_t"),
+    PF_PO_FIELD(legs_suspension_replacement_release_requested_domain, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_replacement_release_requested_phase, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_replacement_release_target_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_replacement_release_target_owner, "int64_t"),
+    PF_PO_FIELD(legs_suspension_replacement_release_revision, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_window_present, "uint8_t"),
+    PF_PO_FIELD(legs_suspension_window_excluded_event, "uint64_t"),
+    PF_PO_FIELD(legs_suspension_window_excluded_bar, "int64_t"),
+    PF_PO_FIELD(legs_suspension_window_excluded_domain, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_window_excluded_phase, "uint32_t"),
+    PF_PO_FIELD(legs_suspension_window_best, "double"),
+    PF_PO_FIELD(legs_suspension_window_prefix, "double"),
+    PF_PO_FIELD(legs_last_present, "uint8_t"),
+    PF_PO_FIELD(legs_last_target_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_last_target_owner, "int64_t"),
+    PF_PO_FIELD(legs_last_expected_revision, "uint64_t"),
+    PF_PO_FIELD(legs_last_cause_event, "uint64_t"),
+    PF_PO_FIELD(legs_last_cause_bar, "int64_t"),
+    PF_PO_FIELD(legs_last_cause_domain, "uint32_t"),
+    PF_PO_FIELD(legs_last_cause_phase, "uint32_t"),
+    PF_PO_FIELD(legs_last_operation, "uint32_t"),
+    PF_PO_FIELD(legs_last_bind_owner, "int64_t"),
+    PF_PO_FIELD(legs_last_suspend_legs_count, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_legs_item0, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_legs_item1, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_legs_item2, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_hold_present, "uint8_t"),
+    PF_PO_FIELD(legs_last_suspend_hold_requested_event, "uint64_t"),
+    PF_PO_FIELD(legs_last_suspend_hold_requested_bar, "int64_t"),
+    PF_PO_FIELD(legs_last_suspend_hold_requested_domain, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_hold_requested_phase, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_hold_target_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_last_suspend_hold_target_owner, "int64_t"),
+    PF_PO_FIELD(legs_last_suspend_hold_revision, "uint64_t"),
+    PF_PO_FIELD(legs_last_suspend_window_present, "uint8_t"),
+    PF_PO_FIELD(legs_last_suspend_window_excluded_event, "uint64_t"),
+    PF_PO_FIELD(legs_last_suspend_window_excluded_bar, "int64_t"),
+    PF_PO_FIELD(legs_last_suspend_window_excluded_domain, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_window_excluded_phase, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_window_best, "double"),
+    PF_PO_FIELD(legs_last_suspend_window_prefix, "double"),
+    PF_PO_FIELD(legs_last_suspend_retire_count, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_retire_item0, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_retire_item1, "uint32_t"),
+    PF_PO_FIELD(legs_last_suspend_retire_item2, "uint32_t"),
+    PF_PO_FIELD(legs_last_stage_queue_predecessor, "uint64_t"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_revision, "uint64_t"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_value_present, "uint8_t"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_limit_price, "double"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_stop_price, "double"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_trail_points, "double"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_trail_price, "double"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_trail_offset, "double"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_profit_ticks, "double"),
+    PF_PO_FIELD(legs_last_stage_revival_definition_loss_ticks, "double"),
+    PF_PO_FIELD(legs_last_stage_release_requested_event, "uint64_t"),
+    PF_PO_FIELD(legs_last_stage_release_requested_bar, "int64_t"),
+    PF_PO_FIELD(legs_last_stage_release_requested_domain, "uint32_t"),
+    PF_PO_FIELD(legs_last_stage_release_requested_phase, "uint32_t"),
+    PF_PO_FIELD(legs_last_stage_release_target_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_last_stage_release_target_owner, "int64_t"),
+    PF_PO_FIELD(legs_last_stage_release_revision, "uint64_t"),
+    PF_PO_FIELD(legs_last_restore_legs_count, "uint32_t"),
+    PF_PO_FIELD(legs_last_restore_legs_item0, "uint32_t"),
+    PF_PO_FIELD(legs_last_restore_legs_item1, "uint32_t"),
+    PF_PO_FIELD(legs_last_restore_legs_item2, "uint32_t"),
+    PF_PO_FIELD(legs_last_complete_completed_event, "uint64_t"),
+    PF_PO_FIELD(legs_last_complete_completed_bar, "int64_t"),
+    PF_PO_FIELD(legs_last_complete_completed_domain, "uint32_t"),
+    PF_PO_FIELD(legs_last_complete_completed_phase, "uint32_t"),
+    PF_PO_FIELD(legs_last_complete_requested_present, "uint8_t"),
+    PF_PO_FIELD(legs_last_complete_requested_requested_event, "uint64_t"),
+    PF_PO_FIELD(legs_last_complete_requested_requested_bar, "int64_t"),
+    PF_PO_FIELD(legs_last_complete_requested_requested_domain, "uint32_t"),
+    PF_PO_FIELD(legs_last_complete_requested_requested_phase, "uint32_t"),
+    PF_PO_FIELD(legs_last_complete_requested_target_incarnation, "uint64_t"),
+    PF_PO_FIELD(legs_last_complete_requested_target_owner, "int64_t"),
+    PF_PO_FIELD(legs_last_complete_requested_revision, "uint64_t"),
+    PF_PO_FIELD(legs_last_observe_high, "double"),
+    PF_PO_FIELD(legs_last_observe_low, "double"),
+    PF_PO_FIELD(legs_last_observe_direction, "int32_t"),
+    PF_PO_FIELD(legs_last_observe_fold, "uint32_t"),
+    PF_PO_FIELD(legs_last_cancel_legs_count, "uint32_t"),
+    PF_PO_FIELD(legs_last_cancel_legs_item0, "uint32_t"),
+    PF_PO_FIELD(legs_last_cancel_legs_item1, "uint32_t"),
+    PF_PO_FIELD(legs_last_cancel_legs_item2, "uint32_t"),
+    PF_PO_FIELD(market_admission_observation_present, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_command, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_kind, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_cause, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_bar, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_timestamp, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_cursor_domain, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_cursor_position, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_cursor_index, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_cursor_count, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_cursor_price, "double"),
+    PF_PO_FIELD(market_admission_observation_birth_first_fill, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_last_fill, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_birth_evaluation_ordinal, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_id, "char[64]"),
+    PF_PO_FIELD(market_admission_observation_id_truncated, "uint8_t"),
+    PF_PO_FIELD(market_admission_observation_id_hash64, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_requested_quantity, "double"),
+    PF_PO_FIELD(market_admission_observation_quantity_type, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_buy, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_prices_limit, "double"),
+    PF_PO_FIELD(market_admission_observation_prices_stop, "double"),
+    PF_PO_FIELD(market_admission_observation_oca_name, "char[64]"),
+    PF_PO_FIELD(market_admission_observation_oca_name_truncated, "uint8_t"),
+    PF_PO_FIELD(market_admission_observation_oca_name_hash64, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_oca_type, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_process_on_close, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_calc_on_fills, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_magnifier, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_fill_recalculation, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_scheduler, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_slippage, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_pyramiding, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_default_quantity_type, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_default_quantity_value, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_long_margin, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_short_margin, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_commission_value, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_commission_type, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_pointvalue, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_fx, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_quantity_step, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_mintick, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_risk_direction, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_loss_days_limit, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_drawdown_limit, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_intraday_loss_limit, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_position_limit, "double"),
+    PF_PO_FIELD(market_admission_observation_configuration_fill_cap_active, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_configuration_risk_halted, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_bar, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_placement_side, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_placement_cycle, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_prior_close_quantity, "double"),
+    PF_PO_FIELD(market_admission_observation_held_quantity, "double"),
+    PF_PO_FIELD(market_admission_observation_held_entries, "int64_t"),
+    PF_PO_FIELD(market_admission_observation_realized_equity, "double"),
+    PF_PO_FIELD(market_admission_observation_placement_equity, "double"),
+    PF_PO_FIELD(market_admission_observation_signal_close, "double"),
+    PF_PO_FIELD(market_admission_observation_quantized_fixed_quantity, "double"),
+    PF_PO_FIELD(market_admission_observation_original_sizing_present, "uint64_t"),
+    PF_PO_FIELD(market_admission_observation_original_sizing_quantity, "double"),
+    PF_PO_FIELD(market_admission_observation_original_sizing_equity, "double"),
+    PF_PO_FIELD(market_admission_observation_original_sizing_price, "double"),
+    PF_PO_FIELD(market_admission_observation_original_sizing_mark, "double"),
+    PF_PO_FIELD(market_admission_observation_original_sizing_fx, "double"),
+    PF_PO_FIELD(market_admission_observation_explicit_equity, "double"),
+    PF_PO_FIELD(market_admission_observation_explicit_price, "double"),
+    PF_PO_FIELD(market_admission_review_present, "uint64_t"),
+    PF_PO_FIELD(market_admission_review_sequence, "uint64_t"),
+    PF_PO_FIELD(market_admission_review_checkpoint, "int64_t"),
+    PF_PO_FIELD(market_admission_review_bar, "int64_t"),
+    PF_PO_FIELD(market_admission_sizing_revision_present, "uint64_t"),
+    PF_PO_FIELD(market_admission_sizing_revision_sequence, "uint64_t"),
+    PF_PO_FIELD(market_admission_sizing_revision_cause_fill, "uint64_t"),
+    PF_PO_FIELD(market_admission_sizing_revision_bar, "int64_t"),
+    PF_PO_FIELD(market_admission_review_target_command, "uint64_t"),
+    PF_PO_FIELD(market_admission_sizing_revision_target_command, "uint64_t"),
 };
 
 #undef PF_PO_FIELD

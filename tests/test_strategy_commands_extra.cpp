@@ -237,7 +237,7 @@ static void test_raw_market_order_fills_at_open() {
                 for (const auto& o : pending_orders_) {
                     if (o.id == "R") {
                         saw_nan_prices =
-                            std::isnan(o.limit_price) && std::isnan(o.stop_price);
+                            std::isnan(o.legs.prices().limit_price) && std::isnan(o.legs.prices().stop_price);
                     }
                 }
             }

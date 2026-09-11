@@ -1,0 +1,142 @@
+{
+  "Configuration": {
+    "process_on_close": "bool",
+    "calc_on_fills": "bool",
+    "magnifier": "bool",
+    "fill_recalculation": "bool",
+    "scheduler": "bool",
+    "slippage": "int",
+    "pyramiding": "int",
+    "default_quantity_type": "int",
+    "default_quantity_value": "double",
+    "long_margin": "double",
+    "short_margin": "double",
+    "commission_value": "double",
+    "commission_type": "int",
+    "pointvalue": "double",
+    "fx": "double",
+    "quantity_step": "double",
+    "mintick": "double",
+    "risk_direction": "int",
+    "loss_days_limit": "int",
+    "drawdown_limit": "double",
+    "intraday_loss_limit": "double",
+    "position_limit": "double",
+    "fill_cap_active": "bool",
+    "risk_halted": "bool"
+  },
+  "PriceRequest": {
+    "limit": "double",
+    "stop": "double"
+  },
+  "SizingObservation": {
+    "quantity": "double",
+    "equity": "double",
+    "price": "double",
+    "mark": "double",
+    "fx": "double"
+  },
+  "CommandObservation": {
+    "command": "uint64_t",
+    "kind": "CommandKind",
+    "birth": "OrderBirth",
+    "id": "std::string",
+    "requested_quantity": "double",
+    "quantity_type": "int",
+    "buy": "bool",
+    "prices": "PriceRequest",
+    "oca_name": "std::string",
+    "oca_type": "int",
+    "configuration": "Configuration",
+    "bar": "int",
+    "placement_side": "int",
+    "placement_cycle": "int64_t",
+    "prior_close_quantity": "double",
+    "held_quantity": "double",
+    "held_entries": "int",
+    "realized_equity": "double",
+    "placement_equity": "double",
+    "signal_close": "double",
+    "quantized_fixed_quantity": "double",
+    "original_sizing": "std::optional<SizingObservation>",
+    "explicit_equity": "double",
+    "explicit_price": "double"
+  },
+  "ReviewReceipt": {
+    "sequence": "uint64_t",
+    "checkpoint": "Checkpoint",
+    "bar": "int",
+    "target_command": "uint64_t"
+  },
+  "SizingRevision": {
+    "sequence": "uint64_t",
+    "cause_fill": "uint64_t",
+    "bar": "int",
+    "target_command": "uint64_t"
+  },
+  "BookObservation": {
+    "incarnation": "uint64_t",
+    "priority": "int64_t",
+    "bar": "int",
+    "type": "int",
+    "placement_side": "int",
+    "id": "std::string",
+    "oca_name": "std::string",
+    "oca_type": "int",
+    "birth": "OrderBirth",
+    "prices": "CurrentPrices",
+    "draft": "Draft"
+  },
+  "CommandEvent": {
+    "observation": "std::shared_ptr<const CommandObservation>",
+    "outcome": "Outcome",
+    "admitted_incarnation": "uint64_t",
+    "before": "std::vector<BookObservation>",
+    "removed": "std::vector<uint64_t>"
+  },
+  "InstructionResolution": {
+    "incarnation": "uint64_t",
+    "kind": "ResolutionKind",
+    "peer_incarnation": "uint64_t",
+    "own_priority": "int64_t",
+    "peer_priority": "int64_t",
+    "transaction_quantity": "double"
+  },
+  "ReviewEvent": {
+    "receipt": "ReviewReceipt",
+    "configuration": "Configuration",
+    "open_price": "double",
+    "position_side": "int",
+    "position_cycle": "int64_t",
+    "book": "std::vector<BookObservation>",
+    "reviewed": "std::vector<BookObservation>",
+    "resolutions": "std::vector<InstructionResolution>",
+    "causes": "std::vector<uint64_t>"
+  },
+  "SizingEvent": {
+    "receipt": "SizingRevision",
+    "incarnation": "uint64_t",
+    "before": "SizingObservation",
+    "after": "SizingObservation",
+    "affordability_equity_before": "double",
+    "affordability_equity_after": "double"
+  },
+  "Draft": {
+    "observation_": "std::shared_ptr<const CommandObservation>",
+    "review_": "std::optional<ReviewReceipt>",
+    "sizing_revision_": "std::optional<SizingRevision>"
+  },
+  "Journal": {
+    "next_sequence_": "uint64_t",
+    "active_allocations_": "uint64_t",
+    "outstanding_sequences_": "std::vector<uint64_t>",
+    "events_": "std::vector<Event>"
+  },
+  "CurrentPrices": {
+    "limit": "double",
+    "stop": "double",
+    "trail_points": "double",
+    "trail_price": "double",
+    "trail_offset": "double"
+  }
+}

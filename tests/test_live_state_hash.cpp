@@ -209,7 +209,6 @@ public:
             {"pending_close_qty_in_bar_", [](Probe& s) { s.pending_close_qty_in_bar_ = 424242.5; }},
 
             // Order book scalars
-            {"last_rejected_strategy_entry_call_bar_", [](Probe& s) { s.last_rejected_strategy_entry_call_bar_ += 1; }},
 
             // Dual-entry per-bar snapshot (underlying type is `int`; the
             // enumerators themselves are not visible from the public header,
@@ -318,12 +317,6 @@ public:
             {"consumed_partial_exit_ids_ (insert)", [](Probe& s) {
                 s.consumed_partial_exit_ids_.insert("new_id");
             }},
-            {"pending_flat_market_pair_disqualified_bars_ (insert)", [](Probe& s) {
-                s.pending_flat_market_pair_disqualified_bars_.insert(7);
-            }},
-            {"default_flat_market_gross_disqualified_bars_ (insert)", [](Probe& s) {
-                s.default_flat_market_gross_disqualified_bars_.insert(7);
-            }},
             {"trades_ (push)", [](Probe& s) {
                 s.trades_.push_back(Trade{});
             }},
@@ -339,8 +332,8 @@ public:
             // preserves the exact same bit pattern (IEEE-754), which would
             // make the pin a silent no-op regardless of hash correctness
             // (see the comment on Build2Bars() below for the repro).
-            {"pending_orders_[].stop_price", [](Probe& s) {
-                if (!s.pending_orders_.empty()) s.pending_orders_[0].stop_price = 999.0;
+            {"pending_orders_[].legs.prices().stop_price", [](Probe& s) {
+                if (!s.pending_orders_.empty()) s.pending_orders_[0].legs.set_stop_price(999.0);
             }},
             {"pending_orders_[].tv_carry_qty", [](Probe& s) {
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].tv_carry_qty = 42.0;
@@ -434,18 +427,6 @@ public:
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].reverses_same_bar_market_from_flat = !s.pending_orders_[0].reverses_same_bar_market_from_flat;
             }},
-            {"pending_orders_[].default_flat_market_gross_candidate", [](Probe& s) {
-                if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].default_flat_market_gross_candidate = !s.pending_orders_[0].default_flat_market_gross_candidate;
-            }},
-            {"pending_orders_[].opening_affordability_exemption_candidate", [](Probe& s) {
-                if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].opening_affordability_exemption_candidate = !s.pending_orders_[0].opening_affordability_exemption_candidate;
-            }},
-            {"pending_orders_[].explicit_flat_admission_candidate", [](Probe& s) {
-                if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].explicit_flat_admission_candidate = !s.pending_orders_[0].explicit_flat_admission_candidate;
-            }},
             {"pending_orders_[].reservation_expansion", [](Probe& s) {
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].reservation_expansion.capture(50,7,PositionSide::LONG,10);
@@ -453,6 +434,14 @@ public:
             {"pending_orders_[].reservation_growth_source", [](Probe& s) {
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].reservation_growth_source.assign_capture(41,50);
+            }},
+            {"pending_orders_[].market_admission", [](Probe& s) {
+                if(!s.pending_orders_.empty()) {
+                    auto observed=*s.pending_orders_[0].market_admission.observation();
+                    observed.configuration.default_quantity_value+=1;
+                    s.pending_orders_[0].market_admission={};
+                    s.pending_orders_[0].market_admission.bind(std::make_shared<const admission::CommandObservation>(observed));
+                }
             }},
             {"pending_orders_[].signal_close_mc_remaining_qty", [](Probe& s) {
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].signal_close_mc_remaining_qty = 424242.5;
@@ -531,22 +520,6 @@ public:
             {"pos_view_frozen_entry_qty_", [](Probe& a, Probe& b) {
                 a.pos_view_frozen_entry_qty_["k1"] = 1.0; a.pos_view_frozen_entry_qty_["k2"] = 2.0; a.pos_view_frozen_entry_qty_["k3"] = 3.0;
                 b.pos_view_frozen_entry_qty_["k3"] = 3.0; b.pos_view_frozen_entry_qty_["k1"] = 1.0; b.pos_view_frozen_entry_qty_["k2"] = 2.0;
-            }},
-            {"pending_flat_market_pair_disqualified_bars_", [](Probe& a, Probe& b) {
-                a.pending_flat_market_pair_disqualified_bars_.insert(5);
-                a.pending_flat_market_pair_disqualified_bars_.insert(2);
-                a.pending_flat_market_pair_disqualified_bars_.insert(9);
-                b.pending_flat_market_pair_disqualified_bars_.insert(9);
-                b.pending_flat_market_pair_disqualified_bars_.insert(5);
-                b.pending_flat_market_pair_disqualified_bars_.insert(2);
-            }},
-            {"default_flat_market_gross_disqualified_bars_", [](Probe& a, Probe& b) {
-                a.default_flat_market_gross_disqualified_bars_.insert(5);
-                a.default_flat_market_gross_disqualified_bars_.insert(2);
-                a.default_flat_market_gross_disqualified_bars_.insert(9);
-                b.default_flat_market_gross_disqualified_bars_.insert(9);
-                b.default_flat_market_gross_disqualified_bars_.insert(5);
-                b.default_flat_market_gross_disqualified_bars_.insert(2);
             }},
             {"callsite_close_reserved_qty_ (nested)", [](Probe& a, Probe& b) {
                 a.callsite_close_reserved_qty_[1]["a"] = 1.0;

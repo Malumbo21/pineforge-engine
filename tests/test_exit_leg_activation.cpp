@@ -343,7 +343,7 @@ void named_pine_continuations_keep_their_guards() {
     const Bar bar{100,105,90,104,1,120000};
     const std::string id="A";
     PendingOrder order{}; order.type=OrderType::EXIT; order.from_entry=id;
-    order.stop_price=nan; order.limit_price=102; order.trail_points=nan; order.trail_price=nan;
+    order.legs.set_stop_price(nan); order.legs.set_limit_price(102); order.legs.set_trail_points(nan); order.legs.set_trail_price(nan);
     order.qty=1; order.quantity_request.request(QuantityIntent::all());
     order.quantity_request.reserve(1,1);
     order.pine_birth_reach=PineHistoricalBirthReach::ExtremeWaypoints;
@@ -360,17 +360,17 @@ void named_pine_continuations_keep_their_guards() {
     CHECK(competitor.holds_limit()&&!competitor.evidence()->limit_continuation);
     context.pending_empty=true; context.cursor_price=100; context.after_first_open_fill=true;
     context.recalc_leg=0; context.historical_point=0; context.at_extreme=false;
-    order.stop_price=101;order.limit_price=99;
+    order.legs.set_stop_price(101);order.legs.set_limit_price(99);
     const auto later=compat::pine::select_exit_activation(order,101,99,context);
     CHECK(later.holds_stop()&&!later.holds_limit()&&later.continues_at_later_open());
-    order.trail_points=5;
+    order.legs.set_trail_points(5);
     const auto trailing=compat::pine::select_exit_activation(order,101,99,context);
     CHECK(trailing.holds_stop()&&trailing.holds_limit()&&!trailing.continues_at_later_open());
     context.fill_recalc=false;
     const auto direct=compat::pine::select_exit_activation(order,101,99,context);
     CHECK(!direct.evidence());
     // Later trigger neutralization cannot mutate the original policy evidence.
-    order.stop_price=order.limit_price=nan;
+    order.legs.set_stop_price(order.legs.set_limit_price(nan));
     CHECK(later.holds_stop()&&later.evidence()->stop_level==101);
 }
 

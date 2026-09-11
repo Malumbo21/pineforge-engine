@@ -322,7 +322,7 @@ void BacktestEngine::dispatch_bar() {
     {
         size_t trades_before_mc = trades_.size();
         process_margin_call(current_bar_);
-        settle_dormant_bracket_reissues();
+        settle_dormant_bracket_reissues(exit_legs::Domain::Ordinary);
         if (trades_.size() != trades_before_mc) {
             refresh_frozen_default_sizing_after_margin_call();
         }
@@ -743,7 +743,7 @@ void BacktestEngine::dispatch_bar_calc_on_order_fills() {
     const size_t trades_before_mc = trades_.size();
     const uint64_t fill_seq_before_mc = broker_fill_event_seq_;
     process_margin_call(current_bar_);
-    settle_dormant_bracket_reissues();
+    settle_dormant_bracket_reissues(exit_legs::Domain::Coof);
     if (trades_.size() != trades_before_mc) {
         refresh_frozen_default_sizing_after_margin_call();
     }
@@ -814,10 +814,9 @@ void BacktestEngine::reset_run_state() {
     // Resetting keeps a reused handle byte/identity-equivalent to a fresh
     // handle while preserving the invariant that zero means unavailable.
     next_order_incarnation_ = 1;
+    exit_leg_event_seq_ = 0;
     next_order_seq_ = 1;
-    last_rejected_strategy_entry_call_bar_ = -1;
-    pending_flat_market_pair_disqualified_bars_.clear();
-    default_flat_market_gross_disqualified_bars_.clear();
+    market_admission_journal_.reset();
     named_entry_cancelled_incarnation_in_current_eval_.clear();
     pending_close_qty_in_bar_ = 0.0;
     pos_view_freeze_bar_ = -1;   // KI-64: fresh run starts with no frozen view
@@ -1261,7 +1260,7 @@ void BacktestEngine::run_magnified_bar(
     {
         size_t trades_before_mc = trades_.size();
         process_margin_call(current_bar_);
-        settle_dormant_bracket_reissues();
+        settle_dormant_bracket_reissues(exit_legs::Domain::Magnifier);
         if (trades_.size() != trades_before_mc) {
             refresh_frozen_default_sizing_after_margin_call();
         }
@@ -1490,7 +1489,7 @@ void BacktestEngine::run_magnified_bar_calc_on_order_fills(
     const size_t trades_before_mc = trades_.size();
     const uint64_t fill_seq_before_mc = broker_fill_event_seq_;
     process_margin_call(current_bar_);
-    settle_dormant_bracket_reissues();
+    settle_dormant_bracket_reissues(exit_legs::Domain::MagnifierCoof);
     if (trades_.size() != trades_before_mc) {
         refresh_frozen_default_sizing_after_margin_call();
     }

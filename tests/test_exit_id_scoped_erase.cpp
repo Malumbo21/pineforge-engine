@@ -105,7 +105,7 @@ public:
     double exit_limit(const std::string& id, const std::string& from_entry) const {
         for (const auto& o : pending_orders_)
             if (o.type == OrderType::EXIT && o.id == id && o.from_entry == from_entry)
-                return o.limit_price;
+                return o.legs.prices().limit_price;
         return NA;
     }
     // trades_ is protected on the engine; expose it for main()'s asserts.

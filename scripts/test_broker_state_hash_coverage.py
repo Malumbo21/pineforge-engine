@@ -36,11 +36,16 @@ class PhysicalLotCoverage(unittest.TestCase):
               intraday=INTRADAY, policy=POLICY, obligation=OBLIGATION, stream=STREAM, quantity=QUANTITY, birth=BIRTH, activation=ACTIVATION, exit_policy=EXIT_POLICY, expansion=EXPANSION, expansion_source=EXPANSION_SOURCE, frozen=FROZEN):
         with tempfile.TemporaryDirectory(prefix="pf-lot-hash-check-") as temp:
             root = Path(temp)
+            admission_files=["include/pineforge/market_admission.hpp", "src/market_admission.cpp", "scripts/market_admission_schema.json", "scripts/market_admission_mirror_fields.json", "scripts/pending_order_mirror_waivers.txt"]
+            for name in admission_files:
+                target=root/name;target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_text((ROOT/name).read_text())
             for name, content in [
                 ("include/pineforge/engine.hpp", header),
                 ("include/pineforge/compat/pine/frozen_market_instruction.hpp", frozen),
                 ("include/pineforge/broker_events.hpp", events),
                 ("include/pineforge/quantity_intent.hpp", quantity),
+                ("include/pineforge/exit_leg_lifecycle.hpp", (ROOT / "include/pineforge/exit_leg_lifecycle.hpp").read_text()),
                 ("include/pineforge/reservation_expansion.hpp", expansion),
                 ("src/reservation_expansion.cpp", expansion_source),
                 ("include/pineforge/order_birth.hpp", birth),
@@ -171,26 +176,26 @@ class PhysicalLotCoverage(unittest.TestCase):
                 self.assertIn(old, QUANTITY)
                 self.assertEqual(self.check(quantity=QUANTITY.replace(old, new))[0], 1)
 
-    def test_layout_and_hash_versions_must_match_v7_contract(self):
-        self.assertIn("engine_script_run_v7", HEADER)
-        self.assertIn('f.s("pineforge-broker-state/v7");', SOURCE)
-        self.assertIn("integer(7); integer(broker_state_hash());", STREAM)
-        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v7", "engine_script_run_v2"))[0], 1)
+    def test_layout_and_hash_versions_must_match_v8_contract(self):
+        self.assertIn("engine_script_run_v8", HEADER)
+        self.assertIn('f.s("pineforge-broker-state/v8");', SOURCE)
+        self.assertIn("integer(8); integer(broker_state_hash());", STREAM)
+        self.assertEqual(self.check(header=HEADER.replace("engine_script_run_v8", "engine_script_run_v2"))[0], 1)
         for replacement in ['f.s("pineforge-broker-state/v2");', '',
-                            '// f.s("pineforge-broker-state/v7");']:
+                            '// f.s("pineforge-broker-state/v8");']:
             self.assertEqual(self.check(source=SOURCE.replace(
-                'f.s("pineforge-broker-state/v7");', replacement))[0], 1)
+                'f.s("pineforge-broker-state/v8");', replacement))[0], 1)
         for replacement in ["integer(2); integer(broker_state_hash());",
                             "integer(broker_state_hash());",
-                            "if (false) { integer(7); integer(broker_state_hash()); }"]:
+                            "if (false) { integer(8); integer(broker_state_hash()); }"]:
             self.assertEqual(self.check(stream=STREAM.replace(
-                "integer(7); integer(broker_state_hash());", replacement))[0], 1)
+                "integer(8); integer(broker_state_hash());", replacement))[0], 1)
 
     def test_version_folds_in_unrelated_helpers_do_not_cover_entry_points(self):
-        broker_fold = 'f.s("pineforge-broker-state/v7");'
+        broker_fold = 'f.s("pineforge-broker-state/v8");'
         altered = SOURCE.replace(broker_fold, '') + '\nvoid other() { ' + broker_fold + ' }\n'
         self.assertEqual(self.check(source=altered)[0], 1)
-        stream_fold = "integer(7); integer(broker_state_hash());"
+        stream_fold = "integer(8); integer(broker_state_hash());"
         altered = STREAM.replace(stream_fold, '') + '\nvoid other() { ' + stream_fold + ' }\n'
         self.assertEqual(self.check(stream=altered)[0], 1)
 
@@ -263,11 +268,11 @@ class PhysicalLotCoverage(unittest.TestCase):
         self.assertNotEqual(self.check(birth=altered)[0], 0)
 
     def test_pending_order_coverage_still_refuses_omission(self):
-        source = SOURCE.replace("f.d(o.stop_price);", "")
+        source = SOURCE.replace("o.legs.visit(f);", "")
         self.assertNotEqual(source, SOURCE)
         code, output = self.check(source=source)
         self.assertEqual(code, 1, output)
-        self.assertIn("stop_price", output)
+        self.assertIn("canonical lifecycle", output)
 
     def test_every_opening_owner_field_requires_its_own_fold(self):
         for _type, name in members(EVENTS, "OpeningOwner"):

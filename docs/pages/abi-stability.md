@@ -112,45 +112,51 @@ notice:
 - The shape of internal log lines (use them for humans, not parsers).
 
 Rebuild generated and native C++ objects against matching engine headers and
-runtime. Exact-owner reservation expansion and typed Pine market instructions
-change `PendingOrder` layout after
-shipped ff54/v6; both `PendingOrder` and `BacktestEngine` now use internal
-`engine_script_run_v7`. Exact shipped ff54/v6 headers are authenticated before
-compilation. Old native and generated-style engine callers and standalone
-priority callers using `vector<PendingOrder>` must reject the v7 archive.
-Matching current and historical symbol-control links must succeed. Earlier
-base38/v2, f864/v3, c45/v4 and shipped149/v5 controls remain. Every translation
-unit must compile before a mismatch link is accepted; no pairing executable runs.
+runtime. The combined exit-lifecycle and market-admission layout advances
+`PendingOrder` and `BacktestEngine` to `engine_script_run_v8`. Exact shipped
+cc0/v7 headers are authenticated before native, generated-style and standalone
+PendingOrder pairing checks. Current/old matching links must succeed and stale
+pairings must fail for the expected qualified symbols. Earlier v2-v6 controls
+remain; every translation unit must compile before any mismatch is accepted.
+No pairing executable runs.
 
-The standalone `ReservationExpansionCapture`, `ReservationExpansion` and
-`ReservationGrowthSource` types establish their first C++ contract in the inline
-`reservation_expansion_v1` namespace, including out-of-line methods. This version
-is independent of the containing engine epoch. A frozen unshipped bf312 header
-closure provides a negative control for the preceding unversioned draft; these
-types did not exist in shipped ff54. Standalone method and capture-argument
-pairings reject both stale directions, with matching positives. Inline accessors
-still require matching headers; namespace versioning is not a serialization ABI.
+New standalone lifecycle values and `Lifecycle` own the inline namespace
+`pineforge::exit_legs::lifecycle_v1`; new admission values, `Draft`, `Journal`
+and capture classes/methods own `pineforge::admission::market_admission_v1`.
+Header-only lifecycle methods do not require a library reference by themselves;
+separate caller/provider argument controls verify cross-translation-unit type
+identity. Admission method controls also link the current runtime archive.
+Authenticated unshipped pre-version headers are draft-only negative controls,
+not definitions that existed in shipped cc0. Inline accessors always require
+matching headers.
+
+The unchanged `ReservationExpansionCapture`, `ReservationExpansion` and
+`ReservationGrowthSource` retain `reservation_expansion_v1`, including their
+out-of-line methods. Their earlier unversioned-draft controls remain. Standalone
+versions are independent of the containing engine epoch; no financial draft is
+part of this aggregate ABI.
 
 `PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1` remains 1: it describes the existing hook
 capability, not the class layout version. Regenerate and rebuild a strategy
 module to obtain complete script-state reset; replacing an archive does not
 retrofit an old module. Public C function signatures, `PF_ABI_VERSION` (4),
 and `strategy_stream_api_version()` (1) are unchanged. The pending-order v1
-mirror keeps all 142 shipped ff54 field names/types/offsets and its full old prefix;
+mirror keeps all 155 shipped cc0 field names/types/offsets and its full old prefix;
 new typed facts append, and removed native booleans survive only as read-only
 derived outputs. Size-limited reads keep old callers within their buffers.
 
 Namespace versioning protects referenced internal C++ symbols; it does not
 validate an erased `pf_strategy_t` handle. Use a handle only with functions from
 its creating strategy module. A fully self-contained old module can still use
-its own matching runtime; this check does not turn it into a v7 module.
+its own matching runtime; this check does not turn it into a v8 module.
 
 The integrated representation advances the broker fingerprint domain to
-`pineforge-broker-state/v7` and stream fingerprint version to 7. These identify
-changed serialized reservation capture/source ownership and Pine instruction
-roles/payloads, alongside existing
-leg activation, quantity, predecessor and birth facts. The Pine component schema remains 1; it is
-independent of the aggregate fingerprint version. Prior v2/v3/v4/v5/v6 fingerprints are
+`pineforge-broker-state/v8` and stream fingerprint version to 8. These identify
+changed serialized lifecycle definitions, generations, obligations and replay
+receipts, plus original admission observations and causal journal state. Existing
+reservation, Pine instruction, activation, quantity, predecessor and birth facts
+remain represented. The Pine component schema remains 1; it is
+independent of the aggregate fingerprint version. Prior v2/v3/v4/v5/v6/v7 fingerprints are
 not comparable. Fingerprints are replay checks, not serialized checkpoints or
 complete hashes of private strategy state. The native runner already binds
 its strategy-library SHA; its ledger format and Python provenance fingerprints

@@ -16,7 +16,7 @@ import tempfile
 
 BASE_COMMIT = "38dc73e5503fe5395458e5f8df2a2ad78054a1ae"
 BASE_ENGINE_SHA256 = "06c937a1ccd31815ca7775268ac699ffdfddb1a1f19de4628b777f37e9a6d193"
-CURRENT_NAMESPACE = "engine_script_run_v7"
+CURRENT_NAMESPACE = "engine_script_run_v8"
 BASE_NAMESPACE = "engine_script_run_v2"
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/script_cpp_abi/base38"
 
@@ -98,6 +98,23 @@ int main(int argc, char** argv) {
 '''
 
 
+def frozen_standalone_headers(destination):
+    fixture = FIXTURE.parent.parent / "aggregate_cpp_abi/unversioned-draft"
+    manifest = json.loads((fixture / "manifest.json").read_text())
+    if manifest["base_commit"] != "cc0b22d0ede0f5fc35f54f2966284c68a6750a30":
+        raise RuntimeError("standalone draft fixture has wrong base provenance")
+    for name, expected in manifest["files"].items():
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts or relative.parts[0] != "pineforge":
+            raise RuntimeError("invalid standalone draft path")
+        raw = (fixture / relative).read_bytes()
+        if hashlib.sha256(raw).hexdigest() != expected["sha256"] or len(raw) != expected["bytes"]:
+            raise RuntimeError("standalone draft digest mismatch: " + name)
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+
+
 # Only old entry-point symbols, compiled against the exact frozen old header.
 # This is a linker control, NOT a historical runtime or economic simulation.
 BASE_SYMBOL_CONTROL = '''#include <pineforge/engine.hpp>
@@ -133,9 +150,14 @@ def main():
     parser.add_argument("--extra-flag", action="append", default=[])
     parser.add_argument("--receipt", type=Path)
     args = parser.parse_args()
+    from check_aggregate_cpp_versions import check as check_aggregate_versions
+    check_aggregate_versions(Path(args.include).resolve().parent)
     receipt = {"library_sha256": hashlib.sha256(Path(args.library).read_bytes()).hexdigest(),
                "current_namespace": CURRENT_NAMESPACE,
                "standalone_namespace": "reservation_expansion_v1",
+               "standalone_namespaces": {"reservation": "reservation_expansion_v1",
+                   "lifecycle": "pineforge::exit_legs::lifecycle_v1",
+                   "admission": "pineforge::admission::market_admission_v1"},
                "executable_runs": 0, "compiles": [], "links": []}
     # Literal diagnostic controls guard the link-failure parser itself.
     for namespace in (BASE_NAMESPACE, CURRENT_NAMESPACE):
@@ -170,6 +192,13 @@ def main():
                        "ff54a557ac751244dafd60df0bb22886ec35792d", "engine_script_run_v6",
                        "381a18d59f20ff94c6eed9dec40497fdaa175637fc96169a0a9875a38b071736",
                        "bf312b9d5a705d3d0ca16d4fb897e16c6e73b0d1")
+        cc0_include = root / "basecc0/include"
+        frozen_headers(cc0_include, FIXTURE.parent / "basecc0",
+                       "cc0b22d0ede0f5fc35f54f2966284c68a6750a30", "engine_script_run_v7",
+                       "bc86697bbdb229f65a975d810c8b4d7a98db3062028d03d180e6f8fea6bf7c4d",
+                       "3b33cd3c37e1ed34e3ac2d77a2a8ddb6ce9aebe1")
+        standalone_draft_include = root / "standalone-draft/include"
+        frozen_standalone_headers(standalone_draft_include)
         common = [args.compiler, "-std=c++17", "-O0", *args.extra_flag]
 
         def compile_object(name, source, include):
@@ -239,6 +268,12 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
             BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v6"), shipped_include)
         shipped_priority = compile_object("baseff54_pending_priority", priority_caller, shipped_include)
         shipped_priority_symbols = compile_object("baseff54_pending_priority_symbols", priority_symbols, shipped_include)
+        cc0_native = compile_object("basecc0_native", caller("engine_script_run_v7"), cc0_include)
+        cc0_generated = compile_object("basecc0_generated", caller("engine_script_run_v7", True), cc0_include)
+        cc0_symbols = compile_object("basecc0_symbol_control",
+            BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v7"), cc0_include)
+        cc0_priority = compile_object("basecc0_pending_priority", priority_caller, cc0_include)
+        cc0_priority_symbols = compile_object("basecc0_pending_priority_symbols", priority_symbols, cc0_include)
 
         reservation_caller = '''#include <pineforge/reservation_expansion.hpp>
 int main(int argc, char**) {
@@ -289,6 +324,78 @@ void pairing_capture(const pineforge::ReservationExpansionCapture&) {}
         draft_capture = compile_object("growthbf312_capture_argument", capture_caller, growth_include)
         current_capture_symbols = compile_object("current_capture_symbols", capture_provider, args.include)
         draft_capture_symbols = compile_object("growthbf312_capture_symbols", capture_provider, growth_include)
+
+        lifecycle_provider = '''#include <pineforge/exit_leg_lifecycle.hpp>
+void pairing_lifecycle(const pineforge::exit_legs::Lifecycle&,
+    const pineforge::exit_legs::Action&, const pineforge::exit_legs::Frame&,
+    const pineforge::exit_legs::Definition&) {}
+'''
+        lifecycle_caller = '''#include <pineforge/exit_leg_lifecycle.hpp>
+void pairing_lifecycle(const pineforge::exit_legs::Lifecycle&,
+    const pineforge::exit_legs::Action&, const pineforge::exit_legs::Frame&,
+    const pineforge::exit_legs::Definition&);
+int main() {
+    pineforge::exit_legs::Lifecycle life;
+    pineforge::exit_legs::Action action{};
+    pineforge::exit_legs::Frame frame{};
+    pairing_lifecycle(life, action, frame, life.current_definition());
+}
+'''
+        lifecycle_assertion = '''#include <type_traits>
+static_assert(std::is_same_v<pineforge::exit_legs::Lifecycle,
+    pineforge::exit_legs::lifecycle_v1::Lifecycle>);
+static_assert(std::is_same_v<pineforge::exit_legs::Action,
+    pineforge::exit_legs::lifecycle_v1::Action>);
+'''
+        current_lifecycle = compile_object("current_lifecycle_argument", lifecycle_caller + lifecycle_assertion, args.include)
+        draft_lifecycle = compile_object("draft_lifecycle_argument", lifecycle_caller, standalone_draft_include)
+        current_lifecycle_symbols = compile_object("current_lifecycle_symbols", lifecycle_provider, args.include)
+        draft_lifecycle_symbols = compile_object("draft_lifecycle_symbols", lifecycle_provider, standalone_draft_include)
+        admission_caller = '''#include <pineforge/market_admission.hpp>
+#include <utility>
+int main() {
+    pineforge::admission::Draft draft;
+    pineforge::admission::Journal journal;
+    draft.bind(std::make_shared<const pineforge::admission::CommandObservation>());
+    draft.reviewed({}); draft.sizing_revised({});
+    journal.next_sequence(); journal.append(pineforge::admission::CommandEvent{});
+    journal.retain({}); journal.reflect("", [](const pineforge::admission::Field&) {});
+    auto allocation = journal.reserve();
+    auto moved = std::move(allocation);
+    journal.reset();
+}
+'''
+        admission_assertion = '''#include <type_traits>
+static_assert(std::is_same_v<pineforge::admission::Draft,
+    pineforge::admission::market_admission_v1::Draft>);
+static_assert(std::is_same_v<pineforge::admission::Journal,
+    pineforge::admission::market_admission_v1::Journal>);
+static_assert(std::is_same_v<pineforge::admission::Allocation,
+    pineforge::admission::market_admission_v1::Allocation>);
+static_assert(std::is_same_v<pineforge::admission::CommandCapture,
+    pineforge::admission::market_admission_v1::CommandCapture>);
+static_assert(std::is_same_v<pineforge::admission::ReviewCapture,
+    pineforge::admission::market_admission_v1::ReviewCapture>);
+'''
+        admission_symbols = '''#include <pineforge/market_admission.hpp>
+namespace pineforge::admission {
+void Draft::bind(std::shared_ptr<const CommandObservation>) {}
+void Draft::reviewed(ReviewReceipt) {}
+void Draft::sizing_revised(SizingRevision) {}
+uint64_t Journal::next_sequence() { return 1; }
+Allocation Journal::reserve() { return Allocation(*this, 1); }
+Allocation::Allocation(Allocation&& other) noexcept
+    : journal_(other.journal_), sequence_(other.sequence_) { other.journal_ = nullptr; }
+Allocation::~Allocation() noexcept {}
+void Journal::append(Event) {}
+void Journal::retain(const std::vector<uint64_t>&) {}
+void Journal::reflect(const std::string&, const FieldVisitor&) const {}
+void Journal::reset() {}
+}
+'''
+        current_admission = compile_object("current_admission_methods", admission_caller + admission_assertion, args.include)
+        draft_admission = compile_object("draft_admission_methods", admission_caller, standalone_draft_include)
+        draft_admission_symbols = compile_object("draft_admission_symbols", admission_symbols, standalone_draft_include)
 
         def link(name, obj, runtime, missing_namespace=None):
             linked = subprocess.run(
@@ -356,14 +463,23 @@ void pairing_capture(const pineforge::ReservationExpansionCapture&) {}
         link("current_native_to_v6_symbols", current_native, shipped_symbols, CURRENT_NAMESPACE)
         link("current_generated_to_v6_symbols", current_generated, shipped_symbols, CURRENT_NAMESPACE)
         link("baseff54_pending_priority_to_v6_symbols", shipped_priority, shipped_priority_symbols)
+        link("basecc0_native_to_v7_symbols", cc0_native, cc0_symbols)
+        link("basecc0_generated_to_v7_symbols", cc0_generated, cc0_symbols)
+        link("basecc0_native_to_current", cc0_native, args.library, "engine_script_run_v7")
+        link("basecc0_generated_to_current", cc0_generated, args.library, "engine_script_run_v7")
+        link("current_native_to_v7_symbols", current_native, cc0_symbols, CURRENT_NAMESPACE)
+        link("current_generated_to_v7_symbols", current_generated, cc0_symbols, CURRENT_NAMESPACE)
+        link("basecc0_pending_priority_to_v7_symbols", cc0_priority, cc0_priority_symbols)
         for name, obj, runtime, expected in [
+            ("basecc0_pending_priority_to_current", cc0_priority, args.library, "pineforge::engine_script_run_v7::PendingOrder"),
+            ("current_pending_priority_to_v7_symbols", current_priority, cc0_priority_symbols, "pineforge::engine_script_run_v8::PendingOrder"),
             ("baseff54_pending_priority_to_current", shipped_priority, args.library, "pineforge::engine_script_run_v6::PendingOrder"),
-            ("current_pending_priority_to_v6_symbols", current_priority, shipped_priority_symbols, "pineforge::engine_script_run_v7::PendingOrder"),
+            ("current_pending_priority_to_v6_symbols", current_priority, shipped_priority_symbols, "pineforge::engine_script_run_v8::PendingOrder"),
             ("base149_pending_priority_to_current", activation_priority, args.library, "pineforge::engine_script_run_v5::PendingOrder"),
-            ("current_pending_priority_to_v5_symbols", current_priority, activation_priority_symbols, "pineforge::engine_script_run_v7::PendingOrder"),
+            ("current_pending_priority_to_v5_symbols", current_priority, activation_priority_symbols, "pineforge::engine_script_run_v8::PendingOrder"),
             ("basec45_pending_priority_to_current", prior_priority, args.library, "pineforge::PendingOrder"),
             ("current_pending_priority_to_v4_symbols", current_priority, prior_priority_symbols,
-             "pineforge::engine_script_run_v7::PendingOrder"),
+             "pineforge::engine_script_run_v8::PendingOrder"),
         ]:
             result = subprocess.run([*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
                                     capture_output=True, text=True, timeout=60)
@@ -371,6 +487,32 @@ void pairing_capture(const pineforge::ReservationExpansionCapture&) {}
                     or "OrderPriority::select(" not in result.stderr or expected not in result.stderr):
                 raise RuntimeError(name + " did not reject the expected PendingOrder type: " + result.stderr)
             print(name + ": rejected stale standalone PendingOrder argument type (not executed)")
+            receipt["links"].append({"name": name, "outcome": "expected_rejection",
+                "exit": result.returncode, "diagnostics": result.stderr})
+
+        link("current_lifecycle_to_current_symbols", current_lifecycle, current_lifecycle_symbols)
+        link("draft_lifecycle_to_draft_symbols", draft_lifecycle, draft_lifecycle_symbols)
+        link("current_admission_to_current", current_admission, args.library)
+        link("draft_admission_to_draft_symbols", draft_admission, draft_admission_symbols)
+        for name, obj, runtime, expected in [
+            ("draft_lifecycle_to_current_symbols", draft_lifecycle, current_lifecycle_symbols,
+             ["pairing_lifecycle(pineforge::exit_legs::Lifecycle const&"]),
+            ("current_lifecycle_to_draft_symbols", current_lifecycle, draft_lifecycle_symbols,
+             ["pairing_lifecycle(pineforge::exit_legs::lifecycle_v1::Lifecycle const&"]),
+            ("draft_admission_to_current", draft_admission, args.library,
+             ["pineforge::admission::Draft::bind(", "pineforge::admission::Journal::next_sequence(",
+              "pineforge::admission::Allocation::~Allocation("]),
+            ("current_admission_to_draft_symbols", current_admission, draft_admission_symbols,
+             ["pineforge::admission::market_admission_v1::Draft::bind(",
+              "pineforge::admission::market_admission_v1::Journal::next_sequence(",
+              "pineforge::admission::market_admission_v1::Allocation::~Allocation("]),
+        ]:
+            result = subprocess.run([*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
+                                    capture_output=True, text=True, timeout=60)
+            if (result.returncode == 0 or "undefined" not in result.stderr.lower()
+                    or any(needle not in result.stderr for needle in expected)):
+                raise RuntimeError(name + " did not reject the expected aggregate standalone ABI: " + result.stderr)
+            print(name + ": rejected stale standalone lifecycle/admission ABI (not executed)")
             receipt["links"].append({"name": name, "outcome": "expected_rejection",
                 "exit": result.returncode, "diagnostics": result.stderr})
 

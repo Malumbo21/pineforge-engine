@@ -43,6 +43,17 @@ struct Fnv {
     void s(const std::string& v) { u(v.size()); bytes(v.data(), v.size()); }
 };
 
+void hash_admission_field(Fnv& f,const admission::Field& field) {
+    f.s(field.path);f.u(field.value.index());
+    std::visit([&](const auto& value){
+        using T=std::decay_t<decltype(value)>;
+        if constexpr(std::is_same_v<T,uint64_t>)f.u(value);
+        else if constexpr(std::is_same_v<T,int64_t>)f.i(value);
+        else if constexpr(std::is_same_v<T,double>)f.d(value);
+        else f.s(value);
+    },field.value);
+}
+
 // unordered_map<string, double>, hashed in key-sorted order.
 void hash_str_double_map(Fnv& f, const std::unordered_map<std::string, double>& m) {
     std::vector<std::pair<std::string, double>> v(m.begin(), m.end());
@@ -68,13 +79,6 @@ void hash_token_owned_map(
     }
 }
 
-void hash_int_set(Fnv& f, const std::unordered_set<int>& s) {
-    std::vector<int> v(s.begin(), s.end());
-    std::sort(v.begin(), v.end());
-    f.u(v.size());
-    for (int x : v) f.i(static_cast<int64_t>(x));
-}
-
 void hash_str_set(Fnv& f, const std::unordered_set<std::string>& s) {
     std::vector<std::string> v(s.begin(), s.end());
     std::sort(v.begin(), v.end());
@@ -88,7 +92,7 @@ uint64_t BacktestEngine::broker_state_hash() const {
     Fnv f;
     // v6 includes resolved exit-leg owner/coordinates and immutable Pine placement evidence.
     // It is a serialization boundary, independent of the public C ABI version.
-    f.s("pineforge-broker-state/v7");
+    f.s("pineforge-broker-state/v8");
 
     // --- Position core ---
     f.i(static_cast<int64_t>(position_side_));
@@ -170,19 +174,12 @@ uint64_t BacktestEngine::broker_state_hash() const {
     f.u(pending_orders_.size());
     for (const auto& o : pending_orders_) {
         f.s(o.id); f.s(o.from_entry); f.i(static_cast<int64_t>(o.type)); f.b(o.is_long);
-        f.d(o.limit_price); f.d(o.stop_price); f.d(o.trail_points); f.d(o.trail_price);
-        f.d(o.trail_offset); f.d(o.profit_ticks); f.d(o.loss_ticks); f.d(o.qty);
+        o.legs.visit(f); f.d(o.qty);
         f.i(static_cast<int64_t>(o.qty_type)); f.d(o.qty_percent); f.s(o.oca_name);
         f.i(static_cast<int64_t>(o.oca_type));
         f.i(static_cast<int64_t>(o.created_bar)); f.i(o.created_seq); f.u(o.incarnation);
         f.b(o.stop_limit_activated);
         f.d(o.default_stop_placement_qty); f.d(o.frozen_default_qty);
-        f.b(o.dormant_bracket); f.b(o.dormant_reissue_pending);
-        f.d(o.dormant_original_stop_price);
-        f.d(o.dormant_trail_best); f.d(o.dormant_trail_best_start);
-        f.b(o.dormant_trail_leg_dead);
-        f.i(static_cast<int64_t>(o.dormant_hold_bar));
-        f.i(static_cast<int64_t>(o.dormant_reversal_kill_bar));
         // Frozen fill-time admission/sizing snapshot (design-market-entry-
         // affordability / KI-54 / round-7 stop-entry-placement-admission).
         f.d(o.sizing_equity); f.d(o.sizing_price); f.d(o.sizing_fx); f.d(o.sizing_mark);
@@ -219,7 +216,7 @@ uint64_t BacktestEngine::broker_state_hash() const {
             f.s(close->target_id);
         }
         // KI-65 dual same-bar opposite-MARKET pairing candidate/finalization.
-        f.b(o.paired_flat_market_candidate);
+        admission::reflect(o.market_admission,"draft",[&](const auto& field){hash_admission_field(f,field);});
         f.d(o.paired_flat_market_own_qty);
         f.d(o.paired_flat_market_signal_close);
         f.d(o.paired_flat_market_signal_equity);
@@ -283,15 +280,12 @@ uint64_t BacktestEngine::broker_state_hash() const {
         f.u(o.same_id_stop_deferred_close_all_incarnation);
         // KI-65 dual same-bar opposite entry / gross-admission candidacy.
         f.b(o.reverses_same_bar_market_from_flat);
-        f.b(o.default_flat_market_gross_candidate);
         // design-market-entry-affordability placement snapshot (the fill
         // check costs held + own against THIS equity at THIS price).
         f.d(o.affordability_placement_equity);
         f.d(o.affordability_signal_price);
         f.d(o.affordability_held_qty);
         // KI-61 exemption / explicit-qty admission snapshot.
-        f.b(o.opening_affordability_exemption_candidate);
-        f.b(o.explicit_flat_admission_candidate);
         f.d(o.explicit_placement_equity);
         f.d(o.explicit_slipped_signal_close);
         // Round-7 default-percent stop placement basis.
@@ -313,9 +307,7 @@ uint64_t BacktestEngine::broker_state_hash() const {
         f.d(o.suppressed_close_consumed_ledger_qty);
         f.d(o.suppressed_close_retired_ledger_qty);
     }
-    f.i(last_rejected_strategy_entry_call_bar_);
-    hash_int_set(f, pending_flat_market_pair_disqualified_bars_);
-    hash_int_set(f, default_flat_market_gross_disqualified_bars_);
+    market_admission_journal_.reflect("journal",[&](const auto& field){hash_admission_field(f,field);});
 
     // strategy.exit partial orders are one-shot per open position per id.
     hash_str_set(f, consumed_partial_exit_ids_);
@@ -415,6 +407,7 @@ uint64_t BacktestEngine::broker_state_hash() const {
     // are not in the same broker state). ---
     f.i(next_order_seq_);
     f.u(next_order_incarnation_);
+    f.u(exit_leg_event_seq_);
     f.u(broker_fill_event_seq_);
 
     // --- Account-currency FX broker clock (the injected rate SERIES is

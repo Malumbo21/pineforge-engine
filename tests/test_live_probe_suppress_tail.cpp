@@ -21,14 +21,14 @@ public:
     void on_bar(const Bar& b) override {
         ++on_bar_calls;
         std::vector<double> stops;
-        for (const auto& o : pending_orders_) stops.push_back(o.stop_price);
+        for (const auto& o : pending_orders_) stops.push_back(o.legs.prices().stop_price);
         book_at_on_bar_entry.push_back(stops);
         if (bar_index_ == 1) strategy_entry("L", true);
         if (bar_index_ >= 1) strategy_exit("x", "L", na<double>(), b.close * 0.99);
     }
     std::vector<double> book_now() const {
         std::vector<double> stops;
-        for (const auto& o : pending_orders_) stops.push_back(o.stop_price);
+        for (const auto& o : pending_orders_) stops.push_back(o.legs.prices().stop_price);
         return stops;
     }
 };

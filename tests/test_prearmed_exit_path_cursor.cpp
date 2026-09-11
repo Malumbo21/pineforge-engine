@@ -406,13 +406,13 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
     child.created_position_side = PositionSide::FLAT;
     child.qty = kNaN;
     child.qty_percent = 100.0;
-    child.stop_price = 90.0;
-    child.limit_price = 130.0;
-    child.profit_ticks = kNaN;
-    child.loss_ticks = kNaN;
-    child.trail_points = kNaN;
-    child.trail_price = kNaN;
-    child.trail_offset = kNaN;
+    child.legs.set_stop_price(90.0);
+    child.legs.set_limit_price(130.0);
+    child.legs.set_profit_ticks(kNaN);
+    child.legs.set_loss_ticks(kNaN);
+    child.legs.set_trail_points(kNaN);
+    child.legs.set_trail_price(kNaN);
+    child.legs.set_trail_offset(kNaN);
 
     PendingOrder parent{};
     parent.id = "E";
@@ -424,11 +424,11 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
     parent.created_bar = 1;
     parent.created_position_side = PositionSide::FLAT;
     parent.qty = kNaN;
-    parent.stop_price = 110.0;
-    parent.limit_price = kNaN;
-    parent.trail_points = kNaN;
-    parent.trail_price = kNaN;
-    parent.trail_offset = kNaN;
+    parent.legs.set_stop_price(110.0);
+    parent.legs.set_limit_price(kNaN);
+    parent.legs.set_trail_points(kNaN);
+    parent.legs.set_trail_price(kNaN);
+    parent.legs.set_trail_offset(kNaN);
 
     switch (mutation) {
         case SortMutation::ExactDefaultOn:
@@ -496,10 +496,10 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
             child.created_bar = 0;
             break;
         case SortMutation::ParentMissingStop:
-            parent.stop_price = kNaN;
+            parent.legs.set_stop_price(kNaN);
             break;
         case SortMutation::ParentHasLimit:
-            parent.limit_price = 110.0;
+            parent.legs.set_limit_price(110.0);
             break;
         case SortMutation::ExplicitParentQty:
             parent.qty = 1.0;
@@ -517,7 +517,7 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
             child.qty_percent = 50.0;
             break;
         case SortMutation::TrailingChild:
-            child.trail_points = 10.0;
+            child.legs.set_trail_points(10.0);
             break;
         case SortMutation::ChildOcaName:
             child.oca_name = "group";
@@ -526,10 +526,10 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
             child.oca_type = 1;
             break;
         case SortMutation::ProfitRelativeChild:
-            child.profit_ticks = 10.0;
+            child.legs.set_profit_ticks(10.0);
             break;
         case SortMutation::LossRelativeChild:
-            child.loss_ticks = 10.0;
+            child.legs.set_loss_ticks(10.0);
             break;
         case SortMutation::MismatchedFromEntry:
             child.from_entry = "OTHER";

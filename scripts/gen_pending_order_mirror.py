@@ -33,6 +33,7 @@ import re
 import json
 import sys
 from pathlib import Path
+from exit_leg_reflection_schema import mapping as lifecycle_mapping, validate as validate_lifecycle_mapping
 
 ROOT = Path(__file__).resolve().parents[1]
 HPP = ROOT / "include/pineforge/engine.hpp"
@@ -61,6 +62,26 @@ TYPE_MAP: dict[str, tuple[str, str]] = {
 # Public v1 is append-only. Removed native fields survive only as one-way
 # deprecated output projections at their original offsets.
 LEGACY_OUTPUTS = {
+    "limit_price": "src.legs.prices().limit_price",
+    "stop_price": "src.legs.prices().stop_price",
+    "trail_points": "src.legs.prices().trail_points",
+    "trail_price": "src.legs.prices().trail_price",
+    "trail_offset": "src.legs.prices().trail_offset",
+    "profit_ticks": "src.legs.prices().profit_ticks",
+    "loss_ticks": "src.legs.prices().loss_ticks",
+    "dormant_bracket": "src.legs.dormant() ? 1 : 0",
+    "dormant_reissue_pending": "src.legs.pending_replacement() ? 1 : 0",
+    "dormant_original_stop_price": "src.legs.original_stop()",
+    "dormant_hold_bar": "src.legs.hold_bar()",
+    "dormant_reversal_kill_bar": "src.legs.excluded_bar()",
+    "dormant_trail_best": "src.legs.trail_best()",
+    "dormant_trail_best_start": "src.legs.trail_prefix()",
+    "dormant_trail_leg_dead": "src.legs.retired(exit_legs::Leg::Trail) ? 1 : 0",
+
+    "paired_flat_market_candidate": "compat::pine::awaits_pair_review(src.market_admission) ? 1 : 0",
+    "default_flat_market_gross_candidate": "compat::pine::awaits_default_review(src.market_admission) ? 1 : 0",
+    "opening_affordability_exemption_candidate": "compat::pine::opening_qualification(src.market_admission) ? 1 : 0",
+    "explicit_flat_admission_candidate": "compat::pine::explicit_qualification(src.market_admission) ? 1 : 0",
     "pooc_global_full_exit_dynamic_qty": "src.reservation_expansion.population_open() ? 1 : 0",
     "pooc_global_full_exit_tracks_bound_adds": "src.reservation_expansion.capture().has_value() ? 1 : 0",
     "pooc_global_full_exit_bound_add": "src.reservation_growth_source.reservation_owner().has_value() ? 1 : 0",
@@ -81,7 +102,55 @@ LEGACY_OUTPUTS = {
     "sbmt_close_qty": "src.pine_frozen_market_instruction.targeted_close() ? src.quantity_request.intent()->units() : std::numeric_limits<double>::quiet_NaN()",
     "sbmt_close_buy": "src.pine_frozen_market_instruction.targeted_close() && src.created_position_side == PositionSide::SHORT ? 1 : 0",
 }
+_ADMISSION_FIELDS = json.loads((ROOT / "scripts/market_admission_mirror_fields.json").read_text())
+
+
+def admission_mirror_expression(ctype: str, path: str) -> str:
+    """Read canonical leaves directly: the C accessor must not allocate.
+
+    The separate structured visitor remains the variable-journal/hash API.
+    A missing optional emits its existing zero/empty value under its explicit
+    presence field; a present numeric leaf preserves its actual NaN payload.
+    """
+    root = "src.{m}"
+    if not path.startswith("draft."):
+        _fail(f"invalid admission mirror path {path}")
+    parts = path[len("draft."):].split(".")
+    owner = parts.pop(0)
+    if owner in ("observation_present", "review_present", "sizing_revision_present"):
+        return f"{root}.{owner[:-len('_present')]}() ? 1 : 0"
+    if owner not in ("observation", "review", "sizing_revision") or not parts:
+        _fail(f"unclassified admission mirror path {path}")
+    guard = f"{root}.{owner}()"
+    expression = guard + "->"
+    if parts == ["original_sizing_present"]:
+        return f"{guard} && {expression}original_sizing.has_value() ? 1 : 0"
+    if parts[0] == "original_sizing":
+        guard += f" && {expression}original_sizing"
+        expression += "original_sizing->"
+        parts.pop(0)
+    if parts[0] == "birth":
+        parts.pop(0)
+        leaf = parts.pop(0)
+        if leaf in ("cursor_domain", "cursor_position", "cursor_index", "cursor_count"):
+            expression += "birth.cursor()." + leaf[len("cursor_"):] + "()"
+        else:
+            expression += "birth." + leaf + "()"
+        if parts:
+            _fail(f"unclassified admission birth path {path}")
+    else:
+        expression += ".".join(parts)
+    if ctype == "std::string":
+        return f"{guard} ? std::string_view({expression}) : std::string_view()"
+    if ctype not in ("uint64_t", "int64_t", "double"):
+        _fail(f"unclassified admission mirror type {ctype}")
+    return f"{guard} ? static_cast<{ctype}>({expression}) : 0"
+
+
 COMPOSITE_MAP = {
+    "ExitLegLifecycle": lifecycle_mapping(),
+
+    "MarketAdmissionDraft": [(suffix, ct, admission_mirror_expression(ct, path)) for suffix, ct, path in _ADMISSION_FIELDS],
     "ReservationExpansion": [
         # An eight-byte first field preserves ff54's entire 142-field object,
         # including trailing padding, before any appended smaller fields.
@@ -100,7 +169,7 @@ COMPOSITE_MAP = {
         ("kind", "uint64_t", "static_cast<uint64_t>(src.{m}.kind())"),
         ("own_units", "double", "src.{m}.transaction() ? src.{m}.transaction()->own_units : 0.0"),
         ("transaction_units", "double", "src.{m}.transaction() ? src.{m}.transaction()->transaction_units : 0.0"),
-        ("target_id", "std::string", "src.{m}.targeted_close() ? src.{m}.targeted_close()->target_id : std::string()"),
+        ("target_id", "std::string", "src.{m}.targeted_close() ? std::string_view(src.{m}.targeted_close()->target_id) : std::string_view()"),
     ],
     "ExitLegActivation": [
         ("owner_cycle", "int64_t", "src.{m}.bounds() ? src.{m}.bounds()->position_cycle : 0"),
@@ -240,8 +309,12 @@ def classify(ms: list[tuple[str, str]], waivers: dict[str, str]):
     """Return (mirrored, waived) where mirrored = [(cpp_type, name)] kept in
     the POD and waived = [(cpp_type, name, reason)]. Aborts on an unmapped,
     unwaived type or a waiver naming a non-member."""
+    if "legs" in waivers:
+        _fail("canonical exit lifecycle cannot be mirror-waived")
     if {"reservation_expansion", "reservation_growth_source"} & waivers.keys():
         _fail("reservation expansion and source receipts cannot be waived")
+    if "market_admission" in waivers:
+        _fail("market admission cannot be waived")
     names = {n for _, n in ms}
     orphans = sorted(w for w in waivers if w not in names)
     if orphans:
@@ -262,8 +335,13 @@ def generate() -> tuple[str, str]:
     # Share the strict nested storage census; newly stored fields cannot hide
     # behind an unchanged composite-map name. Imported lazily (checker also
     # uses this module's PendingOrder parser).
+    validate_lifecycle_mapping(COMPOSITE_MAP["ExitLegLifecycle"])
+    from check_exit_leg_lifecycle import check as check_exit_lifecycle
+    check_exit_lifecycle((ROOT / "include/pineforge/exit_leg_lifecycle.hpp").read_text())
     from check_broker_state_hash_coverage import _reservation_expansion_fields
     _reservation_expansion_fields((ROOT / "include/pineforge/reservation_expansion.hpp").read_text())
+    from check_market_admission_schema import check as market_admission_coverage
+    market_admission_coverage(ROOT)
     mirrored, waived = classify(members(), load_waivers())
     fields: list[str] = []
     copies: list[str] = []
@@ -275,7 +353,7 @@ def generate() -> tuple[str, str]:
             _fail(f"public v1 prefix member {name} needs an explicit derived projection")
     prefix_names = {name for _, name in prefix}
     # Preserve all 142 ff54 fields, including activation, before new composites.
-    existing_extension = ["replaced_order_incarnation", "birth", "pine_birth_reach", "quantity_request", "leg_activation", "pine_exit_activation"]
+    existing_extension = ["replaced_order_incarnation", "birth", "pine_birth_reach", "quantity_request", "leg_activation", "pine_exit_activation", "reservation_expansion", "reservation_growth_source", "pine_frozen_market_instruction"]
     tail = [(native[name], name) for name in existing_extension]
     tail += [(kind, name) for kind, name in mirrored
              if name not in prefix_names and name not in existing_extension]
@@ -350,6 +428,7 @@ def generate() -> tuple[str, str]:
         "    uint32_t size;",
         "} pf_field_desc_t;",
         f"#define PF_PENDING_ORDER_STRUCT_VERSION {STRUCT_VERSION}",
+        f"#define PF_PENDING_ORDER_FIELD_COUNT {len(descs)}",
         f"#define PF_PENDING_ORDER_STR_CAP {STR_CAP}",
         "",
     ]
@@ -360,6 +439,7 @@ def generate() -> tuple[str, str]:
         "",
         "#include <cstddef>",
         "#include <cstring>",
+        "#include <string_view>",
         "#include <type_traits>",
         "",
         "static_assert(std::is_standard_layout<pf_pending_order_v1_t>::value,",
@@ -372,12 +452,12 @@ def generate() -> tuple[str, str]:
         "",
         "// NUL-terminated copy of the first STR_CAP-1 bytes + FNV-1a 64 of the",
         "// whole string, so a consumer can still match an over-long id exactly.",
-        "void copy_str(const std::string& s, char* dst, uint8_t* truncated, uint64_t* hash) {",
+        "void copy_str(std::string_view s, char* dst, uint8_t* truncated, uint64_t* hash) {",
         "    uint64_t h = 1469598103934665603ULL;",
         "    for (unsigned char ch : s) { h ^= ch; h *= 1099511628211ULL; }",
         "    *hash = h;",
         f"    const size_t n = s.size() < {STR_CAP - 1} ? s.size() : {STR_CAP - 1};",
-        "    std::memcpy(dst, s.data(), n);",
+        "    if (n != 0) std::memcpy(dst, s.data(), n);",
         "    dst[n] = 0;",
         f"    *truncated = s.size() > {STR_CAP - 1} ? 1 : 0;",
         "}",

@@ -1,0 +1,56 @@
+# Market admission {#market_admission}
+
+Admission keeps the original command and placement observation immutable. Later
+review and sizing receipts describe what happened to that command; they do not
+rewrite the original quantity, configuration or qualification. The executable
+pending quantity and existing settlement kernel remain authoritative for fills.
+
+`admission::Draft` owns the original observation, its first normal review and the
+latest sizing revision. `admission::Journal` stores actual command outcomes,
+reviewed instructions and sizing causes. Entry, raw-order, cancel and cancel-all
+are actual command types. A no-target cancel records no removed instruction.
+
+The Pine adapter derives its historical qualification rules from these facts at
+the existing review checkpoints. Four independently stored candidate booleans,
+two disqualified-bar sets and the latest-rejected-bar scalar are removed. Their
+old C mirror fields remain read-only projections. The surviving qualification
+predicates and paired settlement rules remain Pine compatibility behavior;
+this extraction does not claim generic financial correctness for them.
+
+Original placement configuration is distinct from current execution settings.
+An actual margin fill can revise resolved sizing without changing the original
+observation. Original opening qualification is also distinct from the later
+broker `OpeningReceipt` Check/Exempt decision, which belongs to a committed fill.
+
+## Causal receipts
+
+An event sequence is allocated once and consumed by a successful journal append.
+Appending nested events out of allocation order is supported; reclaiming a record
+does not make its sequence available again. An unfinished allocation is abandoned
+by its call frame, and reset refuses outstanding operations.
+
+A per-order review or sizing receipt names the original command. Its event must
+follow that command and its bar cannot precede the placement bar. Review progress
+is the first actual receipt, with identical replay allowed and conflicting
+replacement refused. Sizing revisions similarly preserve the causal order of
+their events, bars and committed fill causes. A batch review can issue a receipt
+only for an original draft captured by that review.
+
+## Reflection and retention
+
+The pending-order C mirror preserves its prior prefix and appends actual
+per-order observations and receipts. Its copier uses direct typed reads and
+string views, with no dynamic allocation. A caller uses the returned field
+descriptors, presence fields and struct size. Variable journal contents have
+an internal typed visitor, shared with the broker fingerprint, including the
+ordered arrays, optional presence and event discriminants.
+
+Retention follows open source windows, live instructions and referenced causes.
+It has no arbitrary last-N truncation. This currently retains a full prior-book
+observation for each live command: N simultaneous resting orders can retain
+N(N-1)/2 prior-book rows. This cost still needs a separate representation change;
+the journal is not a fixed-memory or durable venue-event store.
+
+These identities belong to one engine run. Reset begins a new run; callers must
+not submit persisted receipts from a different engine or run. External broker
+reconciliation requires a separate durable identity contract.
