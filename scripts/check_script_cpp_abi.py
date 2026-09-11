@@ -438,8 +438,10 @@ void Journal::reset() {}
 }
 '''
         current_admission = compile_object("current_admission_methods", admission_caller + admission_assertion, args.include)
-        draft_admission = compile_object("draft_admission_methods", admission_caller, admission_v1_include)
-        draft_admission_symbols = compile_object("draft_admission_symbols", admission_symbols, admission_v1_include)
+        draft_admission = compile_object("draft_admission_methods", admission_caller, standalone_draft_include)
+        draft_admission_symbols = compile_object("draft_admission_symbols", admission_symbols, standalone_draft_include)
+        v1_admission = compile_object("v1_admission_methods", admission_caller, admission_v1_include)
+        v1_admission_symbols = compile_object("v1_admission_symbols", admission_symbols, admission_v1_include)
 
         cancellation_caller = '''#include <pineforge/order_cancellation.hpp>
 #include <type_traits>
@@ -593,6 +595,7 @@ void pairing_cancellation(const pineforge::order_cancellation_v1::OrderCancellat
         link("draft_lifecycle_to_draft_symbols", draft_lifecycle, draft_lifecycle_symbols)
         link("current_admission_to_current", current_admission, args.library)
         link("draft_admission_to_draft_symbols", draft_admission, draft_admission_symbols)
+        link("v1_admission_to_v1_symbols", v1_admission, v1_admission_symbols)
         for name, obj, runtime, expected in [
             ("draft_lifecycle_to_current_symbols", draft_lifecycle, current_lifecycle_symbols,
              ["pairing_lifecycle(pineforge::exit_legs::Lifecycle const&"]),
@@ -602,6 +605,14 @@ void pairing_cancellation(const pineforge::order_cancellation_v1::OrderCancellat
              ["pineforge::admission::Draft::bind(", "pineforge::admission::Journal::next_sequence(",
               "pineforge::admission::Allocation::~Allocation("]),
             ("current_admission_to_draft_symbols", current_admission, draft_admission_symbols,
+             ["pineforge::admission::market_admission_v2::Draft::bind(",
+              "pineforge::admission::market_admission_v2::Journal::next_sequence(",
+              "pineforge::admission::market_admission_v2::Allocation::~Allocation("]),
+            ("v1_admission_to_current", v1_admission, args.library,
+             ["pineforge::admission::market_admission_v1::Draft::bind(",
+              "pineforge::admission::market_admission_v1::Journal::next_sequence(",
+              "pineforge::admission::market_admission_v1::Allocation::~Allocation("]),
+            ("current_admission_to_v1_symbols", current_admission, v1_admission_symbols,
              ["pineforge::admission::market_admission_v2::Draft::bind(",
               "pineforge::admission::market_admission_v2::Journal::next_sequence(",
               "pineforge::admission::market_admission_v2::Allocation::~Allocation("]),

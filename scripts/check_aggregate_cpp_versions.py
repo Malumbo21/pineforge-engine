@@ -103,4 +103,4 @@ def check(root=ROOT):
 
 if __name__ == "__main__":
     check()
-    print("aggregate v11 and standalone lifecycle/admission/cancellation v1 ownership verified")
+    print("aggregate v11, standalone admission v2 and lifecycle/cancellation v1 ownership verified")

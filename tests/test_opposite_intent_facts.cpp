@@ -71,6 +71,19 @@ void accepted_peer_is_reconstructed() {
     try { fill_pending_order_mirror(order, &mirror); }
     catch (const std::logic_error&) { refused_without_context = true; }
     CHECK(refused_without_context);
+    refused_without_context = false;
+    mirror.reverses_same_bar_market_from_flat = 37;
+    try { fill_pending_order_mirror(order, nullptr, &mirror); }
+    catch (const std::logic_error&) { refused_without_context = true; }
+    CHECK(refused_without_context);
+    CHECK(mirror.reverses_same_bar_market_from_flat == 37);
+
+    // An ordinary MARKET cannot have this priced-entry predecessor fact, so
+    // its complete mirror requires no historical context.
+    auto market = order;
+    market.type = OrderType::MARKET;
+    fill_pending_order_mirror(market, &mirror);
+    CHECK(mirror.reverses_same_bar_market_from_flat == 0);
 }
 
 void removed_peer_and_unknown_peer_fail_closed() {

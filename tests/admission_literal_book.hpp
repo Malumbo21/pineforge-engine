@@ -34,7 +34,7 @@ public:
     PendingOrder& get(const std::string& id){for(auto& o:pending_orders_)if(o.id==id)return o;throw std::logic_error("missing "+id);}
     bool has(const std::string& id)const{for(auto& o:pending_orders_)if(o.id==id)return true;return false;}
     std::size_t size()const{return pending_orders_.size();}
-    pf_pending_order_v1_t mirror(const char* id){pf_pending_order_v1_t m{};fill_pending_order_mirror(get(id),&m);return m;}
+    pf_pending_order_v1_t mirror(const char* id){pf_pending_order_v1_t m{};fill_pending_order_mirror(get(id),&market_admission_journal(),&m);return m;}
     void default_mode(double pct=100){default_qty_type_=QtyType::PERCENT_OF_EQUITY;default_qty_value_=pct;pyramiding_=1;}
     void terminal_mode(){process_orders_on_close_=true;calc_on_order_fills_=true;pyramiding_=0;}
     void pct(double v){default_qty_value_=v;}

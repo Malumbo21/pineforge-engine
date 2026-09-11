@@ -31,6 +31,12 @@ void copy_str(std::string_view s, char* dst, uint8_t* truncated, uint64_t* hash)
 }  // namespace
 
 void fill_pending_order_mirror(const PendingOrder& src, const MarketAdmissionJournal* journal, pf_pending_order_v1_t* out) {
+    const auto& origin = src.market_admission.observation();
+    if (!journal && src.type == OrderType::ENTRY && origin
+        && origin->kind == admission::CommandKind::Entry
+        && origin->placement_side == static_cast<int>(PositionSide::FLAT)
+        && (!std::isnan(origin->prices.limit) || !std::isnan(origin->prices.stop)))
+        throw std::logic_error("bound priced order mirror requires its admission journal");
     std::memset(out, 0, sizeof(*out));
     out->struct_version = 1;
     out->size = (uint32_t)sizeof(*out);
@@ -427,8 +433,6 @@ void fill_pending_order_mirror(const PendingOrder& src, const MarketAdmissionJou
 }
 
 void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* out) {
-    if (src.market_admission.observation())
-        throw std::logic_error("bound pending order mirror requires its admission journal");
     fill_pending_order_mirror(src, nullptr, out);
 }
 

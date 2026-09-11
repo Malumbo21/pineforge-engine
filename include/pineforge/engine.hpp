@@ -42,8 +42,8 @@
 #include <pineforge/pineforge.h>
 
 // The public C mirror needs the engine's admission journal to derive
-// source-bound placement facts. The one-argument form remains for manually
-// constructed, unbound native orders only.
+// source-bound placement facts. The context-free form refuses a bound priced
+// entry whose original history is needed; other orders have no predecessor.
 namespace pineforge {
 void fill_pending_order_mirror(const PendingOrder&,
                                const MarketAdmissionJournal*,
@@ -924,8 +924,8 @@ inline bool placement_at_entry_capacity(const PendingOrder& order) {
 // PendingOrder object. The producer scanned the physical book immediately
 // before accepting this priced entry. The journal's immutable before/removed
 // records preserve that exact scan, including a peer that remains physically
-// resident after a cancellation. A peer without an original command
-    // direction is a raw book fact, independent of the peer's source Draft.
+// resident after a cancellation. Direction is a raw book fact, independent
+// of the peer's source Draft.
 inline bool placement_has_opposite_market_predecessor(
         const MarketAdmissionJournal& journal, const PendingOrder& current) {
     const auto& origin = current.market_admission.observation();

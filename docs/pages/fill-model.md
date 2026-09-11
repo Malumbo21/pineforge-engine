@@ -11,9 +11,12 @@ admission and scheduling rules, and the ordinary bar scan and callback-driven
 scan are separate. The responsibilities below guide their consolidation without
 claiming that a single unified scheduler already exists.
 
-The current pending-order representation has six direct boolean members. Two
-duplicate placement fields now derive from the original command observation,
-and cancellation has an explicit terminal receipt. This declaration count is
+The current pending-order representation has five direct boolean members. Two
+duplicate placement fields derive from the original command observation;
+the opposite-market predecessor fact derives from its accepted command's
+original book and removal records. The book records each instruction's raw
+buy/sell direction, including manually constructed peers, without storing the
+derived predecessor result. Cancellation has an explicit terminal receipt. This declaration count is
 an intermediate result: it does not prove that all remaining Pine predicates
 are generic, or that the whole engine has fewer than five compatibility choices.
 
