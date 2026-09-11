@@ -4496,8 +4496,6 @@ bool BacktestEngine::same_bar_market_close_artifact_is_live(
 void BacktestEngine::apply_same_bar_market_tx_reversal(
         PendingOrder& order, double fill_price, const Bar& bar,
         double& trail_best_path_state) {
-    const PositionSide requested =
-        order.is_long ? PositionSide::LONG : PositionSide::SHORT;
     const double tx = order.pine_frozen_market_instruction.transaction()->transaction_units;
     // Pine has already resolved the source instruction to physical units.
     // Native netting owns the close/open split; this adapter retains its
@@ -4517,15 +4515,15 @@ void BacktestEngine::apply_same_bar_market_tx_reversal(
             && result.status != execution::Status::NoEffect)
             throw std::runtime_error("invalid resolved frozen-transaction settlement");
     };
-    if (close_qty >= position_qty_ - kQtyEpsilon) {
+    const double remainder = std::abs(transaction->open_units());
+    if (remainder > kQtyEpsilon && std::isfinite(fill_price)) {
+        // One matched crossing is one execution: validate both effects before
+        // the first close and allocate one current ticket across the split.
+        settle(order_action::Transact{order.is_long ? tx : -tx});
+    } else if (close_qty >= position_qty_ - kQtyEpsilon) {
         settle(execution::Flatten{});
     } else if (close_qty > kQtyEpsilon) {
         settle(order_action::Reduce{close_qty});
-    }
-    const double remainder = std::abs(transaction->open_units());
-    if (remainder > kQtyEpsilon && std::isfinite(fill_price)) {
-        settle(order_action::Transact{
-            requested == PositionSide::LONG ? remainder : -remainder});
     }
     // Mirror the ordinary market-entry kernel's trail handling (open-tick
     // fill: the bar's extreme folds in for same-bar exit evaluation).
@@ -7028,12 +7026,14 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
     if (short_seed_collision_final_short_is_live(order)) {
         const double residual =
             pyramid_entries_[0].qty - pyramid_entries_[1].qty;
-        execute_market_exit(fill_price);
         if (residual > kQtyEpsilon) {
             // Slippage is gated to 0 by the exact-book tagging, so the
             // remnant re-opens at the same broker point the exit filled at.
+            // Include the two physical closes in this one signed execution.
+            const double transaction = pyramid_entries_[0].qty
+                + pyramid_entries_[1].qty + residual;
             const auto result = settle_resolved_execution(
-                order_action::Transact{order.is_long ? residual : -residual},
+                order_action::Transact{order.is_long ? transaction : -transaction},
                 execution::Fill{fill_price, order.id, order.comment, order.incarnation});
             if (result.status != execution::Status::Applied)
                 throw std::runtime_error("invalid resolved remainder settlement");
@@ -7051,6 +7051,7 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
             trail_best_path_state = trail_best_after_fill;
             return;
         }
+        execute_market_exit(fill_price);
         trail_best_path_state = trail_best_price_;
         return;
     }

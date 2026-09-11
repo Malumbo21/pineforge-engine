@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 using namespace pineforge;
@@ -18,9 +19,11 @@ struct Access { friend auto access(Tag) { return Member; } };
 struct PartialExitAccess { friend auto access(PartialExitAccess); };
 struct SameSideAccess { friend auto access(SameSideAccess); };
 struct SameBarTransactionAccess { friend auto access(SameBarTransactionAccess); };
+struct MarketFillAccess { friend auto access(MarketFillAccess); };
 template struct Access<PartialExitAccess, &BacktestEngine::execute_partial_exit_qty>;
 template struct Access<SameSideAccess, &BacktestEngine::append_same_side_fill>;
 template struct Access<SameBarTransactionAccess, &BacktestEngine::apply_same_bar_market_tx_reversal>;
+template struct Access<MarketFillAccess, &BacktestEngine::apply_market_order_fill>;
 
 template<class T> struct MemberArguments;
 template<class C, class R, class A, class B, class D>
@@ -105,6 +108,38 @@ public:
         double trail = std::numeric_limits<double>::quiet_NaN();
         (this->*access(SameBarTransactionAccess{}))(order, raw_price,
             current_bar_, trail);
+    }
+    void exhaust_cycles() { next_position_cycle_seq_ = std::numeric_limits<int64_t>::max(); }
+    uint64_t fingerprint() const { return broker_state_hash(); }
+    void seed_short_collision(double source, double materialized) {
+        seed_two_lots();
+        position_open_bar_ = bar_index_;
+        position_qty_ = source + materialized;
+        position_entry_price_ = 100;
+        pyramid_entries_[0].qty = source;
+        pyramid_entries_[1].qty = materialized;
+        pyramid_entries_[0].price = pyramid_entries_[1].price = 100;
+        pyramid_entries_[0].entry_id = "Long";
+        pyramid_entries_[1].entry_id = "__close__Short";
+        for (auto& lot : pyramid_entries_) lot.entry_bar_index = bar_index_;
+        PendingOrder first{}, final{}, materialize{};
+        first.id = "Long";
+        first.type = final.type = materialize.type = OrderType::MARKET;
+        first.is_long = true;
+        first.short_seed_collision_role = ShortSeedCollisionRole::LONG_ENTRY;
+        final.id = "Short";
+        final.is_long = false;
+        final.incarnation = 44;
+        final.created_bar = bar_index_ - 1;
+        final.tv_carry_qty = materialized;
+        final.short_seed_collision_role = ShortSeedCollisionRole::FINAL_SHORT;
+        materialize.id = "__close__Short";
+        materialize.short_seed_collision_role = ShortSeedCollisionRole::MATERIALIZE_LONG;
+        pending_orders_ = {first, final, materialize};
+    }
+    void settle_short_collision() {
+        double trail = std::numeric_limits<double>::quiet_NaN();
+        (this->*access(MarketFillAccess{}))(pending_orders_[1], 100, current_bar_, trail, false);
     }
 
     const std::vector<PyramidEntry>& lots() const { return pyramid_entries_; }
@@ -277,6 +312,69 @@ void transact_closes_fifo_and_crosses_flat() {
     }
 }
 
+void adapter_crossings_are_one_execution() {
+    for (bool from_short : {false, true}) {
+        Book fees;
+        fees.seed_three_units();
+        fees.per_order_fees(); // two historical tickets of3, one current ticket of3
+        if (from_short) fees.make_short();
+        fees.enable_stream_actions();
+        auto five = transaction_order(from_short, 5, 5);
+        fees.transact(five, 120);
+        CHECK(fees.trades().size() == 2 && fees.lots().size() == 1);
+        if (fees.trades().size() == 2 && fees.lots().size() == 1) {
+            const double paid = fees.trades()[0].commission + fees.trades()[1].commission
+                + fees.lots()[0].entry_commission_account;
+            CHECK(std::abs(paid - 9) < 1e-12);
+            CHECK(std::abs(fees.lots()[0].entry_commission_account - 1.2) < 1e-12);
+        }
+        CHECK(fees.stream_actions() == 3);
+
+        Book exhausted;
+        exhausted.seed_three_units();
+        if (from_short) exhausted.make_short();
+        exhausted.enable_stream_actions();
+        exhausted.exhaust_cycles();
+        const auto before = exhausted.fingerprint();
+        bool threw = false;
+        try { exhausted.transact(five, 120); }
+        catch (const std::overflow_error&) { threw = true; }
+        CHECK(threw);
+        CHECK(exhausted.fingerprint() == before);
+        CHECK(exhausted.trades().empty() && exhausted.stream_actions() == 0);
+        CHECK(exhausted.signed_position() == (from_short ? -3 : 3));
+    }
+
+    Book short_seed;
+    short_seed.seed_short_collision(3, 1);
+    short_seed.per_order_fees();
+    short_seed.enable_stream_actions();
+    short_seed.settle_short_collision();
+    CHECK(short_seed.signed_position() == -2 && short_seed.cycle() == 5);
+    CHECK(short_seed.trades().size() == 2 && short_seed.lots().size() == 1);
+    if (short_seed.trades().size() == 2 && short_seed.lots().size() == 1) {
+        CHECK(short_seed.trades()[0].entry_id == "Long");
+        CHECK(short_seed.trades()[1].entry_id == "__close__Short");
+        const double paid = short_seed.trades()[0].commission + short_seed.trades()[1].commission
+            + short_seed.lots()[0].entry_commission_account;
+        CHECK(std::abs(paid - 9) < 1e-12);
+        CHECK(std::abs(short_seed.lots()[0].entry_commission_account - 1) < 1e-12);
+    }
+    CHECK(short_seed.stream_actions() == 3);
+
+    Book refused;
+    refused.seed_short_collision(3, 1);
+    refused.enable_stream_actions();
+    refused.exhaust_cycles();
+    const auto before = refused.fingerprint();
+    bool threw = false;
+    try { refused.settle_short_collision(); }
+    catch (const std::overflow_error&) { threw = true; }
+    CHECK(threw && refused.fingerprint() == before);
+    CHECK(refused.signed_position() == 4 && refused.trades().empty());
+    CHECK(refused.stream_actions() == 0);
+}
+
 }
 
 int main() {
@@ -284,6 +382,7 @@ int main() {
     reduce_handles_short_side_and_slippage_once();
     append_preserves_lot_metadata_and_stream_action();
     transact_closes_fifo_and_crosses_flat();
+    adapter_crossings_are_one_execution();
     std::printf("order action integration: %d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

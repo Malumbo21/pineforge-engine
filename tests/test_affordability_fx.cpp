@@ -493,9 +493,9 @@ int main() {
         CHECK(eng.trades() == 0);
     }
 
-    // E2. TradingView converts a realized trade's complete net symbol-currency
-    // PnL at the EXIT bar's daily rate, including both percent-commission legs
-    // (335/336 exact; archived investigation linked in docs/pages/metrics.md).
+    // E2. The former exit-time reconstruction converted both commission legs
+    // at the closing FX rate (archived TV investigation in docs/pages/metrics.md).
+    // Native settlement instead preserves the actual entry payment.
     // With qty 1, gross account-currency PnL is 50*FX2 = 100. The entry fee
     // is paid at entry-time FX: 400*10%*FX1 = 40. The exit fee is paid at
     // exit-time FX: 450*10%*FX2 = 90. Net PnL is therefore 100 - 40 - 90 =

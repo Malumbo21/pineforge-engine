@@ -71,8 +71,9 @@ ordinary floating-point rounding. A rebate increases it.
 
 The kernel currently serves full market exits and selected frozen-transaction
 and same-side materialization paths. Existing source scheduling and dust
-decisions remain at their call sites. Some source instructions still issue
-separate close and open executions. Other legacy close loops are not yet
+decisions remain at their call sites. Migrated frozen transactions and the
+final short-seed crossing settle their close/open effects in one native call.
+Other legacy close loops are not yet
 grouped into one parent execution; their per-row current ticket behavior is
 not a claim about the native contract.
 
