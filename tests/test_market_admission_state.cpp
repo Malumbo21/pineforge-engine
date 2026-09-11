@@ -87,6 +87,16 @@ void every_retained_leaf_mutates_actual_hash_and_reflection(){
     const ModelBook seed=mutation_seed();ModelBook census=seed;
     std::vector<admission_mutation::Mutation> mutations;admission_mutation::walk(census.journal(),"journal",mutations);
     CHECK(mutations.size()>100);
+    size_t before_book_direction_leaves=0;
+    for(const auto& mutation:mutations){
+        const auto start=mutation.path.find(".before[");
+        if(start!=std::string::npos){
+            const auto end=mutation.path.find(']',start);
+            if(end!=std::string::npos&&mutation.path.substr(end)=="].buy")
+                ++before_book_direction_leaves;
+        }
+    }
+    CHECK(before_book_direction_leaves>0);
     const auto seed_hash=seed.broker_state_hash();
     for(size_t i=0;i<mutations.size();++i){
         ModelBook changed=seed;std::vector<admission_mutation::Mutation> choices;

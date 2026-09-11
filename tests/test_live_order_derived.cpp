@@ -261,7 +261,7 @@ void test_prior_cycle_close_only() {
     if (idx >= 0) {
         const PendingOrder& o = s.pending_order_at(idx);
         CHECK(o.created_position_side == PositionSide::FLAT);
-        CHECK(!o.reverses_same_bar_market_from_flat);
+        CHECK(!placement_has_opposite_market_predecessor(s.market_admission_journal(), o));
         double qty = 0; int close_only = -1, partition = -1;
         CHECK(s.probe_fill_qty(idx, 95.0, &qty, &close_only, &partition) == 0);
         CHECK(near(qty, 1.0) && partition == kExplicit && close_only == 1);

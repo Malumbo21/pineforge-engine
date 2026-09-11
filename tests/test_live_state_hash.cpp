@@ -435,10 +435,9 @@ public:
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].coof_cascade_inflight_fires = !s.pending_orders_[0].coof_cascade_inflight_fires;
             }},
-            {"pending_orders_[].reverses_same_bar_market_from_flat", [](Probe& s) {
-                if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].reverses_same_bar_market_from_flat = !s.pending_orders_[0].reverses_same_bar_market_from_flat;
-            }},
+            // The predecessor result has no storage to mutate. The canonical
+            // before-book direction leaves are independently mutated against
+            // the actual broker hash in test_market_admission_state.
             {"pending_orders_[].reservation_expansion", [](Probe& s) {
                 if (!s.pending_orders_.empty())
                     s.pending_orders_[0].reservation_expansion.capture(50,7,PositionSide::LONG,10);
