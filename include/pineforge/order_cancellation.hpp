@@ -74,19 +74,20 @@ public:
 
     // Capture the placement-time close claim.  NaN is the existing sentinel
     // for a close that did not debit the id ledger, so it remains a no-op.
-    void bind_close_claim(double consumed, double retired) {
+    bool bind_close_claim(double consumed, double retired) {
+        if (close_claim_release_ == CloseClaimRelease::Released) return false;
         close_claim_consumed_ = consumed;
         close_claim_retired_ = retired;
         close_claim_release_ = std::isfinite(consumed) && consumed > 0.0
             ? CloseClaimRelease::Pending
             : CloseClaimRelease::NotApplicable;
+        return true;
     }
 
     // Return the captured claim exactly once.  The caller supplies the
     // order-id ledger so the generic receipt has no knowledge of Pine ids.
     bool release_close_claim_once(double& ledger) {
         if (state_ != CancellationState::Cancelled
-            || cause_ != CancellationCause::Dependency
             || close_claim_release_ != CloseClaimRelease::Pending) {
             return false;
         }

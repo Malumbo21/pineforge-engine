@@ -36,6 +36,8 @@ int main() {
     CHECK(receipt.close_claim_release() == CloseClaimRelease::Released);
     CHECK(!receipt.release_close_claim_once(ledger));
     CHECK(std::abs(ledger - 10.5) < 1e-12);
+    CHECK(!receipt.bind_close_claim(8.0, 0.0));
+    CHECK(receipt.close_claim_release() == CloseClaimRelease::Released);
 
     OrderCancellationReceipt replacement;
     replacement.bind_close_claim(std::numeric_limits<double>::quiet_NaN(), 0.0);
