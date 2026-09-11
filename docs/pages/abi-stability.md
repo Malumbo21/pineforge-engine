@@ -112,17 +112,20 @@ notice:
 - The shape of internal log lines (use them for humans, not parsers).
 
 Rebuild generated and native C++ objects against matching engine headers and
-runtime. The combined exit-lifecycle and market-admission layout advances
-`PendingOrder` and `BacktestEngine` to `engine_script_run_v8`. Exact shipped
-cc0/v7 headers are authenticated before native, generated-style and standalone
+runtime. Deriving the two placement facts from their original admission
+observation changes the native layout and advances `PendingOrder` and
+`BacktestEngine` to `engine_script_run_v10`. Exact pre-change f2df706/v9
+headers are authenticated before native, generated-style and standalone
 PendingOrder pairing checks. Current/old matching links must succeed and stale
-pairings must fail for the expected qualified symbols. Earlier v2-v6 controls
+pairings must fail for the expected qualified symbols. Earlier v2-v8 controls
 remain; every translation unit must compile before any mismatch is accepted.
 No pairing executable runs.
 
 New standalone lifecycle values and `Lifecycle` own the inline namespace
 `pineforge::exit_legs::lifecycle_v1`; new admission values, `Draft`, `Journal`
 and capture classes/methods own `pineforge::admission::market_admission_v1`.
+Cancellation values retain `pineforge::order_cancellation_v1`; none of these
+standalone representations changes in the placement derivation.
 Header-only lifecycle methods do not require a library reference by themselves;
 separate caller/provider argument controls verify cross-translation-unit type
 identity. Admission method controls also link the current runtime archive.
@@ -141,22 +144,26 @@ capability, not the class layout version. Regenerate and rebuild a strategy
 module to obtain complete script-state reset; replacing an archive does not
 retrofit an old module. Public C function signatures, `PF_ABI_VERSION` (4),
 and `strategy_stream_api_version()` (1) are unchanged. The pending-order v1
-mirror keeps all 155 shipped cc0 field names/types/offsets and its full old prefix;
-new typed facts append, and removed native booleans survive only as read-only
-derived outputs. Size-limited reads keep old callers within their buffers.
+mirror preserves all 406 pre-change field names/types/offsets and its full
+3192-byte size. No field is added for the placement derivation: the original
+admission operands already have actual-value projections, while removed native
+booleans survive as derived legacy outputs. Compiler static assertions compare
+every field with the authenticated v9 mirror. Size-limited reads keep old callers
+within their buffers.
 
 Namespace versioning protects referenced internal C++ symbols; it does not
 validate an erased `pf_strategy_t` handle. Use a handle only with functions from
 its creating strategy module. A fully self-contained old module can still use
-its own matching runtime; this check does not turn it into a v8 module.
+its own matching runtime; this check does not turn it into a v10 module.
 
 The integrated representation advances the broker fingerprint domain to
-`pineforge-broker-state/v8` and stream fingerprint version to 8. These identify
-changed serialized lifecycle definitions, generations, obligations and replay
-receipts, plus original admission observations and causal journal state. Existing
+`pineforge-broker-state/v10` and stream fingerprint version to 10. The original
+admission observation is hashed once; its two derived placement views no longer
+add redundant folds. Lifecycle definitions, generations, obligations and replay
+receipts, plus causal journal state remain represented. Existing
 reservation, Pine instruction, activation, quantity, predecessor and birth facts
 remain represented. The Pine component schema remains 1; it is
-independent of the aggregate fingerprint version. Prior v2/v3/v4/v5/v6/v7 fingerprints are
+independent of the aggregate fingerprint version. Prior v2-v9 fingerprints are
 not comparable. Fingerprints are replay checks, not serialized checkpoints or
 complete hashes of private strategy state. The native runner already binds
 its strategy-library SHA; its ledger format and Python provenance fingerprints
