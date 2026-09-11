@@ -8,7 +8,7 @@ FILES = (
     "include/pineforge/engine.hpp", "src/engine_state_hash.cpp", "src/engine_stream.cpp",
     "include/pineforge/exit_leg_lifecycle.hpp", "include/pineforge/market_admission.hpp",
     "src/market_admission.cpp", "include/pineforge/reservation_expansion.hpp",
-    "src/reservation_expansion.cpp",
+    "src/reservation_expansion.cpp", "include/pineforge/order_cancellation.hpp",
 )
 
 
@@ -68,12 +68,18 @@ def check_texts(files):
                  "CommandEvent", "ReviewEvent", "SizingEvent", "Field"):
         if not re.search(r'\b(?:class|struct)\s+' + name + r'\s*\{', admission):
             raise ValueError(name + " must belong to market_admission_v1")
+    cancellation = standalone_scope(files[FILES[8]], "pineforge", "order_cancellation_v1")
+    for name in ("CancellationCause", "CancellationState", "CloseClaimRelease",
+                 "CancellationResult", "CancellationTarget", "OrderCancellationReceipt"):
+        if not re.search(r'\b(?:enum\s+class|class|struct)\s+' + name
+                         + r'\s*(?::[^;{]+)?\{', cancellation):
+            raise ValueError(name + " must belong to order_cancellation_v1")
     source = clean(files[FILES[5]])
     implementation = standalone_scope(source, "pineforge::admission", "market_admission_v1")
     methods = r'\b(?:Draft|Journal|Allocation|CommandCapture|ReviewCapture)::[~\w]+\s*\('
     if not re.findall(methods, source) or re.findall(methods, source) != re.findall(methods, implementation):
         raise ValueError("admission out-of-line methods need their versioned owner")
-    for name in FILES[6:]:
+    for name in FILES[6:8]:
         text = clean(files[name])
         if len(re.findall(r'inline\s+namespace\s+reservation_expansion_v1\s*\{', text)) != 1:
             raise ValueError("unchanged reservation ABI must remain v1")
@@ -97,4 +103,4 @@ def check(root=ROOT):
 
 if __name__ == "__main__":
     check()
-    print("aggregate v9 and standalone lifecycle/admission v1 ownership verified")
+    print("aggregate v9 and standalone lifecycle/admission/cancellation v1 ownership verified")

@@ -18,6 +18,9 @@ BASE_COMMIT = "38dc73e5503fe5395458e5f8df2a2ad78054a1ae"
 BASE_ENGINE_SHA256 = "06c937a1ccd31815ca7775268ac699ffdfddb1a1f19de4628b777f37e9a6d193"
 CURRENT_NAMESPACE = "engine_script_run_v9"
 BASE_NAMESPACE = "engine_script_run_v2"
+V8_COMMIT = "79921099a9357cb5bbace907a9319479f6640d89"
+V8_TREE = "e141657c572b4a3855dfee607f9951e331b961e6"
+V8_ENGINE_SHA256 = "571c7b328ef86915c63523d066ce2761cfc361b4de413b7669ebe17f4fd30ad3"
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/script_cpp_abi/base38"
 
 
@@ -157,7 +160,8 @@ def main():
                "standalone_namespace": "reservation_expansion_v1",
                "standalone_namespaces": {"reservation": "reservation_expansion_v1",
                    "lifecycle": "pineforge::exit_legs::lifecycle_v1",
-                   "admission": "pineforge::admission::market_admission_v1"},
+                   "admission": "pineforge::admission::market_admission_v1",
+                   "cancellation": "pineforge::order_cancellation_v1"},
                "executable_runs": 0, "compiles": [], "links": []}
     # Literal diagnostic controls guard the link-failure parser itself.
     for namespace in (BASE_NAMESPACE, CURRENT_NAMESPACE):
@@ -197,6 +201,9 @@ def main():
                        "cc0b22d0ede0f5fc35f54f2966284c68a6750a30", "engine_script_run_v7",
                        "bc86697bbdb229f65a975d810c8b4d7a98db3062028d03d180e6f8fea6bf7c4d",
                        "3b33cd3c37e1ed34e3ac2d77a2a8ddb6ce9aebe1")
+        v8_include = root / "basev8/include"
+        frozen_headers(v8_include, FIXTURE.parent / "basev8", V8_COMMIT,
+                       "engine_script_run_v8", V8_ENGINE_SHA256, V8_TREE)
         standalone_draft_include = root / "standalone-draft/include"
         frozen_standalone_headers(standalone_draft_include)
         common = [args.compiler, "-std=c++17", "-O0", *args.extra_flag]
@@ -274,6 +281,12 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
             BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v7"), cc0_include)
         cc0_priority = compile_object("basecc0_pending_priority", priority_caller, cc0_include)
         cc0_priority_symbols = compile_object("basecc0_pending_priority_symbols", priority_symbols, cc0_include)
+        v8_native = compile_object("basev8_native", caller("engine_script_run_v8"), v8_include)
+        v8_generated = compile_object("basev8_generated", caller("engine_script_run_v8", True), v8_include)
+        v8_symbols = compile_object("basev8_symbol_control",
+            BASE_SYMBOL_CONTROL.replace("engine_script_run_v2", "engine_script_run_v8"), v8_include)
+        v8_priority = compile_object("basev8_pending_priority", priority_caller, v8_include)
+        v8_priority_symbols = compile_object("basev8_pending_priority_symbols", priority_symbols, v8_include)
 
         reservation_caller = '''#include <pineforge/reservation_expansion.hpp>
 int main(int argc, char**) {
@@ -397,6 +410,28 @@ void Journal::reset() {}
         draft_admission = compile_object("draft_admission_methods", admission_caller, standalone_draft_include)
         draft_admission_symbols = compile_object("draft_admission_symbols", admission_symbols, standalone_draft_include)
 
+        cancellation_caller = '''#include <pineforge/order_cancellation.hpp>
+#include <type_traits>
+static_assert(std::is_same_v<pineforge::OrderCancellationReceipt,
+    pineforge::order_cancellation_v1::OrderCancellationReceipt>);
+static_assert(static_cast<int>(pineforge::CancellationCause::None) == 0);
+static_assert(static_cast<int>(pineforge::CancellationCause::Replacement) == 1);
+static_assert(static_cast<int>(pineforge::CancellationCause::Dependency) == 2);
+void pairing_cancellation(const pineforge::OrderCancellationReceipt&);
+int main() {
+    pineforge::OrderCancellationReceipt receipt;
+    pairing_cancellation(receipt);
+    return receipt.cancelled() ? 1 : 0;
+}
+'''
+        cancellation_provider = '''#include <pineforge/order_cancellation.hpp>
+void pairing_cancellation(const pineforge::order_cancellation_v1::OrderCancellationReceipt&) {}
+'''
+        current_cancellation = compile_object("current_standalone_cancellation",
+            cancellation_caller, args.include)
+        current_cancellation_symbols = compile_object("current_standalone_cancellation_symbols",
+            cancellation_provider, args.include)
+
         def link(name, obj, runtime, missing_namespace=None):
             linked = subprocess.run(
                 [*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
@@ -470,6 +505,13 @@ void Journal::reset() {}
         link("current_native_to_v7_symbols", current_native, cc0_symbols, CURRENT_NAMESPACE)
         link("current_generated_to_v7_symbols", current_generated, cc0_symbols, CURRENT_NAMESPACE)
         link("basecc0_pending_priority_to_v7_symbols", cc0_priority, cc0_priority_symbols)
+        link("basev8_native_to_v8_symbols", v8_native, v8_symbols)
+        link("basev8_generated_to_v8_symbols", v8_generated, v8_symbols)
+        link("basev8_native_to_current", v8_native, args.library, "engine_script_run_v8")
+        link("basev8_generated_to_current", v8_generated, args.library, "engine_script_run_v8")
+        link("current_native_to_v8_symbols", current_native, v8_symbols, CURRENT_NAMESPACE)
+        link("current_generated_to_v8_symbols", current_generated, v8_symbols, CURRENT_NAMESPACE)
+        link("basev8_pending_priority_to_v8_symbols", v8_priority, v8_priority_symbols)
         for name, obj, runtime, expected in [
             ("basecc0_pending_priority_to_current", cc0_priority, args.library, "pineforge::engine_script_run_v7::PendingOrder"),
             ("current_pending_priority_to_v7_symbols", current_priority, cc0_priority_symbols, "pineforge::engine_script_run_v9::PendingOrder"),
@@ -479,6 +521,10 @@ void Journal::reset() {}
             ("current_pending_priority_to_v5_symbols", current_priority, activation_priority_symbols, "pineforge::engine_script_run_v9::PendingOrder"),
             ("basec45_pending_priority_to_current", prior_priority, args.library, "pineforge::PendingOrder"),
             ("current_pending_priority_to_v4_symbols", current_priority, prior_priority_symbols,
+             "pineforge::engine_script_run_v9::PendingOrder"),
+            ("basev8_pending_priority_to_current", v8_priority, args.library,
+             "pineforge::engine_script_run_v8::PendingOrder"),
+            ("current_pending_priority_to_v8_symbols", current_priority, v8_priority_symbols,
              "pineforge::engine_script_run_v9::PendingOrder"),
         ]:
             result = subprocess.run([*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
@@ -515,6 +561,9 @@ void Journal::reset() {}
             print(name + ": rejected stale standalone lifecycle/admission ABI (not executed)")
             receipt["links"].append({"name": name, "outcome": "expected_rejection",
                 "exit": result.returncode, "diagnostics": result.stderr})
+
+        link("current_cancellation_to_current_symbols",
+             current_cancellation, current_cancellation_symbols)
 
         link("current_reservation_to_current", current_reservation, args.library)
         link("draft_reservation_to_draft_symbols", draft_reservation, draft_reservation_symbols)
