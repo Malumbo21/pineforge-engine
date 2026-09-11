@@ -101,6 +101,10 @@ LEGACY_OUTPUTS = {
     "sbmt_kept_over_cap": "src.pine_frozen_market_instruction.transaction() && src.over_pyramiding_cap_at_placement ? 1 : 0",
     "sbmt_close_qty": "src.pine_frozen_market_instruction.targeted_close() ? src.quantity_request.intent()->units() : std::numeric_limits<double>::quiet_NaN()",
     "sbmt_close_buy": "src.pine_frozen_market_instruction.targeted_close() && src.created_position_side == PositionSide::SHORT ? 1 : 0",
+    "declined_by_replaced_short_market": "src.cancellation.cause() == CancellationCause::Replacement ? 1 : 0",
+    "suppress_as_declined_reversal_close": "src.cancellation.cause() == CancellationCause::Dependency ? 1 : 0",
+    "suppressed_close_consumed_ledger_qty": "src.cancellation.close_claim_consumed()",
+    "suppressed_close_retired_ledger_qty": "src.cancellation.close_claim_retired()",
 }
 _ADMISSION_FIELDS = json.loads((ROOT / "scripts/market_admission_mirror_fields.json").read_text())
 
@@ -212,6 +216,18 @@ COMPOSITE_MAP = {
         ("first_fill", "uint64_t", "src.{m}.first_fill()"),
         ("last_fill", "uint64_t", "src.{m}.last_fill()"),
         ("evaluation_ordinal", "uint64_t", "src.{m}.evaluation_ordinal()"),
+    ],
+    "OrderCancellationReceipt": [
+        ("cause", "int32_t", "static_cast<int32_t>(src.{m}.cause())"),
+        ("state", "int32_t", "static_cast<int32_t>(src.{m}.state())"),
+        ("close_claim_release", "int32_t", "static_cast<int32_t>(src.{m}.close_claim_release())"),
+        ("source_incarnation", "uint64_t", "src.{m}.source_incarnation()"),
+        ("source_sequence", "int64_t", "src.{m}.source_sequence()"),
+        ("target_incarnation", "uint64_t", "src.{m}.target_incarnation()"),
+        ("target_owner", "int64_t", "src.{m}.target_owner()"),
+        ("target_revision", "uint64_t", "src.{m}.target_revision()"),
+        ("close_claim_consumed", "double", "src.{m}.close_claim_consumed()"),
+        ("close_claim_retired", "double", "src.{m}.close_claim_retired()"),
     ],
 }
 STRING_TYPES = frozenset({"std::string"})

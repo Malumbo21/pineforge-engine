@@ -244,7 +244,7 @@ void BacktestEngine::process_carried_long_money_before_priced_orders(
         || order.from_entry != entry.entry_id
         || order.created_bar >= bar_index_
         || order.legs.dormant() || order.legs.pending_replacement()
-        || order.suppress_as_declined_reversal_close
+        || order.cancellation.cancelled()
         || !order.oca_name.empty() || order.oca_type != 0
         || !std::isnan(order.legs.prices().trail_points)
         || !std::isnan(order.legs.prices().trail_offset) || !std::isnan(order.legs.prices().trail_price)
@@ -1988,7 +1988,7 @@ bool BacktestEngine::pooc_trail_money_pre_exit_scope(
         || order.type != OrderType::EXIT
         || order.from_entry != pyramid_entries_.front().entry_id
         || order.created_bar >= bar_index_ || order.legs.dormant()
-        || order.legs.pending_replacement() || order.suppress_as_declined_reversal_close
+        || order.legs.pending_replacement() || order.cancellation.cancelled()
         || !order.oca_name.empty() || order.oca_type != 0
         || !std::isnan(order.legs.prices().stop_price) || !std::isnan(order.legs.prices().limit_price)
         || !std::isnan(order.legs.prices().profit_ticks) || !std::isnan(order.legs.prices().loss_ticks)
@@ -2260,7 +2260,7 @@ void BacktestEngine::revive_position_brackets_after_margin_call_partial(
     PendingOrder* marketable = nullptr;
     for (PendingOrder& o : pending_orders_) {
         if (o.type != OrderType::EXIT) continue;
-        if (o.suppress_as_declined_reversal_close) continue;
+        if (o.cancellation.cancelled()) continue;
         if (o.id.size() >= kClosePrefix.size()
             && o.id.compare(0, kClosePrefix.size(), kClosePrefix) == 0) continue;
         if (!o.legs.dormant()) continue;
@@ -2783,7 +2783,7 @@ bool BacktestEngine::whole_position_market_close_rests_for_open() const {
             || o.id.compare(0, kClosePrefix.size(), kClosePrefix) != 0) {
             continue;
         }
-        if (o.suppress_as_declined_reversal_close) continue;
+        if (o.cancellation.cancelled()) continue;
         // Rests from a prior bar: a market close fills at this bar's open.
         if (o.created_bar >= bar_index_) continue;
         if (!std::isnan(o.legs.prices().stop_price) || !std::isnan(o.legs.prices().limit_price)
@@ -3889,9 +3889,9 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && std::isnan(order.legs.prices().profit_ticks)
                 && std::isnan(order.legs.prices().loss_ticks)
                 && !order.reservation_expansion.capture()
-                && !order.suppress_as_declined_reversal_close
-                && std::isfinite(order.suppressed_close_consumed_ledger_qty)
-                && order.suppressed_close_consumed_ledger_qty > kQtyEpsilon;
+                && !order.cancellation.cancelled()
+                && std::isfinite(order.cancellation.close_claim_consumed())
+                && order.cancellation.close_claim_consumed() > kQtyEpsilon;
         };
 
         const PyramidEntry& seed = pyramid_entries_.front();
@@ -4039,7 +4039,7 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
             && std::abs(position_qty_ - seed.qty) <= kQtyEpsilon
             && std::abs(source[2]->tv_carry_qty - seed.qty) <= kQtyEpsilon
             && std::abs(
-                source[2]->suppressed_close_consumed_ledger_qty - seed.qty)
+                source[2]->cancellation.close_claim_consumed() - seed.qty)
                 <= kQtyEpsilon
             && projected_final_short_admission_is_safe();
         if (exact_book) {
@@ -4148,7 +4148,7 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                     auto gapped_bracket_rank = [&](const PendingOrder& o) {
                         if (o.type != OrderType::EXIT) return 0;
                         if (!order_is_exit_style(o, position_side_)) return 0;
-                        if (o.suppress_as_declined_reversal_close) return 0;
+                        if (o.cancellation.cancelled()) return 0;
                         const bool priced = !std::isnan(o.legs.prices().stop_price)
                             || !std::isnan(o.legs.prices().limit_price)
                             || !std::isnan(o.legs.prices().trail_points)
@@ -4290,7 +4290,7 @@ bool BacktestEngine::short_seed_collision_materialization_is_live(
         || position_open_bar_ != bar_index_
         || position_entry_count_ != 1
         || pyramid_entries_.size() != 1
-        || !std::isfinite(order.suppressed_close_consumed_ledger_qty)) {
+        || !std::isfinite(order.cancellation.close_claim_consumed())) {
         return false;
     }
 
@@ -4330,7 +4330,7 @@ bool BacktestEngine::short_seed_collision_materialization_is_live(
     // 25/25). Under the FIXED cohort's pinned L == S this is exactly the old
     // strict equality; the live-position invariant is that the fresh long book
     // is the single entry lot.
-    const double frozen_target = order.suppressed_close_consumed_ledger_qty;
+    const double frozen_target = order.cancellation.close_claim_consumed();
     return long_lot.entry_id == long_entry->id
         && long_lot.entry_bar_index == bar_index_
         && long_lot.qty > kQtyEpsilon
@@ -4454,7 +4454,7 @@ bool BacktestEngine::same_bar_market_close_artifact_is_live(
         || !std::isfinite(order.quantity_request.intent()->units())
         || order.quantity_request.intent()->units() <= kQtyEpsilon
         || order.created_bar + 1 != bar_index_
-        || order.suppress_as_declined_reversal_close
+        || order.cancellation.cancelled()
         || position_side_ == PositionSide::FLAT
         || !same_bar_market_tx_scope_is_live()) {
         return false;
@@ -5243,8 +5243,7 @@ void BacktestEngine::apply_filled_order_to_state(
     // so a flag set mid-segment by an earlier candidate's decline is not seen
     // by classify — catch it here (no-op the fill, mark for compaction). Shared
     // by both kernels; must precede every state mutation below.
-    if (order.suppress_as_declined_reversal_close
-        || order.declined_by_replaced_short_market) {
+    if (order.cancellation.cancelled()) {
         decline_and_cancel();
         return;
     }
@@ -6354,7 +6353,7 @@ void BacktestEngine::apply_filled_order_to_state(
                 if (child.type != OrderType::EXIT
                     || child.from_entry.empty()
                     || child.created_bar != order.created_bar
-                    || child.suppress_as_declined_reversal_close
+                    || child.cancellation.cancelled()
                     || !actionable
                     || child.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
                     || !std::isnan(child.qty)
@@ -6923,7 +6922,7 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
                 || std::isfinite(other.legs.prices().loss_ticks);
             if (other.from_entry.empty() || other.quantity_request.is_partial(kFullQtyEps, kFullPercentEps)
                 || !std::isnan(other.qty) || other.qty_percent != 100
-                || !bracket || other.suppress_as_declined_reversal_close
+                || !bracket || other.cancellation.cancelled()
                 || !other.oca_name.empty()
                 || !std::isnan(other.legs.prices().trail_points)
                 || !std::isnan(other.legs.prices().trail_price)
@@ -7120,7 +7119,10 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
             if (sibling.type == OrderType::MARKET
                 && sibling.created_seq > order.created_seq
                 && sibling.created_bar == order.created_bar && !sibling.is_long) {
-                sibling.declined_by_replaced_short_market = true;
+                sibling.cancellation.cancel(CancellationCause::Replacement,
+                    order.incarnation, order.created_seq,
+                    sibling.incarnation, sibling.legs.target().owner,
+                    sibling.legs.revision());
             }
         }
         if (position_side_ == PositionSide::SHORT && !pyramid_entries_.empty())
@@ -7393,7 +7395,7 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
         // position at its placement-frozen target S, capped by the live long
         // book L (finding 272: zero#2 qty == min(S, L) exact, 25/25). The
         // FIXED cohort's pinned L == S keeps the historical full-target qty.
-        const double qty = std::min(order.suppressed_close_consumed_ledger_qty,
+        const double qty = std::min(order.cancellation.close_claim_consumed(),
                                     pyramid_entries_.front().qty);
         const double entry_fill = apply_fill_slippage(fill_price, /*is_buy=*/true);
         if (!std::isfinite(entry_fill) || qty <= kQtyEpsilon) return;
@@ -7874,7 +7876,7 @@ void BacktestEngine::materialize_relative_exit_prices_for_live_position() {
 void BacktestEngine::suppress_declined_reversal_close_legs(
         const PendingOrder& declined_entry) {
     for (PendingOrder& co : pending_orders_) {
-        if (co.suppress_as_declined_reversal_close) continue;   // idempotent
+        if (co.cancellation.cancelled()) continue;   // idempotent
         if (co.type != OrderType::EXIT) continue;
         if (co.id.size() <= kClosePrefix.size()) continue;      // bare close_all excluded
         if (co.id.compare(0, kClosePrefix.size(), kClosePrefix) != 0) continue;
@@ -7884,14 +7886,15 @@ void BacktestEngine::suppress_declined_reversal_close_legs(
         const bool full_close =
             std::isnan(co.qty) && co.qty_percent >= 100.0 - kFullPercentEps;
         if (!full_close) continue;
-        co.suppress_as_declined_reversal_close = true;          // false->true transition
-        if (!std::isnan(co.suppressed_close_consumed_ledger_qty)
-            && co.suppressed_close_consumed_ledger_qty > 0.0) {
+        const bool cancelled = co.cancellation.cancel(
+            CancellationCause::Dependency, declined_entry.incarnation,
+            declined_entry.created_seq, co.incarnation,
+            co.legs.target().owner, co.legs.revision());
+        if (cancelled) {
             // round-4b F1: the call retired the id's ledger whole; restore
             // the target AND the remainder it retired beyond the target.
-            id_unclosed_qty_[co.id.substr(kClosePrefix.size())]
-                += co.suppressed_close_consumed_ledger_qty
-                   + co.suppressed_close_retired_ledger_qty;
+            double& ledger = id_unclosed_qty_[co.id.substr(kClosePrefix.size())];
+            co.cancellation.release_close_claim_once(ledger);
         }
     }
 }
@@ -8007,14 +8010,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         bool exit_closed_was_long, const Bar& bar,
         bool flat_dual_stop_pair) {
     using internal::DualEntryStopPathWinner;
-    if (order.declined_by_replaced_short_market) {
-        return OrderEligibility::Remove;
-    }
-    // design-declined-reversal-close-leg: a close flagged at the KI-54 reversal
-    // decline is held atomically with the refused reversal — Remove it from both
-    // fill kernels before any other classification runs. Unconditional (across
-    // both opposing passes): a flagged order is never eligible.
-    if (order.suppress_as_declined_reversal_close) {
+    if (order.cancellation.cancelled()) {
         return OrderEligibility::Remove;
     }
     // finding-311: a dormant bracket stays in the book (a later margin-call

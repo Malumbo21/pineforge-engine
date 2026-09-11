@@ -2597,13 +2597,11 @@ uint64_t BacktestEngine::queue_deferred_close_order(
     order.created_position_side = position_side_;
     order.tv_carry_qty = position_qty_;
     order.comment = comment;
-    // design-declined-reversal-close-leg: the qty this close debited from
-    // id_unclosed_qty_ at CALL time (default-FIFO branch), so a later
-    // suppression can re-credit exactly that amount. NaN when nothing was
-    // debited (ANY rule / explicit qty / close_all).
-    order.suppressed_close_consumed_ledger_qty = consumed_ledger_qty;
-    // round-4b F1: the rest of that ledger the same call retired.
-    order.suppressed_close_retired_ledger_qty = retired_ledger_qty;
+    // Capture the source close's id-ledger claim in the generic order-owned
+    // receipt. If Pine later rejects the paired reversal, the compatibility
+    // selector cancels this order and releases the claim exactly once.
+    order.cancellation.bind_close_claim(consumed_ledger_qty,
+                                        retired_ledger_qty);
     // round 8 family S, rule 4: a targeted default-FIFO strategy.close(id)
     // in scope is a member of the bar's market transaction — its target is
     // frozen here (the lot id holds at the call) and its broker side is the

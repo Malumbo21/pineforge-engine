@@ -226,7 +226,16 @@ uint64_t BacktestEngine::broker_state_hash() const {
         f.i(o.paired_flat_market_peer_seq);
         f.d(o.paired_flat_market_transaction_qty);
         f.i(static_cast<int64_t>(o.short_seed_collision_role));
-        f.b(o.suppress_as_declined_reversal_close);
+        f.i(static_cast<int64_t>(o.cancellation.cause()));
+        f.i(static_cast<int64_t>(o.cancellation.state()));
+        f.i(static_cast<int64_t>(o.cancellation.close_claim_release()));
+        f.u(o.cancellation.source_incarnation());
+        f.i(o.cancellation.source_sequence());
+        f.u(o.cancellation.target_incarnation());
+        f.i(o.cancellation.target_owner());
+        f.u(o.cancellation.target_revision());
+        f.d(o.cancellation.close_claim_consumed());
+        f.d(o.cancellation.close_claim_retired());
         // --- Task-7 carried ruling (task-5 re-review): every remaining
         // PendingOrder member that a fill/admission/eligibility path reads.
         // Coverage is now enforced for the whole struct by
@@ -243,7 +252,6 @@ uint64_t BacktestEngine::broker_state_hash() const {
         // (clean-room two-call rules fail closed on these).
         f.u(o.replaced_order_incarnation);
         f.u(o.replaced_default_market_incarnation);
-        f.b(o.declined_by_replaced_short_market);
         f.u(o.recreated_after_named_cancelled_entry_incarnation);
         f.u(o.named_cancel_surviving_exit_incarnation);
         // calc_on_order_fills birth provenance and per-leg suppression
@@ -304,8 +312,8 @@ uint64_t BacktestEngine::broker_state_hash() const {
             f.u(*receiver);
         }
         // Suppressed-close ledger re-credit amounts.
-        f.d(o.suppressed_close_consumed_ledger_qty);
-        f.d(o.suppressed_close_retired_ledger_qty);
+        f.d(o.cancellation.close_claim_consumed());
+        f.d(o.cancellation.close_claim_retired());
     }
     market_admission_journal_.reflect("journal",[&](const auto& field){hash_admission_field(f,field);});
 

@@ -5,7 +5,7 @@ namespace pineforge::compat::pine {
 std::optional<exit_legs::Operation> select_exit_suspension(
         const PendingOrder& o, const ExitSuspensionContext& c) {
     if (c.open_slice_this_bar || !c.standing || o.type != OrderType::EXIT
-        || o.suppress_as_declined_reversal_close
+        || o.cancellation.cancelled()
         || o.id.compare(0, internal::kClosePrefix.size(), internal::kClosePrefix) == 0)
         return std::nullopt;
     const auto& p = o.legs.prices();

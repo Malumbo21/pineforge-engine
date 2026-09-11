@@ -367,8 +367,9 @@ public:
             }},
             {"pending_orders_[].suppress_as_declined_reversal_close", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].suppress_as_declined_reversal_close =
-                        !s.pending_orders_[0].suppress_as_declined_reversal_close;
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Dependency, 9001, 9001,
+                        s.pending_orders_[0].incarnation, 0, 0);
             }},
 
             // Task 7 (carried task-5 ruling): every PendingOrder member the
@@ -396,7 +397,9 @@ public:
             }},
             {"pending_orders_[].declined_by_replaced_short_market", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].declined_by_replaced_short_market = !s.pending_orders_[0].declined_by_replaced_short_market;
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Replacement, 9002, 9002,
+                        s.pending_orders_[0].incarnation, 0, 0);
             }},
             {"pending_orders_[].leg_activation", [](Probe& s) {
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].leg_activation.bind({1,2,3});
@@ -465,10 +468,20 @@ public:
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].default_stop_placement_signal_close = 424242.5;
             }},
             {"pending_orders_[].suppressed_close_consumed_ledger_qty", [](Probe& s) {
-                if (!s.pending_orders_.empty()) s.pending_orders_[0].suppressed_close_consumed_ledger_qty = 424242.5;
+                if (!s.pending_orders_.empty()) {
+                    s.pending_orders_[0].cancellation.bind_close_claim(424242.5, 0.0);
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Dependency, 9003, 9003,
+                        s.pending_orders_[0].incarnation, 0, 0);
+                }
             }},
             {"pending_orders_[].suppressed_close_retired_ledger_qty", [](Probe& s) {
-                if (!s.pending_orders_.empty()) s.pending_orders_[0].suppressed_close_retired_ledger_qty = 424242.5;
+                if (!s.pending_orders_.empty()) {
+                    s.pending_orders_[0].cancellation.bind_close_claim(1.0, 424242.5);
+                    s.pending_orders_[0].cancellation.cancel(
+                        CancellationCause::Dependency, 9004, 9004,
+                        s.pending_orders_[0].incarnation, 0, 0);
+                }
             }},
             {"pending_orders_[].replaced_default_market_incarnation", [](Probe& s) {
                 if (!s.pending_orders_.empty()) s.pending_orders_[0].replaced_default_market_incarnation += 1;

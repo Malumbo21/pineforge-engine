@@ -16,6 +16,7 @@
 #include "quantity_intent.hpp"
 #include "market_admission.hpp"
 #include "reservation_expansion.hpp"
+#include "order_cancellation.hpp"
 #include "compat/pine/frozen_market_instruction.hpp"
 #include "leg_activation.hpp"
 #include "exit_leg_lifecycle.hpp"
@@ -438,11 +439,11 @@ struct PendingOrder {
     // Exact default MARKET replaced on this source bar. A priced order or
     // a prior-bar carry with the same id does not prove this call topology.
     uint64_t replaced_default_market_incarnation = 0;
-    // A filled default-percent short replacement consumes the pending sell
-    // slot even when its plain transaction leaves an old LONG remainder.
-    // Mark only the exact later MARKET objects after that fill; a reissue
-    // creates a fresh object, and cancelled siblings spend no broker event.
-    bool declined_by_replaced_short_market = false;
+    // Broker cancellation receipt. Pine compatibility selects the causal
+    // cancellation at its adapter boundary; the core retains one generic
+    // source-bound result for every affected order and owns the once-only
+    // close-claim release transition.
+    OrderCancellationReceipt cancellation;
     // Incarnation of the live priced ENTRY removed by strategy.cancel(id)
     // earlier in the same source evaluation, copied only onto the first fresh
     // same-id strategy.entry call and then consumed. Zero means there is no
@@ -899,38 +900,9 @@ struct PendingOrder {
     // Cap and closing-side facts remain the existing immutable placement
     // snapshots, rather than separately writable coordination booleans.
     PineFrozenMarketInstruction pine_frozen_market_instruction;
-    // design-declined-reversal-close-leg: set at the KI-54 percent-of-equity
-    // reversal-decline site when this pending FULL close was co-queued AFTER,
-    // and on the same bar as, the declined MARKET reversal entry targeting the
-    // position that reversal would have flipped. TradingView refuses the whole
-    // reversal atomically and HOLDS the position, so the co-queued close must
-    // not fire either. classify_order_eligibility Removes a flagged order from
-    // BOTH fill kernels; apply_filled_order_to_state additionally no-ops it at
-    // apply time (the KI-60 COOF kernel pre-classifies its candidates, so a flag
-    // set mid-segment by an earlier candidate's decline is only seen there). On
-    // an ADMITTED reversal the entry fills and the close is a plain no-op — the
-    // flag is never set, so the fix is inert. See suppress_declined_reversal_
-    // close_legs (engine_fills.cpp).
-    bool suppress_as_declined_reversal_close = false;
-    // Qty this deferred close debited from id_unclosed_qty_[<bare id>] in
-    // compute_close_target_qty's default-FIFO branch at strategy.close CALL
-    // time. On the false->true suppression transition it is re-credited to that
-    // ledger EXACTLY ONCE, so a later strategy.close(id) on the still-held
-    // position resolves a nonzero target and fires (precedent: the COOF reissue
-    // re-credit, engine_strategy_commands.cpp). NaN = nothing to re-credit (the
-    // ANY close-entries rule, an explicit qty/qty_percent, and close_all do not
-    // debit the id ledger).
-    double suppressed_close_consumed_ledger_qty =
-        std::numeric_limits<double>::quiet_NaN();
-    // finding-close-id-retires-ledger (round-4b F1): the part of
-    // id_unclosed_qty_[<bare id>] a default-FIFO strategy.close(id) retired
-    // BEYOND its availability-capped target (unclosed - target), so the
-    // suppression re-credit above restores the ledger to its exact pre-call
-    // value. 0 when the target covered the whole ledger or nothing was
-    // debited. Kept apart from suppressed_close_consumed_ledger_qty, whose
-    // value (the placement-frozen TARGET) the short-seed collision cohort
-    // reads as the materialized qty and must stay byte-identical.
-    double suppressed_close_retired_ledger_qty = 0.0;
+    // The cancellation receipt owns the placement-frozen close claim and its
+    // once-only release state. The old scalar projections remain in the
+    // public mirror, derived from cancellation.close_claim_*().
     ShortSeedCollisionRole short_seed_collision_role =
         ShortSeedCollisionRole::NONE;
 };
@@ -3970,8 +3942,8 @@ private:
     // design-declined-reversal-close-leg: called at the KI-54 reversal-decline
     // site with the just-declined MARKET reversal entry. Flags every pending
     // FULL close that was co-queued after it on the same bar against the held
-    // side (see PendingOrder::suppress_as_declined_reversal_close), re-crediting
-    // each flagged close's consumed id-ledger exactly once.
+    // side (see PendingOrder::cancellation), releasing each close claim
+    // exactly once.
     void suppress_declined_reversal_close_legs(const PendingOrder& declined_entry);
     // round 8 family R / round 10 family AB: the 10-significant-digit
     // margin-call trigger on a margin-100 LONG (process_margin_call; rule

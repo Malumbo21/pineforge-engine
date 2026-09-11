@@ -55,7 +55,7 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->incarnation = src.incarnation;
     out->created_by_same_id_replacement = src.type != OrderType::RAW_ORDER && src.replaced_order_incarnation != 0 ? 1 : 0;
     out->replaced_default_market_incarnation = src.replaced_default_market_incarnation;
-    out->declined_by_replaced_short_market = src.declined_by_replaced_short_market ? 1 : 0;
+    out->declined_by_replaced_short_market = src.cancellation.cause() == CancellationCause::Replacement ? 1 : 0;
     out->replaced_exit_order_incarnation = src.type == OrderType::EXIT ? src.replaced_order_incarnation : 0;
     out->recreated_after_named_cancelled_entry_incarnation = src.recreated_after_named_cancelled_entry_incarnation;
     out->named_cancel_surviving_exit_incarnation = src.named_cancel_surviving_exit_incarnation;
@@ -120,7 +120,7 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->sbmt_kept_over_cap = src.pine_frozen_market_instruction.transaction() && src.over_pyramiding_cap_at_placement ? 1 : 0;
     out->sbmt_close_qty = src.pine_frozen_market_instruction.targeted_close() ? src.quantity_request.intent()->units() : std::numeric_limits<double>::quiet_NaN();
     out->sbmt_close_buy = src.pine_frozen_market_instruction.targeted_close() && src.created_position_side == PositionSide::SHORT ? 1 : 0;
-    out->suppress_as_declined_reversal_close = src.suppress_as_declined_reversal_close ? 1 : 0;
+    out->suppress_as_declined_reversal_close = src.cancellation.cause() == CancellationCause::Dependency ? 1 : 0;
     out->dormant_bracket = src.legs.dormant() ? 1 : 0;
     out->dormant_reissue_pending = src.legs.pending_replacement() ? 1 : 0;
     out->dormant_original_stop_price = src.legs.original_stop();
@@ -129,8 +129,8 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->dormant_trail_best = src.legs.trail_best();
     out->dormant_trail_best_start = src.legs.trail_prefix();
     out->dormant_trail_leg_dead = src.legs.retired(exit_legs::Leg::Trail) ? 1 : 0;
-    out->suppressed_close_consumed_ledger_qty = src.suppressed_close_consumed_ledger_qty;
-    out->suppressed_close_retired_ledger_qty = src.suppressed_close_retired_ledger_qty;
+    out->suppressed_close_consumed_ledger_qty = src.cancellation.close_claim_consumed();
+    out->suppressed_close_retired_ledger_qty = src.cancellation.close_claim_retired();
     out->short_seed_collision_role = (int32_t)src.short_seed_collision_role;
     out->replaced_order_incarnation = src.replaced_order_incarnation;
     out->birth_timestamp = src.birth.timestamp();
@@ -340,6 +340,16 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->legs_last_cancel_legs_item0 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size() > 0) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs)[0])) : (UINT32_MAX);
     out->legs_last_cancel_legs_item1 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size() > 1) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs)[1])) : (UINT32_MAX);
     out->legs_last_cancel_legs_item2 = ((((true) && (src.legs.last_action()).has_value()) && std::holds_alternative<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)) && ((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs).size() > 2) ? (static_cast<uint32_t>(((std::get<exit_legs::Cancel>(((*(src.legs.last_action()))).operation)).legs)[2])) : (UINT32_MAX);
+    out->cancellation_cause = static_cast<int32_t>(src.cancellation.cause());
+    out->cancellation_state = static_cast<int32_t>(src.cancellation.state());
+    out->cancellation_close_claim_release = static_cast<int32_t>(src.cancellation.close_claim_release());
+    out->cancellation_source_incarnation = src.cancellation.source_incarnation();
+    out->cancellation_source_sequence = src.cancellation.source_sequence();
+    out->cancellation_target_incarnation = src.cancellation.target_incarnation();
+    out->cancellation_target_owner = src.cancellation.target_owner();
+    out->cancellation_target_revision = src.cancellation.target_revision();
+    out->cancellation_close_claim_consumed = src.cancellation.close_claim_consumed();
+    out->cancellation_close_claim_retired = src.cancellation.close_claim_retired();
     out->market_admission_observation_present = src.market_admission.observation() ? 1 : 0;
     out->market_admission_observation_command = src.market_admission.observation() ? static_cast<uint64_t>(src.market_admission.observation()->command) : 0;
     out->market_admission_observation_kind = src.market_admission.observation() ? static_cast<int64_t>(src.market_admission.observation()->kind) : 0;
@@ -741,6 +751,16 @@ const pf_field_desc_t kLayout[] = {
     PF_PO_FIELD(legs_last_cancel_legs_item0, "uint32_t"),
     PF_PO_FIELD(legs_last_cancel_legs_item1, "uint32_t"),
     PF_PO_FIELD(legs_last_cancel_legs_item2, "uint32_t"),
+    PF_PO_FIELD(cancellation_cause, "int32_t"),
+    PF_PO_FIELD(cancellation_state, "int32_t"),
+    PF_PO_FIELD(cancellation_close_claim_release, "int32_t"),
+    PF_PO_FIELD(cancellation_source_incarnation, "uint64_t"),
+    PF_PO_FIELD(cancellation_source_sequence, "int64_t"),
+    PF_PO_FIELD(cancellation_target_incarnation, "uint64_t"),
+    PF_PO_FIELD(cancellation_target_owner, "int64_t"),
+    PF_PO_FIELD(cancellation_target_revision, "uint64_t"),
+    PF_PO_FIELD(cancellation_close_claim_consumed, "double"),
+    PF_PO_FIELD(cancellation_close_claim_retired, "double"),
     PF_PO_FIELD(market_admission_observation_present, "uint64_t"),
     PF_PO_FIELD(market_admission_observation_command, "uint64_t"),
     PF_PO_FIELD(market_admission_observation_kind, "int64_t"),
