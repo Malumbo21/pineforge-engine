@@ -5,7 +5,7 @@
 #include <type_traits>
 
 namespace pineforge::admission {
-inline namespace market_admission_v1 {
+inline namespace market_admission_v2 {
 namespace {
 bool same(const ReviewReceipt& a, const ReviewReceipt& b) {
     return a.sequence == b.sequence && a.checkpoint == b.checkpoint &&
@@ -239,7 +239,7 @@ struct Reflect {
     }
     void book(const BookObservation& o,const std::string& p)const {
         field(p,"incarnation",o.incarnation);field(p,"priority",o.priority);field(p,"bar",o.bar);
-        field(p,"type",o.type);field(p,"placement_side",o.placement_side);field(p,"id",o.id);
+        field(p,"type",o.type);field(p,"placement_side",o.placement_side);field(p,"buy",o.buy);field(p,"id",o.id);
         field(p,"oca_name",o.oca_name);field(p,"oca_type",o.oca_type);birth(o.birth,p+".birth");
         field(p+".prices","limit",o.prices.limit);field(p+".prices","stop",o.prices.stop);
         field(p+".prices","trail_points",o.prices.trail_points);field(p+".prices","trail_price",o.prices.trail_price);
@@ -293,5 +293,5 @@ uint64_t read_unsigned(const std::vector<Field>& f,const std::string& p){return 
 int64_t read_integer(const std::vector<Field>& f,const std::string& p){return read_field<int64_t>(f,p);}
 double read_double(const std::vector<Field>& f,const std::string& p){return read_field<double>(f,p);}
 std::string read_string(const std::vector<Field>& f,const std::string& p){return read_field<std::string>(f,p);}
-} // inline namespace market_admission_v1
+} // inline namespace market_admission_v2
 } // namespace pineforge::admission

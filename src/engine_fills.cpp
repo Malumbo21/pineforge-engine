@@ -4976,7 +4976,8 @@ int BacktestEngine::probe_fill_qty(int index, double fill_price, double* qty,
         const bool prior_cycle_close_only =
             opposite_live_position
             && o.created_position_side != position_side_
-            && !o.reverses_same_bar_market_from_flat;
+            && !placement_has_opposite_market_predecessor(
+                market_admission_journal_, o);
         const bool explicit_fixed_qty =
             std::isfinite(o.qty)
             && o.qty > kQtyEpsilon
@@ -7250,7 +7251,8 @@ void BacktestEngine::apply_entry_order_fill(PendingOrder& order, double fill_pri
         // at placement only when a pending opposite same-bar MARKET entry
         // existed (STOP-first / placement-rejected cells leave it false, so
         // they keep the close-only single-close semantics).
-        && !order.reverses_same_bar_market_from_flat;
+        && !placement_has_opposite_market_predecessor(
+            market_admission_journal_, order);
     const bool explicit_fixed_qty =
         std::isfinite(order.qty)
         && order.qty > kQtyEpsilon

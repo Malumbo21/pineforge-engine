@@ -191,6 +191,7 @@ inline void walk(BookObservation& value,const std::string& path,std::vector<Muta
     walk(value.bar,path+".bar",mutations);
     walk(value.type,path+".type",mutations);
     walk(value.placement_side,path+".placement_side",mutations);
+    walk(value.buy,path+".buy",mutations);
     walk(value.id,path+".id",mutations);
     walk(value.oca_name,path+".oca_name",mutations);
     walk(value.oca_type,path+".oca_type",mutations);

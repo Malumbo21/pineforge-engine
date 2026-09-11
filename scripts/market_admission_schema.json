@@ -80,6 +80,7 @@
     "bar": "int",
     "type": "int",
     "placement_side": "int",
+    "buy": "bool",
     "id": "std::string",
     "oca_name": "std::string",
     "oca_type": "int",

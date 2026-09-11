@@ -8,8 +8,10 @@
 #include <ctime>
 #include <limits>
 #include <set>
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
+#include <stdexcept>
 #include "na.hpp"
 #include "bar.hpp"
 #include "broker_events.hpp"
@@ -38,6 +40,16 @@
 #define PINEFORGE_NO_STRATEGY_DECLS
 // Angle-bracket form is the installed public path (deliberate).
 #include <pineforge/pineforge.h>
+
+// The public C mirror needs the engine's admission journal to derive
+// source-bound placement facts. The one-argument form remains for manually
+// constructed, unbound native orders only.
+namespace pineforge {
+void fill_pending_order_mirror(const PendingOrder&,
+                               const MarketAdmissionJournal*,
+                               pf_pending_order_v1_t*);
+void fill_pending_order_mirror(const PendingOrder&, pf_pending_order_v1_t*);
+}
 
 // Generated modules using the full script lifecycle reset must be rebuilt
 // against a runtime providing this hook. This is an internal C++ capability;
@@ -513,7 +525,6 @@ struct PendingOrder {
     // position the market leg opened (flip_market_position_to) instead of
     // collapsing to close-only-flat. Scoped to created-FLAT so the deferred-flip
     // carry (created OPPOSITE) is untouched.
-    bool reverses_same_bar_market_from_flat = false;
     // KI-65 MARKET/MARKET follow-up candidate. Every own-affordable explicit
     // MARKET call in the pinned broker scope carries this snapshot until the
     // next broker-processing boundary, where the complete source-bar set is
@@ -907,6 +918,44 @@ inline bool placement_at_entry_capacity(const PendingOrder& order) {
     return observation->placement_side != static_cast<int>(PositionSide::FLAT)
         && observation->placement_side == static_cast<int>(requested_side)
         && observation->held_entries >= observation->configuration.pyramiding;
+}
+
+// Reconstruct the one source-order dependency that is not part of the
+// PendingOrder object. The producer scanned the physical book immediately
+// before accepting this priced entry. The journal's immutable before/removed
+// records preserve that exact scan, including a peer that remains physically
+// resident after a cancellation. A peer without an original command
+    // direction is a raw book fact, independent of the peer's source Draft.
+inline bool placement_has_opposite_market_predecessor(
+        const MarketAdmissionJournal& journal, const PendingOrder& current) {
+    const auto& origin = current.market_admission.observation();
+    if (!origin || origin->kind != admission::CommandKind::Entry
+        || current.type != OrderType::ENTRY
+        || origin->placement_side != static_cast<int>(PositionSide::FLAT)
+        || (std::isnan(origin->prices.limit) && std::isnan(origin->prices.stop)))
+        return false;
+
+    const admission::CommandEvent* accepted = nullptr;
+    for (const auto& event : journal.events()) {
+        const auto* command = std::get_if<admission::CommandEvent>(&event);
+        if (!command || !command->observation
+            || command->observation->command != origin->command
+            || command->admitted_incarnation != current.incarnation) continue;
+        if (accepted) return false; // refuse duplicate source identity
+        accepted = command;
+    }
+    if (!accepted) return false; // pruned or unaccepted source
+    const auto removed = [&](uint64_t incarnation) {
+        return std::find(accepted->removed.begin(), accepted->removed.end(), incarnation)
+            != accepted->removed.end();
+    };
+    for (const auto& peer : accepted->before) {
+        if (removed(peer.incarnation) || peer.type != static_cast<int>(OrderType::MARKET)
+            || peer.bar != origin->bar || peer.priority >= current.created_seq)
+            continue;
+        if (peer.buy != origin->buy) return true;
+    }
+    return false;
 }
 
  } // inline namespace engine_script_run_v11 (PendingOrder)
@@ -4842,6 +4891,9 @@ public:
     // (pf_pending_order_v1_t, include/pineforge/pending_order_mirror.hpp),
     // never by pointer. `i` must be in [0, pending_order_count()).
     int pending_order_count() const { return static_cast<int>(pending_orders_.size()); }
+    const MarketAdmissionJournal& market_admission_journal() const {
+        return market_admission_journal_;
+    }
     std::vector<admission::Field> market_admission_fields() const;
     const PendingOrder& pending_order_at(int i) const {
         return pending_orders_[static_cast<size_t>(i)];

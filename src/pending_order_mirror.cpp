@@ -30,7 +30,7 @@ void copy_str(std::string_view s, char* dst, uint8_t* truncated, uint64_t* hash)
 
 }  // namespace
 
-void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* out) {
+void fill_pending_order_mirror(const PendingOrder& src, const MarketAdmissionJournal* journal, pf_pending_order_v1_t* out) {
     std::memset(out, 0, sizeof(*out));
     out->struct_version = 1;
     out->size = (uint32_t)sizeof(*out);
@@ -73,7 +73,7 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->over_pyramiding_cap_at_placement = placement_at_entry_capacity(src) ? 1 : 0;
     out->same_id_stop_deferred_close_all_bar = (int32_t)src.same_id_stop_deferred_close_all_bar;
     out->same_id_stop_deferred_close_all_incarnation = src.same_id_stop_deferred_close_all_incarnation;
-    out->reverses_same_bar_market_from_flat = src.reverses_same_bar_market_from_flat ? 1 : 0;
+    out->reverses_same_bar_market_from_flat = journal && placement_has_opposite_market_predecessor(*journal, src) ? 1 : 0;
     out->paired_flat_market_candidate = compat::pine::awaits_pair_review(src.market_admission) ? 1 : 0;
     out->paired_flat_market_own_qty = src.paired_flat_market_own_qty;
     out->paired_flat_market_signal_close = src.paired_flat_market_signal_close;
@@ -424,6 +424,12 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->cancellation_target_revision = src.cancellation.target_revision();
     out->cancellation_close_claim_consumed = src.cancellation.close_claim_consumed();
     out->cancellation_close_claim_retired = src.cancellation.close_claim_retired();
+}
+
+void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* out) {
+    if (src.market_admission.observation())
+        throw std::logic_error("bound pending order mirror requires its admission journal");
+    fill_pending_order_mirror(src, nullptr, out);
 }
 
 namespace {

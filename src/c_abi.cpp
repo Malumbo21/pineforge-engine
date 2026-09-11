@@ -46,7 +46,9 @@
 
 namespace pineforge {
 // Generated (src/pending_order_mirror.cpp, scripts/gen_pending_order_mirror.py).
-void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* out);
+void fill_pending_order_mirror(const PendingOrder& src,
+                               const MarketAdmissionJournal* journal,
+                               pf_pending_order_v1_t* out);
 const pf_field_desc_t* pending_order_layout(int* count);
 }  // namespace pineforge
 
@@ -424,7 +426,8 @@ PF_API int strategy_pending_order_get(pf_strategy_t s, int index, void* out, siz
     const auto* engine = static_cast<const pineforge::BacktestEngine*>(s);
     if (index < 0 || index >= engine->pending_order_count()) return -1;
     pf_pending_order_v1_t tmp;
-    pineforge::fill_pending_order_mirror(engine->pending_order_at(index), &tmp);
+    pineforge::fill_pending_order_mirror(engine->pending_order_at(index),
+        &engine->market_admission_journal(), &tmp);
     std::memcpy(out, &tmp, size_in < sizeof(tmp) ? size_in : sizeof(tmp));
     return 0;
 }

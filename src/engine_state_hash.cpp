@@ -285,7 +285,6 @@ uint64_t BacktestEngine::broker_state_hash() const {
         f.i(static_cast<int64_t>(o.same_id_stop_deferred_close_all_bar));
         f.u(o.same_id_stop_deferred_close_all_incarnation);
         // KI-65 dual same-bar opposite entry / gross-admission candidacy.
-        f.b(o.reverses_same_bar_market_from_flat);
         // design-market-entry-affordability placement snapshot (the fill
         // check costs held + own against THIS equity at THIS price).
         f.d(o.affordability_placement_equity);

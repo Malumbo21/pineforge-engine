@@ -32,7 +32,7 @@ bool BacktestEngine::opening_admission_eligible(const MarketAdmissionDraft& draf
 }
 admission::BookObservation BacktestEngine::admission_book_observation(const PendingOrder& order) const {
     return {order.incarnation,order.created_seq,order.created_bar,static_cast<int>(order.type),
-            static_cast<int>(order.created_position_side),order.id,order.oca_name,order.oca_type,order.birth,admission_current_prices(order),order.market_admission};
+            static_cast<int>(order.created_position_side),order.is_long,order.id,order.oca_name,order.oca_type,order.birth,admission_current_prices(order),order.market_admission};
 }
 admission::CommandCapture BacktestEngine::begin_market_command(admission::CommandKind kind,
         const std::string& id,bool buy,double qty,int qty_type,double limit,double stop,const std::string& oca,int oca_type) {

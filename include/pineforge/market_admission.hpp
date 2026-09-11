@@ -10,7 +10,7 @@
 #include <vector>
 
 namespace pineforge::admission {
-inline namespace market_admission_v1 {
+inline namespace market_admission_v2 {
 constexpr double absent = std::numeric_limits<double>::quiet_NaN();
 enum class CommandKind : int64_t { Entry, Raw, Cancel, CancelAll };
 enum class Outcome : int64_t {
@@ -124,6 +124,10 @@ struct BookObservation {
     int bar = -1;
     int type = 0;
     int placement_side = 0;
+    // Raw requested direction captured with the physical book row. This is
+    // needed to reconstruct a flat-born MARKET peer; placement_side is the
+    // held position side and is FLAT for that peer.
+    bool buy = false;
     std::string id;
     std::string oca_name;
     int oca_type = 0;
@@ -266,6 +270,6 @@ int64_t read_integer(const std::vector<Field>& fields, const std::string& path);
 double read_double(const std::vector<Field>& fields, const std::string& path);
 std::string read_string(const std::vector<Field>& fields, const std::string& path);
 uint64_t sequence(const Event& event);
-} // inline namespace market_admission_v1
+} // inline namespace market_admission_v2
 } // namespace pineforge::admission
 namespace pineforge { using MarketAdmissionDraft = admission::Draft; using MarketAdmissionJournal = admission::Journal; }
