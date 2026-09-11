@@ -33,18 +33,21 @@ class AggregateVersions(unittest.TestCase):
     def test_standalone_owners(self):
         for path, namespace in (
             ('include/pineforge/exit_leg_lifecycle.hpp', 'lifecycle_v1'),
-            ('include/pineforge/market_admission.hpp', 'market_admission_v1'),
-            ('src/market_admission.cpp', 'market_admission_v1'),
+            ('include/pineforge/market_admission.hpp', 'market_admission_v2'),
+            ('src/market_admission.cpp', 'market_admission_v2'),
             ('include/pineforge/reservation_expansion.hpp', 'reservation_expansion_v1'),
             ('src/reservation_expansion.cpp', 'reservation_expansion_v1'),
         ):
             with self.subTest(path=path):
-                self.reject(path, namespace, namespace.replace('_v1', '_v2'))
+                replacement = (namespace.replace('_v2', '_v3')
+                               if namespace.endswith('_v2')
+                               else namespace.replace('_v1', '_v2'))
+                self.reject(path, namespace, replacement)
 
     def test_empty_namespace_is_not_ownership(self):
         for path, namespace in (
             ('include/pineforge/exit_leg_lifecycle.hpp', 'lifecycle_v1'),
-            ('include/pineforge/market_admission.hpp', 'market_admission_v1'),
+            ('include/pineforge/market_admission.hpp', 'market_admission_v2'),
         ):
             self.reject(path, 'inline namespace ' + namespace + ' {',
                         'inline namespace ' + namespace + ' {} namespace misplaced {')

@@ -602,9 +602,9 @@ void pairing_cancellation(const pineforge::order_cancellation_v1::OrderCancellat
              ["pineforge::admission::Draft::bind(", "pineforge::admission::Journal::next_sequence(",
               "pineforge::admission::Allocation::~Allocation("]),
             ("current_admission_to_draft_symbols", current_admission, draft_admission_symbols,
-             ["pineforge::admission::market_admission_v1::Draft::bind(",
-              "pineforge::admission::market_admission_v1::Journal::next_sequence(",
-              "pineforge::admission::market_admission_v1::Allocation::~Allocation("]),
+             ["pineforge::admission::market_admission_v2::Draft::bind(",
+              "pineforge::admission::market_admission_v2::Journal::next_sequence(",
+              "pineforge::admission::market_admission_v2::Allocation::~Allocation("]),
         ]:
             result = subprocess.run([*common, str(obj), str(runtime), "-pthread", "-o", str(root / name)],
                                     capture_output=True, text=True, timeout=60)
