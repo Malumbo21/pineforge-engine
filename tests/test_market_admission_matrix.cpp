@@ -67,7 +67,26 @@ void whole_book_and_command_receipts(){
     Matrix closed;closed.raw("seed",1);closed.fire("seed");closed.close_seed();CHECK(closed.position()==0);closed.add("A",3);closed.add("B",2,false);
     CHECK(closed.mirror("A").paired_flat_market_candidate==1&&closed.mirror("A").explicit_flat_admission_candidate==0);
     closed.pair();CHECK(closed.live("A")&&closed.live("B"));closed.observe("real-close-before-entry","A");closed.observe("real-close-before-entry","B");
-    Matrix invalid;invalid.add("infinite",std::numeric_limits<double>::infinity());CHECK(invalid.has("infinite")&&invalid.mirror("infinite").explicit_flat_admission_candidate==1);invalid.observe("legacy-nonfinite-placement","infinite");
+    // Finite capital cannot fund an infinite request. There is no pending
+    // order to mirror; retain the rejected command itself as audit evidence.
+    Matrix invalid;
+    invalid.add("infinite",std::numeric_limits<double>::infinity());
+    CHECK(!invalid.has("infinite")&&invalid.size()==0);
+    CHECK(invalid.position()==0&&invalid.lots().empty()&&invalid.trades()==0);
+    const auto& events=invalid.market_admission_journal().events();
+    CHECK(events.size()==1);
+    for(const auto& event:events){
+        const auto* command=std::get_if<admission::CommandEvent>(&event);
+        CHECK(command!=nullptr);
+        if(!command)continue;
+        CHECK(command->outcome==admission::Outcome::RejectedAffordability);
+        CHECK(command->admitted_incarnation==0&&command->removed.empty()&&command->before.empty());
+        CHECK(command->observation!=nullptr);
+        if(!command->observation)continue;
+        CHECK(command->observation->kind==admission::CommandKind::Entry);
+        CHECK(command->observation->id=="infinite");
+        CHECK(command->observation->requested_quantity==std::numeric_limits<double>::infinity());
+    }
 }
 }
 int main(){
