@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/fixtures/script_cpp_abi/basev8"
 COMMIT = "79921099a9357cb5bbace907a9319479f6640d89"
-TREE = "e141657c572b4a3855dfee607f9951e331b961e6"
+TREE = "e141657c572b4a3855dfee607f9951e331b961d6"
 
 DECL = re.compile(
     r"^\s*(uint8_t|uint32_t|uint64_t|int32_t|int64_t|double|char)"

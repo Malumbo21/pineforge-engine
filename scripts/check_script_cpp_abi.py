@@ -19,7 +19,7 @@ BASE_ENGINE_SHA256 = "06c937a1ccd31815ca7775268ac699ffdfddb1a1f19de4628b777f37e9
 CURRENT_NAMESPACE = "engine_script_run_v9"
 BASE_NAMESPACE = "engine_script_run_v2"
 V8_COMMIT = "79921099a9357cb5bbace907a9319479f6640d89"
-V8_TREE = "e141657c572b4a3855dfee607f9951e331b961e6"
+V8_TREE = "e141657c572b4a3855dfee607f9951e331b961d6"
 V8_ENGINE_SHA256 = "571c7b328ef86915c63523d066ce2761cfc361b4de413b7669ebe17f4fd30ad3"
 FIXTURE = Path(__file__).resolve().parents[1] / "tests/fixtures/script_cpp_abi/base38"
 

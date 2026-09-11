@@ -1,9 +1,9 @@
 {
   "source_commit": "79921099a9357cb5bbace907a9319479f6640d89",
-  "source_tree": "e141657c572b4a3855dfee607f9951e331b961e6",
+  "source_tree": "e141657c572b4a3855dfee607f9951e331b961d6",
   "internal_namespace": "engine_script_run_v8",
   "archive": "headers.json.gz",
-  "archive_sha256": "32ef1a7ed95d8bb501d3a5aa220ed81960b9d6808b72d5722759c458b561ff1e",
+  "archive_sha256": "461b684bfaf967a35ce73e48f87d1f56a3c9eecdb0bfbbc10f3538d461a84fcb",
   "generated_dependency": "pineforge/version.h comes from current configure; its value is not a frozen layout field.",
   "files": {
     "pineforge/bar.hpp": {
@@ -93,6 +93,14 @@
     "pineforge/timeframe.hpp": {
       "sha256": "5e4c312da463fdcff55e0887188523c8bbf85a2ae62f3317a2b23f22fe0161e2",
       "git_blob": "3d1bc9d495ac7e5b39ea5bae57c9d9afe580192b"
+    },
+    "pineforge/market_admission.hpp": {
+      "sha256": "6a338ea84740a0985b90f65e0ed6a17436e1eee6839c55630db03edb4c75479c",
+      "git_blob": "fa61381dfed60f050daa2aedd2797647163d333b"
+    },
+    "pineforge/exit_leg_lifecycle.hpp": {
+      "sha256": "9d785271511a350114adc7cf5bcb1600cf569f0a10559a8671b7e4b9cb9dc89a",
+      "git_blob": "91492ec22e05d7b6d9327f60ff5e239ae6906fcd"
     }
   }
 }
