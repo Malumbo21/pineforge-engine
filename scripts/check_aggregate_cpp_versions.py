@@ -63,11 +63,11 @@ def check_texts(files):
     for name in ("Lifecycle", "Definition", "Action", "Frame", "Barrier", "Suspension"):
         if not re.search(r'\b(?:class|struct)\s+' + name + r'\s*\{', life):
             raise ValueError(name + " must belong to lifecycle_v1")
-    admission = standalone_scope(files[FILES[4]], "pineforge::admission", "market_admission_v1")
+    admission = standalone_scope(files[FILES[4]], "pineforge::admission", "market_admission_v2")
     for name in ("Draft", "Journal", "Allocation", "CommandCapture", "ReviewCapture", "CommandObservation",
                  "CommandEvent", "ReviewEvent", "SizingEvent", "Field"):
         if not re.search(r'\b(?:class|struct)\s+' + name + r'\s*\{', admission):
-            raise ValueError(name + " must belong to market_admission_v1")
+            raise ValueError(name + " must belong to market_admission_v2")
     cancellation = standalone_scope(files[FILES[8]], "pineforge", "order_cancellation_v1")
     for name in ("CancellationCause", "CancellationState", "CloseClaimRelease",
                  "CancellationResult", "CancellationTarget", "OrderCancellationReceipt"):
@@ -75,7 +75,7 @@ def check_texts(files):
                          + r'\s*(?::[^;{]+)?\{', cancellation):
             raise ValueError(name + " must belong to order_cancellation_v1")
     source = clean(files[FILES[5]])
-    implementation = standalone_scope(source, "pineforge::admission", "market_admission_v1")
+    implementation = standalone_scope(source, "pineforge::admission", "market_admission_v2")
     methods = r'\b(?:Draft|Journal|Allocation|CommandCapture|ReviewCapture)::[~\w]+\s*\('
     if not re.findall(methods, source) or re.findall(methods, source) != re.findall(methods, implementation):
         raise ValueError("admission out-of-line methods need their versioned owner")

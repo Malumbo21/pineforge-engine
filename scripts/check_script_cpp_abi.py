@@ -166,7 +166,7 @@ def main():
                "standalone_namespace": "reservation_expansion_v1",
                "standalone_namespaces": {"reservation": "reservation_expansion_v1",
                    "lifecycle": "pineforge::exit_legs::lifecycle_v1",
-                   "admission": "pineforge::admission::market_admission_v1",
+                   "admission": "pineforge::admission::market_admission_v2",
                    "cancellation": "pineforge::order_cancellation_v1"},
                "executable_runs": 0, "compiles": [], "links": []}
     # Literal diagnostic controls guard the link-failure parser itself.
@@ -218,6 +218,13 @@ def main():
                        "engine_script_run_v10", V10_ENGINE_SHA256, V10_TREE)
         standalone_draft_include = root / "standalone-draft/include"
         frozen_standalone_headers(standalone_draft_include)
+        # The exact pre-v11 aggregate closure supplies the frozen
+        # market_admission_v1 surface. The opposite-intent implementation
+        # promotes this standalone surface to v2 when BookObservation gains
+        # its raw requested direction.
+        admission_v1_include = root / "basev10-admission-v1/include"
+        frozen_headers(admission_v1_include, FIXTURE.parent / "basev10",
+                       V10_COMMIT, "engine_script_run_v10", V10_ENGINE_SHA256, V10_TREE)
         common = [args.compiler, "-std=c++17", "-O0", *args.extra_flag]
 
         def compile_object(name, source, include):
@@ -404,15 +411,15 @@ int main() {
 '''
         admission_assertion = '''#include <type_traits>
 static_assert(std::is_same_v<pineforge::admission::Draft,
-    pineforge::admission::market_admission_v1::Draft>);
+    pineforge::admission::market_admission_v2::Draft>);
 static_assert(std::is_same_v<pineforge::admission::Journal,
-    pineforge::admission::market_admission_v1::Journal>);
+    pineforge::admission::market_admission_v2::Journal>);
 static_assert(std::is_same_v<pineforge::admission::Allocation,
-    pineforge::admission::market_admission_v1::Allocation>);
+    pineforge::admission::market_admission_v2::Allocation>);
 static_assert(std::is_same_v<pineforge::admission::CommandCapture,
-    pineforge::admission::market_admission_v1::CommandCapture>);
+    pineforge::admission::market_admission_v2::CommandCapture>);
 static_assert(std::is_same_v<pineforge::admission::ReviewCapture,
-    pineforge::admission::market_admission_v1::ReviewCapture>);
+    pineforge::admission::market_admission_v2::ReviewCapture>);
 '''
         admission_symbols = '''#include <pineforge/market_admission.hpp>
 namespace pineforge::admission {
@@ -431,8 +438,8 @@ void Journal::reset() {}
 }
 '''
         current_admission = compile_object("current_admission_methods", admission_caller + admission_assertion, args.include)
-        draft_admission = compile_object("draft_admission_methods", admission_caller, standalone_draft_include)
-        draft_admission_symbols = compile_object("draft_admission_symbols", admission_symbols, standalone_draft_include)
+        draft_admission = compile_object("draft_admission_methods", admission_caller, admission_v1_include)
+        draft_admission_symbols = compile_object("draft_admission_symbols", admission_symbols, admission_v1_include)
 
         cancellation_caller = '''#include <pineforge/order_cancellation.hpp>
 #include <type_traits>
