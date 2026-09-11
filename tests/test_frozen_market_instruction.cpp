@@ -49,9 +49,10 @@ template<class Function> void invalid(Function make) {
     catch (const std::invalid_argument&) {}
 }
 
-pf_pending_order_v1_t mirror(const PendingOrder& order) {
+pf_pending_order_v1_t mirror(const PendingOrder& order,
+                             const MarketAdmissionJournal* journal = nullptr) {
     pf_pending_order_v1_t result;
-    fill_pending_order_mirror(order, &result);
+    fill_pending_order_mirror(order, journal, &result);
     return result;
 }
 
@@ -199,7 +200,7 @@ void whole_book_revocation() {
         CHECK(book.orders().size() >= 2);
         for (const auto& order : book.orders()) {
             CHECK(!order.pine_frozen_market_instruction.active());
-            const auto legacy = mirror(order);
+            const auto legacy = mirror(order, &book.market_admission_journal());
             CHECK(!legacy.sbmt_member && !legacy.sbmt_kept_over_cap && !legacy.sbmt_close_buy);
             CHECK(std::isnan(legacy.sbmt_own_qty) && std::isnan(legacy.sbmt_tx_qty));
             CHECK(std::isnan(legacy.sbmt_close_qty));
