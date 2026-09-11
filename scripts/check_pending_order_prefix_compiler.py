@@ -39,7 +39,9 @@ def check() -> None:
         assertions.append(f"static_assert(offsetof(pf_pending_order_v1_t, {name}) == {offset});")
         assertions.append(f"static_assert(offsetof(pf_pending_order_v1_t, {name}) == offsetof(frozen::pf_pending_order_v1_t, {name}));")
         assertions.append(f"static_assert(sizeof(((pf_pending_order_v1_t*)0)->{name}) == sizeof(((frozen::pf_pending_order_v1_t*)0)->{name}));")
-    source = "#include <cstddef>\n#include <type_traits>\nnamespace frozen {\n#include \"frozen_pending_order_mirror.hpp\"\n}\n#include <pineforge/pending_order_mirror.hpp>\n" + "\n".join(assertions) + "\n"
+    # Load C integer typedefs globally before including the frozen POD in its
+    # namespace; GCC's include guard would otherwise leave them only in frozen.
+    source = "#include <stdint.h>\n#include <cstddef>\n#include <type_traits>\nnamespace frozen {\n#include \"frozen_pending_order_mirror.hpp\"\n}\n#include <pineforge/pending_order_mirror.hpp>\n" + "\n".join(assertions) + "\n"
     compiler = os.environ.get("CXX", "c++")
     with tempfile.TemporaryDirectory(prefix="pf-pending-prefix-compiler-") as directory:
         root = Path(directory)
