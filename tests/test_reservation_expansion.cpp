@@ -1,3 +1,4 @@
+#include "placement_observation_fixture.hpp"
 #include "exit_lifecycle_fixture.hpp"
 // Ten literal native contracts, derived from causal facts and integer/dyadic
 // quantities. No canonical trades, tape, Pine/corpus, reference or grader.
@@ -249,7 +250,7 @@ void historical_quantity_and_selection() {
     // Other selection exclusions, unchanged Pine ownership.
     for(int kind=0;kind<5;++kind){Book x;x.seed();x.add("A");
         if(kind==0)x.pooc(false);
-        if(kind==1)x.get("A").over_pyramiding_cap_at_placement=true;
+        if(kind==1)placement_fixture::at_capacity(x.get("A"));
         if(kind==2)x.get("A").is_long=false;
         if(kind==3)x.get("A").created_position_side=PositionSide::SHORT;
         if(kind==4)x.get("A").created_bar-=1;

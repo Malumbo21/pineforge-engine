@@ -1,3 +1,4 @@
+#include "placement_observation_fixture.hpp"
 // Literal native instruction and book transitions. No external data, reference
 // trades, strategy compiler or campaign grading participates in this test.
 #include <pineforge/engine.hpp>
@@ -149,7 +150,7 @@ void capture_amounts_and_immutable_placement() {
         const auto& retained = book.order("same");
         CHECK(retained.pine_frozen_market_instruction.transaction()->own_units == 4);
         CHECK(retained.pine_frozen_market_instruction.transaction()->transaction_units == 6);
-        CHECK(retained.over_pyramiding_cap_at_placement);
+        CHECK(placement_at_entry_capacity(retained));
         CHECK(mirror(retained).sbmt_kept_over_cap == 1);
         const auto old_incarnation = book.order("opposite").incarnation;
         book.entry("opposite", !seed_buy, 5);
@@ -211,7 +212,7 @@ void whole_book_revocation() {
     Book all; all.seed(true, 3); all.entry("A", false, 1); all.close_all(); all.finalize();
     for (const auto& order : all.orders()) CHECK(!order.pine_frozen_market_instruction.active());
     // The generic cap snapshot alone never creates the removed retention permit.
-    PendingOrder ordinary{}; ordinary.over_pyramiding_cap_at_placement = true;
+    PendingOrder ordinary{}; placement_fixture::at_capacity(ordinary);
     CHECK(!mirror(ordinary).sbmt_kept_over_cap);
 }
 

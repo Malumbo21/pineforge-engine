@@ -62,6 +62,8 @@ TYPE_MAP: dict[str, tuple[str, str]] = {
 # Public v1 is append-only. Removed native fields survive only as one-way
 # deprecated output projections at their original offsets.
 LEGACY_OUTPUTS = {
+    "created_after_position_close_in_bar": "placement_has_prior_close(src) ? 1 : 0",
+    "over_pyramiding_cap_at_placement": "placement_at_entry_capacity(src) ? 1 : 0",
     "limit_price": "src.legs.prices().limit_price",
     "stop_price": "src.legs.prices().stop_price",
     "trail_points": "src.legs.prices().trail_points",
@@ -98,7 +100,7 @@ LEGACY_OUTPUTS = {
     "sbmt_member": "src.pine_frozen_market_instruction.active() ? 1 : 0",
     "sbmt_own_qty": "src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->own_units : std::numeric_limits<double>::quiet_NaN()",
     "sbmt_tx_qty": "src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->transaction_units : std::numeric_limits<double>::quiet_NaN()",
-    "sbmt_kept_over_cap": "src.pine_frozen_market_instruction.transaction() && src.over_pyramiding_cap_at_placement ? 1 : 0",
+    "sbmt_kept_over_cap": "src.pine_frozen_market_instruction.transaction() && placement_at_entry_capacity(src) ? 1 : 0",
     "sbmt_close_qty": "src.pine_frozen_market_instruction.targeted_close() ? src.quantity_request.intent()->units() : std::numeric_limits<double>::quiet_NaN()",
     "sbmt_close_buy": "src.pine_frozen_market_instruction.targeted_close() && src.created_position_side == PositionSide::SHORT ? 1 : 0",
     "declined_by_replaced_short_market": "src.cancellation.cause() == CancellationCause::Replacement ? 1 : 0",

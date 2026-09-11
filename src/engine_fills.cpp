@@ -68,7 +68,7 @@ bool preserves_same_id_stop_across_deferred_close_all(
         && order.created_bar < exit_closed_from_bar
         && order.is_long == exit_closed_was_long
         && order.created_position_side == closed_side
-        && !order.over_pyramiding_cap_at_placement
+        && !placement_at_entry_capacity(order)
         && std::isfinite(order.legs.prices().stop_price)
         && std::isnan(order.legs.prices().limit_price)
         && std::isnan(order.legs.prices().trail_points)
@@ -108,7 +108,7 @@ bool is_true_flat_unlinked_stop_pair(
             && !order.stop_limit_activated;
         if (!pure_stop
             || order.created_position_side != PositionSide::FLAT
-            || order.created_after_position_close_in_bar
+            || placement_has_prior_close(order)
             || !order.oca_name.empty()
             || order.oca_type != 0) {
             return false;
@@ -1235,7 +1235,7 @@ void BacktestEngine::process_short_margin_before_script(const Bar& bar) {
             double pending_touch = 0.0;
             if (order.created_bar >= bar_index_
                 || order.created_position_side != PositionSide::FLAT
-                || order.created_after_position_close_in_bar
+                || placement_has_prior_close(order)
                 || order.birth.from_fill()
                 || !std::isfinite(order.legs.prices().stop_price)
                 || !std::isnan(order.legs.prices().limit_price)
@@ -2233,7 +2233,7 @@ bool BacktestEngine::tv_money_long_margin_call(const Bar& bar,
             && pending.created_bar == bar_index_
             && pending.created_position_side == PositionSide::LONG
             && pending.created_position_cycle_seq == close_mc_cycle
-            && !pending.created_after_position_close_in_bar
+            && !placement_has_prior_close(pending)
             && !pending.birth.from_fill()
             && pending.tv_carry_qty == qty
             && std::isfinite(pending.frozen_default_qty)) {
@@ -3348,7 +3348,7 @@ void BacktestEngine::finalize_default_flat_market_gross_admission() {
     // anyway (default_qty_value == 100 is required above), but they are the
     // reason the gate is an inequality rather than a shape match.
     const double first_movement_qty =
-        first->over_pyramiding_cap_at_placement ? 0.0 : first_own_qty;
+        placement_at_entry_capacity(*first) ? 0.0 : first_own_qty;
     const double gross_required =
         (first_movement_qty + second_qty) * signal_close * notional_k;
     if (!(gross_required > equity + equity_guard)) return;
@@ -3430,7 +3430,7 @@ void BacktestEngine::apply_pooc_coof_explicit_flat_market_gross_admission() {
             && order.incarnation > 0
             && (order.replaced_order_incarnation == 0)
             && order.created_position_side == PositionSide::FLAT
-            && !order.created_after_position_close_in_bar
+            && !placement_has_prior_close(order)
             && !order.birth.from_fill()
             && !order.birth.at_terminal_fill()
             && !compat::pine::historical_cascade_reach(order)
@@ -3869,7 +3869,7 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
                 && std::isnan(order.legs.prices().trail_offset)
                 && std::isnan(order.legs.prices().profit_ticks)
                 && std::isnan(order.legs.prices().loss_ticks)
-                && !order.created_after_position_close_in_bar;
+                && !placement_has_prior_close(order);
         };
         const auto exact_full_fifo_close_short =
             [&](const PendingOrder& order, const std::string& held_id) {
@@ -4011,12 +4011,12 @@ void BacktestEngine::sort_orders_by_fill_phase(const Bar& bar) {
             && pure_default_market_entry(*source[1])
             && !source[0]->id.empty()
             && source[0]->is_long
-            && !source[0]->over_pyramiding_cap_at_placement
+            && !placement_at_entry_capacity(*source[0])
             && !source[1]->id.empty()
             && source[0]->id != source[1]->id
             && source[0]->id != source[2]->id
             && !source[1]->is_long
-            && source[1]->over_pyramiding_cap_at_placement
+            && placement_at_entry_capacity(*source[1])
             && source[0]->created_position_cycle_seq == position_cycle_seq_
             && source[1]->created_position_cycle_seq == position_cycle_seq_
             && std::abs(source[0]->tv_carry_qty - seed.qty) <= kQtyEpsilon
@@ -4741,7 +4741,7 @@ void BacktestEngine::compact_filled_pending_orders(
         // prior-bar same-ID pure-STOP close_all exception.
         bool coqueued_within_cap =
             pending_orders_[read].created_bar == exit_closed_from_bar
-            && !pending_orders_[read].over_pyramiding_cap_at_placement;
+            && !placement_at_entry_capacity(pending_orders_[read]);
         bool same_id_stop_preserved_by_deferred_close_all =
             preserves_same_id_stop_across_deferred_close_all(
                 pending_orders_[read], exit_closed_from_bar,
@@ -4757,7 +4757,7 @@ void BacktestEngine::compact_filled_pending_orders(
             && !resting_limit_entry_carry
             // round 8 family S, rule 2 (lockstep with classify_order_eligibility).
             && !(pending_orders_[read].pine_frozen_market_instruction.transaction()
-                 && pending_orders_[read].over_pyramiding_cap_at_placement);
+                 && placement_at_entry_capacity(pending_orders_[read]));
         if (!is_filled(pending_orders_[read].incarnation)
             && !stale_same_direction_entry_after_exit) {
             if (write != read) pending_orders_[write] = std::move(pending_orders_[read]);
@@ -4793,7 +4793,7 @@ bool BacktestEngine::flat_dual_stop_opposite_is_live(
         && order.type == OrderType::ENTRY
         && std::isfinite(order.legs.prices().stop_price) && std::isnan(order.legs.prices().limit_price)
         && order.created_position_side == PositionSide::FLAT
-        && !order.created_after_position_close_in_bar
+        && !placement_has_prior_close(order)
         && position_side_ != PositionSide::FLAT
         && order.is_long != (position_side_ == PositionSide::LONG)
         && position_open_bar_ == bar_index_
@@ -4817,7 +4817,7 @@ bool BacktestEngine::use_default_stop_placement_qty(
         && order.default_stop_placement_qty > 0.0
         && std::isfinite(fill_price) && fill_price > 0.0
         && order.created_position_side == PositionSide::FLAT
-        && !order.created_after_position_close_in_bar
+        && !placement_has_prior_close(order)
         && (position_side_ == PositionSide::FLAT
             || flat_dual_stop_opposite_is_live(order, flat_dual_stop_pair));
 }
@@ -4914,7 +4914,7 @@ int BacktestEngine::probe_fill_qty(int index, double fill_price, double* qty,
             *partition = 1;
             kernel_close_only = !(remainder > kQtyEpsilon);
             sized = true;
-        } else if (position_side_ == requested_side && o.over_pyramiding_cap_at_placement) {
+        } else if (position_side_ == requested_side && placement_at_entry_capacity(o)) {
             *qty = o.pine_frozen_market_instruction.transaction()->transaction_units;
             *partition = 1;
             sized = true;
@@ -5627,9 +5627,9 @@ void BacktestEngine::apply_filled_order_to_state(
         // sits in rule 5's band and also fills, with 1 + 13681.2 trimmed.
         const bool true_flat_placement =
             order.created_position_side == PositionSide::FLAT
-            && !order.created_after_position_close_in_bar;
+            && !placement_has_prior_close(order);
         const bool close_first_flat_open =
-            flat_open && order.created_after_position_close_in_bar
+            flat_open && placement_has_prior_close(order)
             && order.created_position_side != PositionSide::FLAT
             && order.created_position_side != requested_side;
         if (((flat_open && true_flat_placement) || reversal_entry
@@ -5736,7 +5736,7 @@ void BacktestEngine::apply_filled_order_to_state(
         && !order.affordability_close_only && !order.pine_frozen_market_instruction.active()
         && position_side_ == PositionSide::FLAT
         && (order.created_position_side == PositionSide::FLAT
-            || order.created_after_position_close_in_bar)
+            || placement_has_prior_close(order))
         && (order.replaced_order_incarnation == 0)
         && order.created_bar == bar_index_ - 1 && sole_opening_after_closes()
         && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
@@ -5812,7 +5812,7 @@ void BacktestEngine::apply_filled_order_to_state(
             && !bar_magnifier_enabled_ && !coof_scheduler_active_
             && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
             && !order.birth.from_fill()
-            && !order.created_after_position_close_in_bar
+            && !placement_has_prior_close(order)
             && std::isfinite(order.sizing_equity)
             && std::isfinite(order.frozen_default_qty)
             && std::isfinite(order.sizing_price)
@@ -6145,7 +6145,7 @@ void BacktestEngine::apply_filled_order_to_state(
                     || order.qty_type == static_cast<int>(QtyType::FIXED))
                 && position_side_ == PositionSide::FLAT
                 && order.created_position_side == PositionSide::FLAT
-                && !order.created_after_position_close_in_bar
+                && !placement_has_prior_close(order)
                 && (order.replaced_order_incarnation == 0)
                 // FIXED/no-fee orders carry the transaction marker even
                 // when no sibling exists. Exclude an expanded transaction,
@@ -6154,7 +6154,7 @@ void BacktestEngine::apply_filled_order_to_state(
                     || (order.pine_frozen_market_instruction.transaction()
                         && order.pine_frozen_market_instruction.transaction()->transaction_units
                             == order.pine_frozen_market_instruction.transaction()->own_units
-                        && !order.over_pyramiding_cap_at_placement))
+                        && !placement_at_entry_capacity(order)))
                 && order.created_bar == bar_index_ - 1
                 && order.oca_type == 0 && order.oca_name.empty()
                 && pending_orders_.size() == 1
@@ -6443,7 +6443,7 @@ void BacktestEngine::apply_filled_order_to_state(
         if (order.type == OrderType::MARKET && process_orders_on_close_
             && order.created_bar == bar_index_
             && order.created_position_side == PositionSide::FLAT
-            && !order.created_after_position_close_in_bar
+            && !placement_has_prior_close(order)
             && !order.birth.from_fill()
             && (order.replaced_order_incarnation == 0)
             && order.oca_name.empty() && order.oca_type == 0
@@ -6478,7 +6478,7 @@ void BacktestEngine::apply_filled_order_to_state(
             && !bar_magnifier_enabled_ && !coof_scheduler_active_
             && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
             && !order.birth.from_fill()
-            && !order.created_after_position_close_in_bar
+            && !placement_has_prior_close(order)
             && order.created_position_side == PositionSide::FLAT
             && order.created_bar < bar_index_
             && position_side_before_fill == PositionSide::FLAT
@@ -6599,11 +6599,11 @@ void BacktestEngine::apply_filled_order_to_state(
         const bool default_market_short_close_then_open_after_fill =
             default_market_short_shape_after_fill
             && order.created_position_side == PositionSide::LONG
-            && order.created_after_position_close_in_bar;
+            && placement_has_prior_close(order);
         const bool default_market_flat_short_after_fill =
             default_market_short_shape_after_fill
             && order.created_position_side == PositionSide::FLAT
-            && !order.created_after_position_close_in_bar;
+            && !placement_has_prior_close(order);
         // A direct, default-sized strategy.entry auto-reversal has the same
         // broker opening checkpoints as the already-pinned close-then-short
         // shape. Re-prove the generic order/runtime topology at the fill.
@@ -6615,7 +6615,7 @@ void BacktestEngine::apply_filled_order_to_state(
             && !order.is_long
             && std::isnan(order.qty)
             && order.created_position_side == PositionSide::LONG
-            && !order.created_after_position_close_in_bar
+            && !placement_has_prior_close(order)
             && order.tv_carry_qty > kQtyEpsilon
             && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
             && std::abs(default_qty_value_ - 100.0) < 1e-12
@@ -6692,7 +6692,7 @@ void BacktestEngine::apply_filled_order_to_state(
                 && std::isfinite(order.sizing_price)
                 && std::isfinite(order.sizing_mark)
                 && order.created_position_side == PositionSide::FLAT
-                && !order.created_after_position_close_in_bar
+                && !placement_has_prior_close(order)
                 && position_side_before_fill == PositionSide::FLAT
                 && admitted_flat_on_frozen_sizing_price
                 // Newly price-band-admitted positive gaps can have a real
@@ -6886,7 +6886,7 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
         || order.affordability_close_only || order.pine_frozen_market_instruction.active()
         || order.created_bar != bar_index_ - 1
         || order.birth.from_fill()
-        || order.created_after_position_close_in_bar
+        || placement_has_prior_close(order)
         || order.created_position_side != PositionSide::LONG
         || position_side_ != PositionSide::LONG
         || order.created_position_cycle_seq != position_cycle_seq_
@@ -6935,7 +6935,7 @@ bool BacktestEngine::replaced_percent_short_market_is_live(
             || other.created_seq <= order.created_seq
             || other.created_bar != order.created_bar
             || other.created_position_cycle_seq != order.created_position_cycle_seq
-            || other.created_after_position_close_in_bar
+            || placement_has_prior_close(other)
             || !std::isnan(other.qty) || other.qty_type >= 0
             || other.frozen_default_qty != order.frozen_default_qty
             || other.affordability_close_only || other.pine_frozen_market_instruction.active()
@@ -6973,7 +6973,7 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
             && !bar_magnifier_enabled_ && !coof_scheduler_active_
             && !stream_warmup_mode_ && stream_phase_ == StreamPhase::IDLE
             && order.type == OrderType::MARKET && !order.is_long
-            && std::isnan(order.qty) && !order.created_after_position_close_in_bar
+            && std::isnan(order.qty) && !placement_has_prior_close(order)
             && position_side_ == PositionSide::LONG
             && order.created_position_side == PositionSide::LONG
             && order.created_position_cycle_seq == position_cycle_seq_
@@ -7058,7 +7058,7 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
                                               trail_best_path_state);
             return;
         }
-        if (position_side_ == requested && order.over_pyramiding_cap_at_placement) {
+        if (position_side_ == requested && placement_at_entry_capacity(order)) {
             // dbl-long-mirror-closefirst: the kept Long buys its frozen 2
             // while still long (long 3) before the Short and close-Long
             // sell — an add past the pyramiding cap, never a rejected add.
@@ -8233,7 +8233,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
     // (probe65 732→1463; the composite bracket fell below strong).
     bool coqueued_within_cap =
         order.created_bar == exit_closed_from_bar
-        && !order.over_pyramiding_cap_at_placement;
+        && !placement_at_entry_capacity(order);
     bool same_id_stop_preserved_by_deferred_close_all =
         preserves_same_id_stop_across_deferred_close_all(
             order, exit_closed_from_bar, exit_closed_from_incarnation,
@@ -8250,7 +8250,7 @@ BacktestEngine::OrderEligibility BacktestEngine::classify_order_eligibility(
         && !coqueued_within_cap
         && !same_id_stop_preserved_by_deferred_close_all
         && !(order.pine_frozen_market_instruction.transaction()
-             && order.over_pyramiding_cap_at_placement)) {
+             && placement_at_entry_capacity(order))) {
         return OrderEligibility::Remove;
     }
 

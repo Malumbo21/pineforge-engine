@@ -1,3 +1,4 @@
+#include "placement_observation_fixture.hpp"
 /*
  * A resting strategy.exit bracket becomes eligible only once its priced
  * from_entry parent fills. On that entry bar it may consume the remaining
@@ -484,10 +485,10 @@ static bool retained_child_predicate_accepts(SortMutation mutation) {
             child.created_position_side = PositionSide::LONG;
             break;
         case SortMutation::ParentAfterClose:
-            parent.created_after_position_close_in_bar = true;
+            placement_fixture::prior_close_quantity(parent, 1.0);
             break;
         case SortMutation::ChildAfterClose:
-            child.created_after_position_close_in_bar = true;
+            placement_fixture::prior_close_quantity(child, 1.0);
             break;
         case SortMutation::ParentStopLimitActivated:
             parent.stop_limit_activated = true;

@@ -69,8 +69,8 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->coof_cascade_inflight_fires = src.coof_cascade_inflight_fires ? 1 : 0;
     out->created_position_side = (int32_t)src.created_position_side;
     out->created_position_cycle_seq = src.created_position_cycle_seq;
-    out->created_after_position_close_in_bar = src.created_after_position_close_in_bar ? 1 : 0;
-    out->over_pyramiding_cap_at_placement = src.over_pyramiding_cap_at_placement ? 1 : 0;
+    out->created_after_position_close_in_bar = placement_has_prior_close(src) ? 1 : 0;
+    out->over_pyramiding_cap_at_placement = placement_at_entry_capacity(src) ? 1 : 0;
     out->same_id_stop_deferred_close_all_bar = (int32_t)src.same_id_stop_deferred_close_all_bar;
     out->same_id_stop_deferred_close_all_incarnation = src.same_id_stop_deferred_close_all_incarnation;
     out->reverses_same_bar_market_from_flat = src.reverses_same_bar_market_from_flat ? 1 : 0;
@@ -117,7 +117,7 @@ void fill_pending_order_mirror(const PendingOrder& src, pf_pending_order_v1_t* o
     out->sbmt_member = src.pine_frozen_market_instruction.active() ? 1 : 0;
     out->sbmt_own_qty = src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->own_units : std::numeric_limits<double>::quiet_NaN();
     out->sbmt_tx_qty = src.pine_frozen_market_instruction.transaction() ? src.pine_frozen_market_instruction.transaction()->transaction_units : std::numeric_limits<double>::quiet_NaN();
-    out->sbmt_kept_over_cap = src.pine_frozen_market_instruction.transaction() && src.over_pyramiding_cap_at_placement ? 1 : 0;
+    out->sbmt_kept_over_cap = src.pine_frozen_market_instruction.transaction() && placement_at_entry_capacity(src) ? 1 : 0;
     out->sbmt_close_qty = src.pine_frozen_market_instruction.targeted_close() ? src.quantity_request.intent()->units() : std::numeric_limits<double>::quiet_NaN();
     out->sbmt_close_buy = src.pine_frozen_market_instruction.targeted_close() && src.created_position_side == PositionSide::SHORT ? 1 : 0;
     out->suppress_as_declined_reversal_close = src.cancellation.cause() == CancellationCause::Dependency ? 1 : 0;

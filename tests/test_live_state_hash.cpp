@@ -1,3 +1,4 @@
+#include "placement_observation_fixture.hpp"
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
 #include <cstdio>
@@ -343,8 +344,11 @@ public:
             }},
             {"pending_orders_[].over_pyramiding_cap_at_placement", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].over_pyramiding_cap_at_placement =
-                        !s.pending_orders_[0].over_pyramiding_cap_at_placement;
+                    placement_fixture::change(s.pending_orders_[0], [](auto& observation) {
+                        observation.placement_side = static_cast<int>(observation.buy ? PositionSide::LONG : PositionSide::SHORT);
+                        observation.held_entries = 1;
+                        observation.configuration.pyramiding = observation.configuration.pyramiding == 1 ? 2 : 1;
+                    });
             }},
             {"pending_orders_[].pine_frozen_market_instruction", [](Probe& s) {
                 if (!s.pending_orders_.empty()) {
@@ -387,7 +391,8 @@ public:
             }},
             {"pending_orders_[].created_after_position_close_in_bar", [](Probe& s) {
                 if (!s.pending_orders_.empty())
-                    s.pending_orders_[0].created_after_position_close_in_bar = !s.pending_orders_[0].created_after_position_close_in_bar;
+                    placement_fixture::prior_close_quantity(s.pending_orders_[0],
+                        placement_has_prior_close(s.pending_orders_[0]) ? 0.0 : 1.0);
             }},
             {"pending_orders_[].rounded_signal_cost_close_only", [](Probe& s) {
                 if (!s.pending_orders_.empty())

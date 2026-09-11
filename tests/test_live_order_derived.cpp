@@ -391,7 +391,7 @@ void test_sbmt_kernels() {
         CHECK(i >= 0);
         if (i >= 0) {
             const PendingOrder& o = s.pending_order_at(i);
-            CHECK(o.pine_frozen_market_instruction.active() && (o.pine_frozen_market_instruction.transaction() && o.over_pyramiding_cap_at_placement) && near(o.pine_frozen_market_instruction.transaction()->transaction_units, 2.0));
+            CHECK(o.pine_frozen_market_instruction.active() && (o.pine_frozen_market_instruction.transaction() && placement_at_entry_capacity(o)) && near(o.pine_frozen_market_instruction.transaction()->transaction_units, 2.0));
             CHECK(s.probe_fill_qty(i, 100.0, &qty, &close_only, &partition) == 0);
             CHECK(near(qty, 2.0) && partition == kFrozenPlacement && close_only == 0);
         }

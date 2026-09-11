@@ -185,7 +185,6 @@ uint64_t BacktestEngine::broker_state_hash() const {
         f.d(o.sizing_equity); f.d(o.sizing_price); f.d(o.sizing_fx); f.d(o.sizing_mark);
         f.d(o.default_stop_placement_equity); f.d(o.default_stop_sizing_price);
         f.d(o.tv_carry_qty);
-        f.b(o.over_pyramiding_cap_at_placement);
         f.b(o.affordability_close_only);
         f.i(static_cast<int64_t>(o.created_position_cycle_seq));
         f.b(o.quantity_request.intent().has_value());
@@ -244,7 +243,6 @@ uint64_t BacktestEngine::broker_state_hash() const {
         // waiver (trade-report label only). ---
         // Placement-side position/close provenance.
         f.i(static_cast<int64_t>(o.created_position_side));
-        f.b(o.created_after_position_close_in_bar);
         // Round-14 rounded-signal-cost decline receipt + its remaining qty.
         f.b(o.rounded_signal_cost_close_only);
         f.d(o.signal_close_mc_remaining_qty);

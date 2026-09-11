@@ -162,7 +162,7 @@ struct Probe : public BacktestEngine {
                     if (earliest == 0 || order.incarnation < earliest) {
                         earliest = order.incarnation;
                         earlier_over_cap =
-                            order.over_pyramiding_cap_at_placement;
+                            placement_at_entry_capacity(order);
                     }
                 }
             }

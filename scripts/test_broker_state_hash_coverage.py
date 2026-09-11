@@ -102,7 +102,7 @@ class PhysicalLotCoverage(unittest.TestCase):
 
     def test_capture_folds_cannot_be_conditional_rebound_or_duplicated(self):
         start = SOURCE.index("        f.b(o.reservation_expansion.capture().has_value());")
-        end = SOURCE.index("        // Suppressed-close", start)
+        end = SOURCE.index("\n    }\n    market_admission_journal_", start)
         block = SOURCE[start:end]
         for mutated in ["if (false) {" + block + "}", block + block,
                         block.replace("capture = o.reservation_expansion.capture()", "capture = foreign.capture()"),

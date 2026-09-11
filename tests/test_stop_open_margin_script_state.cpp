@@ -1,3 +1,4 @@
+#include "placement_observation_fixture.hpp"
 // R25 covered TV controls: a pure STOP filled at the opening point exposes
 // its completed margin event to the script; an unhit pending entry survives.
 // Compact command fixtures use synthetic timestamps, not historical replay.
@@ -300,7 +301,7 @@ public:
         case 4: pending.oca_type = 1; break;
         case 5: pending.legs.set_limit_price(103); break;
         case 6: pending.stop_limit_activated = true; break;
-        case 7: pending.created_after_position_close_in_bar = true; break;
+        case 7: placement_fixture::prior_close_quantity(pending, 1.0); break;
         case 8: pending.created_position_side = PositionSide::SHORT; break;
         case 9: pending.created_bar = 1; break;
         case 10: pending.legs.set_trail_offset(1); break;

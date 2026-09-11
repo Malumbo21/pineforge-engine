@@ -490,12 +490,6 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
         order.birth, false);
     order.created_position_side = position_side_;
     order.created_position_cycle_seq = position_cycle_seq_;
-    order.created_after_position_close_in_bar =
-        pending_close_qty_in_bar_ > kQtyEpsilon;
-    // Market orders and the POOC priced path retain the placement snapshot for
-    // the downstream full-close compaction and role-change rules. Ordinary
-    // non-POOC priced orders that are over cap returned above.
-    order.over_pyramiding_cap_at_placement = over_pyramiding_cap;
     // TradingView empirical rule (probe 52 trade 113): the deferred-flip
     // carry is the position size at THIS placement, not the original.
     // ``strategy.entry`` with the same id replaces the pending order
@@ -631,7 +625,7 @@ void BacktestEngine::strategy_entry(const std::string& id, bool is_long,
                 frozen_sizing_price(/*is_buy=*/is_long);
             const bool explicit_flat_qualification =
                 order.created_position_side == PositionSide::FLAT
-                && !order.created_after_position_close_in_bar
+                && !(command.input().prior_close_quantity > kQtyEpsilon)
                 && std::isfinite(explicit_margin) && explicit_margin > 0.0
                 && std::isfinite(placement_equity)
                 && std::isfinite(slipped_signal_close);
@@ -874,7 +868,7 @@ void BacktestEngine::strategy_close(const std::string& id,
                 || pending.created_bar >= bar_index_
                 || pending.is_long != closing_long
                 || pending.created_position_side != position_side_
-                || pending.over_pyramiding_cap_at_placement) {
+                || placement_at_entry_capacity(pending)) {
                 continue;
             }
             const bool has_physically_live_same_id_lot =
@@ -2175,19 +2169,6 @@ void BacktestEngine::strategy_order(const std::string& id, bool is_long, double 
     order.pine_birth_reach = compat::pine::select_historical_birth_reach(
         order.birth, false);
     order.created_position_side = position_side_;
-    order.created_after_position_close_in_bar =
-        pending_close_qty_in_bar_ > kQtyEpsilon;
-    // Same placement-time over-cap snapshot as strategy_entry, mirroring the
-    // strategy.order add gate (engine_fills.cpp same-direction RAW add). A
-    // strategy.order market/priced order is a RAW_ORDER and is not currently a
-    // target of the same-direction post-full-close wipe (which keys on
-    // MARKET/ENTRY), so this flag is inert for the RAW path today; it is
-    // captured here for consistency so the provenance stays correct if the
-    // wipe is ever widened to RAW_ORDER adds.
-    order.over_pyramiding_cap_at_placement =
-        position_side_ != PositionSide::FLAT
-        && position_side_ == (is_long ? PositionSide::LONG : PositionSide::SHORT)
-        && position_entry_count_ >= pyramiding_;
     order.tv_carry_qty = position_qty_;
 
     bool has_limit = !std::isnan(limit_price);
@@ -2475,7 +2456,7 @@ void BacktestEngine::cancel_same_bar_market_reentries_after_full_close(
                     && o.created_position_side == closed_side
                     && o.is_long == closed_long
                     && (!preserve_undercap_entries
-                        || o.over_pyramiding_cap_at_placement);
+                        || placement_at_entry_capacity(o));
             }),
         pending_orders_.end());
 }

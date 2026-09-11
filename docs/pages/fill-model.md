@@ -11,6 +11,12 @@ admission and scheduling rules, and the ordinary bar scan and callback-driven
 scan are separate. The responsibilities below guide their consolidation without
 claiming that a single unified scheduler already exists.
 
+The current pending-order representation has six direct boolean members. Two
+duplicate placement fields now derive from the original command observation,
+and cancellation has an explicit terminal receipt. This declaration count is
+an intermediate result: it does not prove that all remaining Pine predicates
+are generic, or that the whole engine has fewer than five compatibility choices.
+
 ## Responsibilities
 
 | Submodel | Owned facts and transitions | Boundary |

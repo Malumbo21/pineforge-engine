@@ -492,25 +492,6 @@ struct PendingOrder {
     // LONG and must not be mistaken for an order born in the later LONG
     // cycle. Zero means the order was created while broker-flat.
     int64_t created_position_cycle_seq = 0;
-    // True when a successful strategy.close/close_all call earlier in this
-    // same on_bar already targeted live quantity. This remains distinct from
-    // created_position_side: an immediate full close makes the engine truly
-    // FLAT before a paired reentry is placed, but that reentry is not an
-    // independent true-flat opening for KI-61 affordability purposes.
-    bool created_after_position_close_in_bar = false;
-    // True when this SAME-direction MARKET/ENTRY order was OVER the pyramiding
-    // cap at PLACEMENT — i.e. the position was already held in this order's
-    // direction with position_entry_count_ >= pyramiding_ at the moment it was
-    // placed. Snapshotted at every entry placement site so it mirrors the
-    // fill-time pyramiding gate (add_to_pyramid_market / the strategy.order add
-    // gate) exactly. The post-full-close same-direction wipe reads this to
-    // distinguish a TV-admissible (within-cap) co-queue — which survives a
-    // deferred full close that flattens on the fill bar — from one TradingView
-    // rejects at placement (over cap), which must still be cancelled even though
-    // the co-queued close zeroed position_entry_count_ before the add's fill-time
-    // gate ran. See classify_order_eligibility / compact_filled_pending_orders
-    // and test_close_all_coqueued_entry.cpp.
-    bool over_pyramiding_cap_at_placement = false;
     // Call-bar provenance for the one deferred close_all whose post-fill
     // cleanup may preserve this order. Set only on a PRIOR-bar, pure-STOP
     // strategy.entry that was under the pyramiding cap and reused the id of a
@@ -906,6 +887,27 @@ struct PendingOrder {
     ShortSeedCollisionRole short_seed_collision_role =
         ShortSeedCollisionRole::NONE;
 };
+
+// These views derive historical placement facts from the original command.
+// No current position, current configuration or mutable sizing participates.
+// The close fact describes previously accepted close claims, not physical
+// flatness; even an immediate close can leave that source-time fact positive.
+// The capacity view uses the original direction/count/cap (including cap0),
+// which remains meaningful after fills or a later configuration change.
+// Missing observations retain the historical default false for manual orders.
+// The comparison matches the broker's existing quantity tolerance exactly.
+inline bool placement_has_prior_close(const PendingOrder& order) {
+    const auto& observation = order.market_admission.observation();
+    return observation && observation->prior_close_quantity > 1e-10;
+}
+inline bool placement_at_entry_capacity(const PendingOrder& order) {
+    const auto& observation = order.market_admission.observation();
+    if (!observation) return false;
+    const auto requested_side = observation->buy ? PositionSide::LONG : PositionSide::SHORT;
+    return observation->placement_side != static_cast<int>(PositionSide::FLAT)
+        && observation->placement_side == static_cast<int>(requested_side)
+        && observation->held_entries >= observation->configuration.pyramiding;
+}
 
  } // inline namespace engine_script_run_v9 (PendingOrder)
 
@@ -1956,7 +1958,7 @@ protected:
             || order.type != OrderType::MARKET || order.incarnation == 0
             || order.created_bar != bar_index_
             || order.created_position_side != PositionSide::FLAT
-            || order.created_after_position_close_in_bar
+            || placement_has_prior_close(order)
             || (order.replaced_order_incarnation != 0)
             || order.oca_type != 0 || !order.oca_name.empty()
             || position_side_ != PositionSide::FLAT
@@ -2000,7 +2002,7 @@ protected:
             || !order.is_long || order.incarnation == 0
             || order.created_bar != bar_index_
             || order.created_position_side != PositionSide::FLAT
-            || order.created_after_position_close_in_bar
+            || placement_has_prior_close(order)
             || order.birth.from_fill() || (order.replaced_order_incarnation != 0)
             || !order.oca_name.empty() || order.oca_type != 0
             || position_side_ != PositionSide::FLAT || position_entry_count_ != 0
@@ -2039,7 +2041,7 @@ protected:
                 || (order.pine_frozen_market_instruction.transaction()
                     && order.pine_frozen_market_instruction.transaction()->transaction_units
                         == order.pine_frozen_market_instruction.transaction()->own_units
-                    && !order.over_pyramiding_cap_at_placement));
+                    && !placement_at_entry_capacity(order)));
         if (!default_all_in && !explicit_fixed) return false;
         const double mark = default_all_in ? order.sizing_mark
                                           : order.affordability_signal_price;

@@ -1,4 +1,5 @@
 set(TEST_SOURCES
+    test_placement_facts
     test_order_cancellation
     test_cancellation_mirror_coverage
     test_market_admission_causality

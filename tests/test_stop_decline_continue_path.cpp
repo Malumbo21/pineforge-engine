@@ -1,3 +1,4 @@
+#include "placement_observation_fixture.hpp"
 /*
  * When the path-first member of a same-signal, true-flat, unlinked opposing
  * pure-STOP pair is cancelled specifically by stop-margin admission, the
@@ -99,7 +100,7 @@ public:
         if (mark_as_after_close) {
             for (PendingOrder& order : pending_orders_) {
                 if (order.type == OrderType::ENTRY) {
-                    order.created_after_position_close_in_bar = true;
+                    placement_fixture::prior_close_quantity(order, 1.0);
                 }
             }
         }

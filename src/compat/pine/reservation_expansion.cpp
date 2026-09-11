@@ -14,7 +14,7 @@ std::vector<uint64_t> select_reservation_growth_sources(const std::vector<Pendin
             && source.type != OrderType::RAW_ORDER) continue;
         const auto requested = source.is_long ? PositionSide::LONG : PositionSide::SHORT;
         if (source.created_bar != bar || source.type != OrderType::MARKET
-            || source.birth.from_fill() || source.over_pyramiding_cap_at_placement
+            || source.birth.from_fill() || placement_at_entry_capacity(source)
             || requested != side || source.created_position_side != side) return {};
         selected.push_back(source.incarnation);
     }

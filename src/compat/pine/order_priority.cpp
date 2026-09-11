@@ -39,8 +39,8 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
         && parent->created_bar == ctx.bar_index - 1
         && std::isnan(parent->qty)
         && !parent->birth.from_fill()
-        && !parent->created_after_position_close_in_bar
-        && !parent->over_pyramiding_cap_at_placement
+        && !placement_has_prior_close(*parent)
+        && !placement_at_entry_capacity(*parent)
         && !parent->stop_limit_activated
         && std::isfinite(parent->legs.prices().stop_price)
         && std::isnan(parent->legs.prices().limit_price)
@@ -60,7 +60,7 @@ std::optional<broker::OrderPriorityDecision> OrderPriority::select(
         && child->created_position_side == PositionSide::FLAT
         && child->created_bar == ctx.bar_index - 1
         && !child->birth.from_fill()
-        && !child->created_after_position_close_in_bar
+        && !placement_has_prior_close(*child)
         && !child->quantity_request.is_partial(1e-9, 1e-9)
         && std::isnan(child->qty)
         && child_qp >= 100.0 - 1e-9
