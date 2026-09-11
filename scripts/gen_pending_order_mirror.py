@@ -436,6 +436,7 @@ def generate() -> tuple[str, str]:
         banner,
         "#include <pineforge/engine.hpp>",
         "#include <pineforge/pending_order_mirror.hpp>",
+        "#include <pineforge/compat/pine/market_admission.hpp>",
         "",
         "#include <cstddef>",
         "#include <cstring>",

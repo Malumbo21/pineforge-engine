@@ -76,7 +76,7 @@ inline const admission::Event& event_ref(const admission::Event* event) {
     return *event;
 }
 template<class Range>
-static History fold_admission_history(const Range& events) {
+static History fold_admission_history(const Range& events, bool apply_reviews = true) {
     using namespace admission;
     History h;
     for(const auto& held:events) {
@@ -119,6 +119,7 @@ static History fold_admission_history(const Range& events) {
                 }
             }
         } else if(const auto* review=std::get_if<ReviewEvent>(&event)) {
+            if (!apply_reviews) continue;
             const auto cp=review->receipt.checkpoint;
             if(cp!=Checkpoint::TerminalGross)for(const auto& order:review->reviewed) {
                 (cp==Checkpoint::DefaultGross?h.default_causes:h.pair_causes).erase(order.bar);
@@ -156,6 +157,31 @@ std::vector<uint64_t> admission_retention(const admission::Journal& journal,cons
     const auto history=admission_history(journal);
     for(const auto& cause:history.pair_causes)keep.insert(cause.second);
     for(const auto& cause:history.default_causes)keep.insert(cause.second);
+    // A cause is keyed by the source bar it affects, not necessarily by the
+    // bar of the command that emitted it.  A later command can therefore
+    // produce a cross-bar cause while an older pending order remains live.
+    // An empty review has no reviewed row to root that cause, but it still
+    // performs the real checkpoint clearing semantics below.  Retain the
+    // historical producer for every source bar belonging to a live
+    // incarnation, then the fixed-point closure retains the clearing review.
+    std::set<int> live_source_bars;
+    const auto live_incarnation=[&](uint64_t n) {
+        return std::find(live.begin(),live.end(),n)!=live.end();
+    };
+    for(const auto& event:journal.events()) {
+        if(const auto* command=std::get_if<CommandEvent>(&event)) {
+            if(command->admitted_incarnation && live_incarnation(command->admitted_incarnation)
+                && command->observation)
+                live_source_bars.insert(command->observation->bar);
+            for(const auto& old:command->before)
+                if(live_incarnation(old.incarnation)) live_source_bars.insert(old.bar);
+        }
+    }
+    const auto historical=fold_admission_history(journal.events(), false);
+    for(const auto& cause:historical.pair_causes)
+        if(live_source_bars.count(cause.first)) keep.insert(cause.second);
+    for(const auto& cause:historical.default_causes)
+        if(live_source_bars.count(cause.first)) keep.insert(cause.second);
     std::map<std::pair<uint64_t,Checkpoint>,uint64_t> latest_review;
     std::map<uint64_t,uint64_t> latest_sizing;
     uint64_t last_rejection=0;
