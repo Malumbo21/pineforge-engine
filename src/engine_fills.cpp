@@ -4508,18 +4508,24 @@ void BacktestEngine::apply_same_bar_market_tx_reversal(
         held, order_action::Transact{order.is_long ? tx : -tx});
     if (!transaction) return;
     const double close_qty = transaction->close_units();
+    const execution::Fill resolved{
+        apply_fill_slippage(fill_price, order.is_long),
+        order.id, order.comment, order.incarnation};
+    const auto settle = [&](const execution::Action& action) {
+        const auto result = settle_resolved_execution(action, resolved);
+        if (result.status != execution::Status::Applied
+            && result.status != execution::Status::NoEffect)
+            throw std::runtime_error("invalid resolved frozen-transaction settlement");
+    };
     if (close_qty >= position_qty_ - kQtyEpsilon) {
-        execute_market_exit(fill_price);
+        settle(execution::Flatten{});
     } else if (close_qty > kQtyEpsilon) {
-        execute_partial_exit_qty(fill_price, close_qty,
-                                 PositionReductionCause::SCRIPT_ORDER);
+        settle(order_action::Reduce{close_qty});
     }
     const double remainder = std::abs(transaction->open_units());
     if (remainder > kQtyEpsilon && std::isfinite(fill_price)) {
-        const double entry_fill = apply_fill_slippage(fill_price, order.is_long);
-        open_fresh_position(requested, entry_fill, remainder, order.id,
-                            order.incarnation);
-        pyramid_entries_.back().entry_comment = order.comment;
+        settle(order_action::Transact{
+            requested == PositionSide::LONG ? remainder : -remainder});
     }
     // Mirror the ordinary market-entry kernel's trail handling (open-tick
     // fill: the bar's extreme folds in for same-bar exit evaluation).
@@ -7026,10 +7032,11 @@ void BacktestEngine::apply_market_order_fill(PendingOrder& order, double fill_pr
         if (residual > kQtyEpsilon) {
             // Slippage is gated to 0 by the exact-book tagging, so the
             // remnant re-opens at the same broker point the exit filled at.
-            open_fresh_position(
-                order.is_long ? PositionSide::LONG : PositionSide::SHORT,
-                fill_price, residual, order.id, order.incarnation);
-            pyramid_entries_.back().entry_comment = order.comment;
+            const auto result = settle_resolved_execution(
+                order_action::Transact{order.is_long ? residual : -residual},
+                execution::Fill{fill_price, order.id, order.comment, order.incarnation});
+            if (result.status != execution::Status::Applied)
+                throw std::runtime_error("invalid resolved remainder settlement");
             // Mirror the ordinary market-entry kernel's trail handling: the
             // path state keeps the at-fill value, then the bar's remaining
             // extreme folds into trail_best_price_ for same-bar exit
@@ -7419,15 +7426,11 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
         const double entry_fill = apply_fill_slippage(fill_price, /*is_buy=*/true);
         if (!std::isfinite(entry_fill) || qty <= kQtyEpsilon) return;
 
-        PyramidEntry materialized{};
-        materialized.price = entry_fill;
-        materialized.time = current_bar_.timestamp;
-        materialized.qty = qty;
-        materialized.entry_id = order.id;
-        materialized.entry_bar_index = bar_index_;
-        materialized.entry_comment = order.comment;
-        materialized.entry_incarnation = order.incarnation;
-        append_same_side_fill(std::move(materialized));
+        const auto result = settle_resolved_execution(
+            order_action::Transact{qty},
+            execution::Fill{entry_fill, order.id, order.comment, order.incarnation});
+        if (result.status != execution::Status::Applied)
+            throw std::runtime_error("invalid resolved same-side settlement");
         return;
     }
 
@@ -7451,15 +7454,11 @@ void BacktestEngine::apply_exit_order_fill(PendingOrder& order, double fill_pric
             const double entry_fill =
                 apply_fill_slippage(fill_price, /*is_buy=*/(order.created_position_side == PositionSide::SHORT));
             if (!std::isfinite(entry_fill) || qty <= kQtyEpsilon) return;
-            PyramidEntry artifact{};
-            artifact.price = entry_fill;
-            artifact.time = current_bar_.timestamp;
-            artifact.qty = qty;
-            artifact.entry_id = order.id;
-            artifact.entry_bar_index = bar_index_;
-            artifact.entry_comment = order.comment;
-            artifact.entry_incarnation = order.incarnation;
-            append_same_side_fill(std::move(artifact));
+            const auto result = settle_resolved_execution(
+                order_action::Transact{position_side_ == PositionSide::LONG ? qty : -qty},
+                execution::Fill{entry_fill, order.id, order.comment, order.incarnation});
+            if (result.status != execution::Status::Applied)
+                throw std::runtime_error("invalid resolved same-side settlement");
             return;
         }
         sbmt_frozen_close = true;

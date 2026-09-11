@@ -157,7 +157,10 @@ void reduce_preserves_fifo_identity_and_scales_survivor() {
     order_fee.per_order_fees();
     order_fee.partial(120.0, 3.0);
     CHECK(order_fee.lots().size() == 1);
-    CHECK(order_fee.lots()[0].entry_commission_account == 3.0);
+    // One cash-per-order ticket is allocated proportionally to the physical
+    // FIFO slices: B survives with 2/3 of its original 3-unit lot, so its
+    // retained paid fee is 3 * 2/3 = 2, not a second full ticket.
+    CHECK(order_fee.lots()[0].entry_commission_account == 2.0);
 }
 
 void reduce_handles_short_side_and_slippage_once() {

@@ -49,6 +49,19 @@ qty × pointvalue) × 100`, TradingView-arbitrated).
 | `max_consecutive_wins` / `_losses` | Longest run; even trades reset both | — |
 | `avg_bars_in_trade` / `_wins` / `_losses` | Mean of `exit_bar − entry_bar + 1` (**inclusive** of the entry bar, TV convention), script bars | empty set |
 
+Native settlement records fees in account currency at the event where they are
+incurred. Entry fees are snapshotted on each physical lot at its entry fill
+and remain unchanged when a later FX point becomes active. A partial FIFO
+close allocates the paid entry fee in proportion to closed quantity; the
+survivor retains the unconsumed cost. A
+single cash-per-order ticket belongs to the native execution as a whole and is
+allocated proportionally across its physical close/open effects; it is not
+charged once per trade row. The shared native close helper now consumes these
+historical paid costs. Existing legacy Pine paths are not all grouped into
+native executions, so this rule does not claim that every legacy path has the
+same dynamic-FX settlement semantics. Pine sizing, source-specific reporting,
+and range-end conventions remain compatibility behavior.
+
 ## Equity statistics (`metrics.equity`, all-trades only)
 
 The equity curve samples `initial_capital + net_profit + open_profit` at
@@ -77,7 +90,7 @@ truncated curve and metrics over the truncated prefix.
 | Surface | Validated against | Result |
 | --- | --- | --- |
 | Trade statistics (counts, PF, percent bases, averages, largest-%, bars) | Real TradingView Strategy Tester export (`composite-4emarsi-integration-01`, 336 trades, All/Long/Short panels) | Match within TV 2-dp rounding; three TV conventions arbitrated and adopted (net return-on-cost `pnl_pct`, independent largest-%, inclusive bar counts) |
-| Commission + slippage economics | Second TV export, same strategy: commission 0.1 % percent + slippage 2 ticks via `strategy_set_override` ([historical inputs](https://github.com/pineforge-4pass/pineforge-engine/blob/a03ac6d3fb42df5af1db9e39727daf450b2fb71f/validation-adhoc/4emarsi-commission-slippage-ethusdt/inputs.json)) | All 672 fill prices bit-exact (slippage rules pinned: market/stop fills, directional, mintick-composed); commission formula `rate·(entry+exit)·qty·pointvalue` exact — residual per-trade deltas fully explained by TV's account-currency conversion (USDT→USD at previous-UTC-day close; 335/336 trades reproduced to the cent). Extended by a third TV export (`bracket-exit-tp-sl-fixed-01`, BINANCE:ETHUSDT.P): 396/396 trades bit-exact, pinning the limit-fill rules — limit fills are NOT slipped, off-tick limits snap one tick favorably (limit-or-better), gapped limits fill at the raw open, and stop fills confirmed slipped |
+| Commission + slippage economics | Historical TradingView exports: 0.1% commission + 2 ticks via `strategy_set_override` ([archived inputs](https://github.com/pineforge-4pass/pineforge-engine/blob/a03ac6d3fb42df5af1db9e39727daf450b2fb71f/validation-adhoc/4emarsi-commission-slippage-ethusdt/inputs.json)) | Historical fixed-export validation only: 672 fill prices bit-exact and 335/336 commission rows reproduced to the cent after the documented USDT→USD conversion. A separate historical bracket export reproduced 396/396 trades and pinned limit/stop slippage rules. These archived receipts do not claim current dynamic-FX native settlement parity; current native settlement preserves paid entry costs and allocates one execution's costs across physical effects. |
 | TV risk panel (Sharpe, Sortino, drawdown/run-up rows, CAGR) | TV xlsx export (Performance + Risk-adjusted performance sheets) | Every panel value reproduced from the engine curve once TV's conventions are applied — see the definition-delta table below |
 | Equity statistics (max DD ±%, Sharpe/Sortino both variants, CAGR, Calmar, recovery) | quantstats 0.0.81 + empyrical-reloaded 0.5.12 (`scripts/crossvalidate_metrics.py --all`) | All 246 corpus strategies ran, 0 skipped, 0 mismatches; worst engine-convention \|rel Δ\| = 1.886e-11 (`pyramid-cash-fractional-commission-01`, sharpe/sortino_bar vs empyrical); 3 degenerate NaN fields (sharpe_tv, zero monthly variance) agree on degeneracy across engine/numpy/empyrical/quantstats; known library-convention deltas labelled in single-strategy mode |
 | Closed-form unit oracles | `tests/test_metrics.cpp` (e.g. monthly Sharpe 19/20, Sortino 114/61 exact rationals) | Bit-level |

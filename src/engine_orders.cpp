@@ -174,14 +174,11 @@ void BacktestEngine::execute_market_exit(double fill_price) {
     // limit-or-better path via apply_fill_slippage.
     bool is_buy = (position_side_ == PositionSide::SHORT);
     fill_price = apply_fill_slippage(fill_price, is_buy);
-    bool was_long = (position_side_ == PositionSide::LONG);
-
-    // Emit one Trade per pyramid entry (matches TradingView reporting)
-    for (auto& pe : pyramid_entries_) {
-        emit_close_trade(pe, pe.qty, fill_price, was_long);
-    }
-
-    reset_position_state_to_flat();
+    const auto result = settle_resolved_execution(
+        execution::Flatten{}, execution::Fill{fill_price, {}, {}, 0});
+    if (result.status != execution::Status::Applied
+        && result.status != execution::Status::NoEffect)
+        throw std::runtime_error("invalid resolved full-position settlement");
 }
 
 
@@ -319,13 +316,10 @@ double BacktestEngine::fifo_drain(const std::string* from_entry, double qty_limi
             kept.qty = keep_qty;
             kept.max_runup *= keep_scale;
             kept.max_drawdown *= keep_scale;
-            // Percent and per-contract fees follow the surviving quantity.
-            // CASH_PER_ORDER remains one fee for the accepted entry order,
-            // matching calc_commission's established qty-independent shape.
-            if (std::isfinite(kept.entry_commission_account)
-                && commission_type_ != CommissionType::CASH_PER_ORDER) {
-                kept.entry_commission_account *= keep_scale;
-            }
+            // Realizing part of the lot consumes that part of its paid entry
+            // cost. A later rate/type/FX change cannot rewrite the payment.
+            kept.entry_commission_account = open_entry_commission(pe)
+                - allocated_entry_commission(pe, close_qty);
             remaining.push_back(std::move(kept));
         }
     }
@@ -364,13 +358,21 @@ void BacktestEngine::execute_partial_exit_qty(
 // The caller supplies the lot's immutable label, identity and fill metadata;
 // accounting and stream observations still use the engine's sole lot ledger.
 void BacktestEngine::append_same_side_fill(PyramidEntry lot) {
+    snapshot_entry_commission(lot);
     const double total_qty = position_qty_ + lot.qty;
-    position_entry_price_ =
+    const double average_price =
         (position_entry_price_ * position_qty_ + lot.price * lot.qty) / total_qty;
+    append_quoted_lot(std::move(lot), total_qty, average_price);
+}
+
+void BacktestEngine::append_quoted_lot(PyramidEntry lot, double total_qty,
+                                      double average_price) {
+    if (position_entry_count_ == std::numeric_limits<int>::max())
+        throw std::overflow_error("position entry counter exhausted");
+    position_entry_price_ = average_price;
     position_qty_ = total_qty;
     ++position_entry_count_;
     trail_best_price_ = lot.price;
-    snapshot_entry_commission(lot);
     pyramid_entries_.push_back(std::move(lot));
     if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
     const auto& filled = pyramid_entries_.back();
@@ -592,6 +594,13 @@ void BacktestEngine::purge_exit_orders(bool retain_for_pending_entries) {
 // execute_market_entry. Mirrors TradingView's per-pyramid trade reporting.
 Trade BacktestEngine::build_close_trade(const PyramidEntry& pe, double close_qty,
                                         double fill_price, bool was_long) const {
+    return build_close_trade_with_costs(pe, close_qty, fill_price, was_long,
+        allocated_entry_commission(pe, close_qty), calc_commission(fill_price, close_qty));
+}
+
+Trade BacktestEngine::build_close_trade_with_costs(const PyramidEntry& pe, double close_qty,
+        double fill_price, bool was_long, double entry_commission,
+        double exit_commission) const {
     // Realized PnL scales by the instrument point value ($ per point per
     // contract). Crypto/equity (pointvalue=1) is unchanged; futures (e.g. ES=50)
     // multiply the price-difference PnL. The price-difference component is in
@@ -604,8 +613,6 @@ Trade BacktestEngine::build_close_trade(const PyramidEntry& pe, double close_qty
     const double pv = syminfo_.pointvalue;
     double pnl = (was_long ? (fill_price - pe.price) : (pe.price - fill_price))
                  * close_qty * pv * active_account_currency_fx();
-    const double entry_commission = calc_commission(pe.price, close_qty);
-    const double exit_commission  = calc_commission(fill_price, close_qty);
     pnl -= entry_commission + exit_commission;
     // TV "Net P&L %" convention (arbitrated 2026-06-12 vs TV export,
     // trade #258 short: 102.44 USD on 2276.66 entry => 4.50%): NET pnl
@@ -645,7 +652,7 @@ Trade BacktestEngine::build_close_trade(const PyramidEntry& pe, double close_qty
     // a partial close reports the slice's USD excursion, matching TV's
     // per-trade-record qty. Both fields stay >= 0 (Pine accessor convention);
     // the TV-export sign flip happens only in the CSV writer.
-    double slice = (pe.qty > kQtyEpsilon) ? (close_qty / pe.qty) : 1.0;
+    double slice = (pe.qty > 0.0) ? (close_qty / pe.qty) : 1.0;
     double fill_fav = (was_long ? (fill_price - pe.price) : (pe.price - fill_price))
                       * close_qty;
     double runup = std::max(pe.max_runup * slice, fill_fav);
@@ -709,7 +716,11 @@ Trade BacktestEngine::build_close_trade(const PyramidEntry& pe, double close_qty
 
 void BacktestEngine::emit_close_trade(const PyramidEntry& pe, double close_qty,
                                       double fill_price, bool was_long) {
-    Trade trade = build_close_trade(pe, close_qty, fill_price, was_long);
+    record_close_trade(build_close_trade(pe, close_qty, fill_price, was_long));
+}
+
+void BacktestEngine::record_close_trade(Trade trade) {
+    validate_close_trade_counters(&trade, 1);
     const double pnl = trade.pnl;
     const double trade_pnl = trade.pnl;
     trades_.push_back(std::move(trade));
@@ -756,6 +767,43 @@ void BacktestEngine::emit_close_trade(const PyramidEntry& pe, double close_qty,
         }
     } else if (pnl > 0.0) {
         cons_loss_day_count_ = 0;
+    }
+}
+
+void BacktestEngine::validate_close_trade_counters(const Trade* rows, size_t count) const {
+    const int maximum = std::numeric_limits<int>::max();
+    // In an ordinary run each counter can advance at most once per row.
+    // Only an exhausted/near-exhausted counter needs the exact risk-day walk.
+    if (count <= static_cast<size_t>(maximum)) {
+        const int room = maximum - static_cast<int>(count);
+        if (win_trades_count_ <= room && loss_trades_count_ <= room
+            && eventrades_count_ <= room && cons_loss_day_count_ <= room)
+            return;
+    }
+    int64_t wins = win_trades_count_, losses = loss_trades_count_;
+    int64_t evens = eventrades_count_, loss_days = cons_loss_day_count_;
+    int last_day = last_loss_day_;
+    std::optional<int> current_day;
+    for (size_t i = 0; i < count; ++i) {
+        const double pnl = rows[i].pnl;
+        if (pnl > 0.0) {
+            ++wins;
+            loss_days = 0;
+        } else if (pnl < 0.0) {
+            ++losses;
+            if (!current_day) {
+                const BarTime time = _decompose_bar_time_chart_tz();
+                current_day = time.dayofmonth * 100 + time.month;
+            }
+            if (*current_day != last_day) {
+                last_day = *current_day;
+                ++loss_days;
+            }
+        } else {
+            ++evens;
+        }
+        if (wins > maximum || losses > maximum || evens > maximum || loss_days > maximum)
+            throw std::overflow_error("closed trade counter exhausted");
     }
 }
 
@@ -901,18 +949,28 @@ void BacktestEngine::unbind_exit_activations() {
 void BacktestEngine::open_fresh_position(PositionSide requested, double fill_price,
                                          double qty, const std::string& id,
                                          uint64_t entry_incarnation) {
+    PyramidEntry lot{fill_price, current_bar_.timestamp, qty, id, bar_index_};
+    lot.entry_incarnation = entry_incarnation;
+    snapshot_entry_commission(lot);
+    open_quoted_position(requested, std::move(lot));
+}
+
+void BacktestEngine::open_quoted_position(PositionSide requested, PyramidEntry lot) {
+    if (next_position_cycle_seq_ <= 0
+        || next_position_cycle_seq_ == std::numeric_limits<int64_t>::max())
+        throw std::overflow_error("position cycle sequence exhausted");
     position_side_ = requested;
     position_cycle_seq_ = next_position_cycle_seq_++;
-    position_entry_price_ = fill_price;
+    position_entry_price_ = lot.price;
     // The shared post-dispatch lifecycle hook queues the new fill's event.
     // Clear prior-cycle provenance now so reversals cannot expose it even
     // transiently.
     opening_obligations_.invalidate();
-    position_entry_time_ = current_bar_.timestamp;
-    position_qty_ = qty;
+    position_entry_time_ = lot.time;
+    position_qty_ = lot.qty;
     position_entry_count_ = 1;
-    position_open_bar_ = bar_index_;
-    trail_best_price_ = fill_price;
+    position_open_bar_ = lot.entry_bar_index;
+    trail_best_price_ = lot.price;
     pyramid_entries_.clear();
     id_unclosed_qty_.clear();
     cycle_filled_entry_ids_.clear();
@@ -921,12 +979,11 @@ void BacktestEngine::open_fresh_position(PositionSide requested, double fill_pri
     callsite_close_reserved_qty_.clear();
     callsite_close_two_call_first_qty_.clear();
     consumed_partial_exit_ids_.clear();
-    pyramid_entries_.push_back({fill_price, current_bar_.timestamp, qty, id, bar_index_});
-    pyramid_entries_.back().entry_incarnation = entry_incarnation;
-    snapshot_entry_commission(pyramid_entries_.back());
+    pyramid_entries_.push_back(std::move(lot));
     if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
-    id_unclosed_qty_[id] += qty;
-    cycle_filled_entry_ids_.insert(id);
+    const auto& filled = pyramid_entries_.back();
+    id_unclosed_qty_[filled.entry_id] += filled.qty;
+    cycle_filled_entry_ids_.insert(filled.entry_id);
     bind_retained_exit_activations();
 }
 

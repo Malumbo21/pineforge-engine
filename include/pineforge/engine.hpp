@@ -16,6 +16,7 @@
 #include "bar.hpp"
 #include "broker_events.hpp"
 #include "quantity_intent.hpp"
+#include "execution.hpp"
 #include "market_admission.hpp"
 #include "reservation_expansion.hpp"
 #include "order_cancellation.hpp"
@@ -248,10 +249,10 @@ struct PyramidEntry {
     // Entry-leg commission in account currency at this slice's actual fill
     // boundary. Percentage commission depends on quote->account FX, so an
     // effective-time provider must not retroactively reprice this already-paid
-    // fee when a later rate becomes active. Closed-trade reporting deliberately
-    // ignores this snapshot: TV converts the complete realized trade at the
-    // exit-time FX rate. NaN is reserved for legacy/synthetic test injection;
-    // every production entry path initializes the snapshot at fill time.
+    // fee when a later rate becomes active. Partial realization allocates this
+    // paid cost proportionally and leaves only the unconsumed cost on the lot,
+    // independently of the current fee schedule. NaN is reserved for legacy/
+    // synthetic injection; every production entry path captures a real quote.
     double entry_commission_account =
         std::numeric_limits<double>::quiet_NaN();
     // Monotonic per-run identity of the PendingOrder object whose broker fill
@@ -1790,6 +1791,18 @@ protected:
     // --- Per-trade extreme tracking ---
     void update_per_trade_extremes();
 
+    // Trusted native matching-adapter extension: settle an already resolved
+    // execution into this engine's one physical book. This does not place an
+    // order, perform admission/slippage, or provide cancellation/replay. The
+    // owning run must abort on an exception; failed commits are not retryable
+    // in place. A saved arithmetic plan is not execution authority.
+    execution::Result settle_resolved_execution(const execution::Action& action,
+                                                const execution::Fill& fill);
+    // Native account value: realized balance plus marked physical lots minus
+    // their remaining paid entry costs, for every fee type. No Pine sizing or
+    // end-of-range reporting convention participates in this value.
+    double marked_equity(double price) const;
+
     // --- Strategy order commands ---
     // NOTE: prior to v0.2 the runtime accepted a leading `double market_price`
     // positional after `is_long`. The implementation never read it; every
@@ -2426,6 +2439,12 @@ protected:
         return std::isfinite(pe.entry_commission_account)
             ? pe.entry_commission_account
             : calc_commission(pe.price, pe.qty);
+    }
+
+    double allocated_entry_commission(const PyramidEntry& pe, double units) const {
+        if (units <= 0.0) return 0.0;
+        const double paid = open_entry_commission(pe);
+        return units >= pe.qty ? paid : paid * (units / pe.qty);
     }
 
     void snapshot_entry_commission(PyramidEntry& pe) const {
@@ -3851,6 +3870,8 @@ private:
                               uint64_t entry_incarnation);
     void execute_market_exit(double fill_price);
     void append_same_side_fill(PyramidEntry lot);
+    void append_quoted_lot(PyramidEntry lot, double total_qty, double average_price);
+    void open_quoted_position(PositionSide requested, PyramidEntry lot);
     // Range-end accounting: record the rows that close a position still
     // open after the final script bar at that bar's close, the way
     // TradingView's deep-backtest report does (engine_orders.cpp). Called by
@@ -4200,6 +4221,14 @@ private:
     // engine_orders.cpp).
     void emit_close_trade(const PyramidEntry& pe, double close_qty,
                           double fill_price, bool was_long);
+    void record_close_trade(Trade trade);
+    void validate_close_trade_counters(const Trade* rows, size_t count) const;
+    // Quote one resolved execution's current charges. Entry costs on the
+    // closed rows are historical allocations. Returns close shares in FIFO
+    // order followed by the opening share (zero when there is no opening).
+    std::vector<double> quote_execution_commissions(
+        const std::vector<double>& closed_units, double opening_units,
+        const execution::Fill& fill) const;
     // The arithmetic of emit_close_trade without its bookkeeping: the Trade
     // row a close of ``close_qty`` of ``pe`` at ``fill_price`` on the
     // current bar would record (pnl, pnl_pct, commission, excursions, bar
@@ -4207,6 +4236,9 @@ private:
     // builds only.
     Trade build_close_trade(const PyramidEntry& pe, double close_qty,
                             double fill_price, bool was_long) const;
+    Trade build_close_trade_with_costs(const PyramidEntry& pe, double close_qty,
+        double fill_price, bool was_long, double entry_commission,
+        double exit_commission) const;
     // FIFO-drain up to qty_limit from pyramid_entries_, in order, splitting the
     // boundary entry as needed. When from_entry is non-null only entries whose
     // entry_id == *from_entry are eligible (others are kept untouched); null

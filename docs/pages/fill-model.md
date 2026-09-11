@@ -104,14 +104,15 @@ authorize a delayed fill: a scheduler must revalidate its order identity and
 current book before settlement. Pending cancellation and replay receipts are
 separate lifecycle contracts.
 
-The current bridge uses this planner for partial reduction and Pine's already
-resolved frozen-transaction close/open split. The existing settlement paths
-still own FIFO lots, fees, slippage, dust thresholds and observations. A shared
-same-side lot append also keeps physical identity and metadata without
-introducing another position book. This is a prerequisite for the unified
-executor; `ShortSeedCollisionRole` and its compatibility projection remain
-until ordered actions replace all of their consumers. This change does not
-reduce the pending-order flag count or provide broker-account reconciliation.
+The native [resolved settlement extension](../native-settlement.md) applies
+`Flatten`, `Reduce` and `Transact` to the existing physical FIFO book, including
+paid entry costs, current execution charges and ordered observations. Full
+market exits and selected frozen-transaction/materialization paths use it.
+Callers still own matching, admission, slippage and source scheduling; other
+legacy settlement paths remain to be migrated. `ShortSeedCollisionRole` and
+its compatibility projection remain until ordered actions replace all of
+their consumers. This step does not reduce the pending-order flag count or
+provide broker-account reconciliation.
 
 ## Opening checkpoint
 

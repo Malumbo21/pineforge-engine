@@ -78,6 +78,7 @@ public:
     }
     int trades() const { return trade_count(); }
     double first_pnl() const { return trades() ? get_trade(0).pnl : kNaN; }
+    const Trade& trade(int index) const { return get_trade(index); }
 };
 
 // A default 100%-of-equity order is placed under FX=1.0 and fills on the
@@ -495,7 +496,9 @@ int main() {
     // E2. TradingView converts a realized trade's complete net symbol-currency
     // PnL at the EXIT bar's daily rate, including both percent-commission legs
     // (335/336 exact; archived investigation linked in docs/pages/metrics.md).
-    // gross 50*2 - entry fee 400*10%*2 - exit fee 450*10%*2 = -70.
+    // Gross account-currency PnL is 50*2 = 100. The entry fee is paid at
+    // entry-time FX: 400*10%*2*1 = 40. The exit fee is paid at exit-time FX:
+    // 450*10%*2*2 = 90. Net PnL is therefore 100 - 40 - 90 = -30.
     {
         std::vector<Bar> bars = {mk_bar(1000, 400.0), mk_bar(2000, 450.0)};
         const int64_t timestamps[] = {1500};
@@ -504,13 +507,13 @@ int main() {
         CHECK(eng.set_account_currency_fx_series(timestamps, rates, 1));
         eng.run(bars.data(), (int)bars.size());
         CHECK(eng.trades() == 1);
-        CHECK(std::abs(eng.first_pnl() - (-70.0)) < 1e-12);
+        CHECK(std::abs(eng.first_pnl() - (-30.0)) < 1e-12);
+        CHECK(std::abs(eng.trade(0).commission - 130.0) < 1e-12);
     }
 
-    // E3. The live entry fee stays at its entry-time account value, while a
-    // closed trade intentionally converts both percent-fee legs at exit-time
-    // FX. Cash fee modes are already account-currency-native and remain
-    // unchanged by the provider.
+    // E3. The entry fee is paid at entry-time FX (10), while the exit fee is
+    // paid at exit-time FX (20). The zero-gross trade therefore reports one
+    // uniform account-currency commission total of 30 and net PnL -30.
     {
         std::vector<Bar> bars = {mk_bar(1000, 100.0), mk_bar(2000, 100.0)};
         const int64_t timestamps[] = {1000, 2000};
@@ -523,8 +526,8 @@ int main() {
         CHECK(std::abs(percent.observed_open_commission() - 10.0) < 1e-12);
         CHECK(std::abs(percent.observed_open_profit() - (-10.0)) < 1e-12);
         CHECK(percent.trades() == 1);
-        CHECK(std::abs(percent.trade(0).commission - 40.0) < 1e-12);
-        CHECK(std::abs(percent.trade(0).pnl - (-40.0)) < 1e-12);
+        CHECK(std::abs(percent.trade(0).commission - 30.0) < 1e-12);
+        CHECK(std::abs(percent.trade(0).pnl - (-30.0)) < 1e-12);
 
         EntryFeeAccessorLifecycleProbe cash_order(
             CommissionType::CASH_PER_ORDER, /*value=*/7.0, /*qty=*/1.0);
@@ -547,8 +550,9 @@ int main() {
     }
 
     // E4. Snapshots follow physical pyramid slices across partial exits and
-    // are replaced on reversal. The partial trade still uses rate-2 realized
-    // reporting (40), while the surviving half of the rate-1 L1 fee is 10.
+    // are replaced on reversal. The partial L1 slice pays entry fee 10 at
+    // entry-time FX plus exit fee 20 at rate-2 FX, so its commission is 30;
+    // the surviving L1 fee remains 10 and L2 remains 20.
     {
         std::vector<Bar> bars = {
             mk_bar(1000, 100.0), mk_bar(2000, 100.0),
@@ -564,7 +568,7 @@ int main() {
         CHECK(std::abs(eng.before_partial_second() - 20.0) < 1e-12);
         CHECK(std::abs(eng.after_partial_first() - 10.0) < 1e-12);
         CHECK(std::abs(eng.after_partial_second() - 20.0) < 1e-12);
-        CHECK(std::abs(eng.partial_trade_commission() - 40.0) < 1e-12);
+        CHECK(std::abs(eng.partial_trade_commission() - 30.0) < 1e-12);
         CHECK(eng.reversal_is_short());
         CHECK(std::abs(eng.reversal_commission() - 20.0) < 1e-12);
 
