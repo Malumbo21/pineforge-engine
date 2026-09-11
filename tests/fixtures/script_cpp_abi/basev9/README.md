@@ -6,4 +6,3 @@ This fixture is the exact recursive tracked header closure from
 compile and link controls to prove that the pre-placement-derivation v9
 native/generated surface is rejected by the v10 runtime. No strategy,
 executable, feed, or reference engine is run.
-

@@ -112,20 +112,22 @@ notice:
 - The shape of internal log lines (use them for humans, not parsers).
 
 Rebuild generated and native C++ objects against matching engine headers and
-runtime. Deriving the two placement facts from their original admission
-observation changes the native layout and advances `PendingOrder` and
-`BacktestEngine` to `engine_script_run_v10`. Exact pre-change f2df706/v9
+runtime. Deriving placement and opposite-predecessor facts from original
+admission evidence changes the native layout and advances `PendingOrder` and
+`BacktestEngine` to `engine_script_run_v11`. Exact pre-change fd4c686/v10
 headers are authenticated before native, generated-style and standalone
 PendingOrder pairing checks. Current/old matching links must succeed and stale
-pairings must fail for the expected qualified symbols. Earlier v2-v8 controls
+pairings must fail for the expected qualified symbols. Earlier v2-v9 controls
 remain; every translation unit must compile before any mismatch is accepted.
 No pairing executable runs.
 
 New standalone lifecycle values and `Lifecycle` own the inline namespace
 `pineforge::exit_legs::lifecycle_v1`; new admission values, `Draft`, `Journal`
-and capture classes/methods own `pineforge::admission::market_admission_v1`.
-Cancellation values retain `pineforge::order_cancellation_v1`; none of these
-standalone representations changes in the placement derivation.
+and capture classes/methods own `pineforge::admission::market_admission_v2`.
+The admission epoch changes because prior-book observations now capture each
+instruction's raw buy/sell direction. Authenticated v1 headers have separate
+matching and stale-link controls. Cancellation values retain
+`pineforge::order_cancellation_v1`.
 Header-only lifecycle methods do not require a library reference by themselves;
 separate caller/provider argument controls verify cross-translation-unit type
 identity. Admission method controls also link the current runtime archive.
@@ -145,7 +147,7 @@ module to obtain complete script-state reset; replacing an archive does not
 retrofit an old module. Public C function signatures, `PF_ABI_VERSION` (4),
 and `strategy_stream_api_version()` (1) are unchanged. The pending-order v1
 mirror preserves all 406 pre-change field names/types/offsets and its full
-3192-byte size. No field is added for the placement derivation: the original
+3192-byte size. No field is added for these placement derivations: the original
 admission operands already have actual-value projections, while removed native
 booleans survive as derived legacy outputs. Compiler static assertions compare
 every field with the authenticated v9 mirror. Size-limited reads keep old callers
@@ -154,16 +156,16 @@ within their buffers.
 Namespace versioning protects referenced internal C++ symbols; it does not
 validate an erased `pf_strategy_t` handle. Use a handle only with functions from
 its creating strategy module. A fully self-contained old module can still use
-its own matching runtime; this check does not turn it into a v10 module.
+its own matching runtime; this check does not turn it into a v11 module.
 
 The integrated representation advances the broker fingerprint domain to
-`pineforge-broker-state/v10` and stream fingerprint version to 10. The original
-admission observation is hashed once; its two derived placement views no longer
-add redundant folds. Lifecycle definitions, generations, obligations and replay
+`pineforge-broker-state/v11` and stream fingerprint version to 11. The original
+admission observation and prior-book direction are hashed as canonical facts;
+the three derived placement views add no redundant folds. Lifecycle definitions, generations, obligations and replay
 receipts, plus causal journal state remain represented. Existing
 reservation, Pine instruction, activation, quantity, predecessor and birth facts
 remain represented. The Pine component schema remains 1; it is
-independent of the aggregate fingerprint version. Prior v2-v9 fingerprints are
+independent of the aggregate fingerprint version. Prior v2-v10 fingerprints are
 not comparable. Fingerprints are replay checks, not serialized checkpoints or
 complete hashes of private strategy state. The native runner already binds
 its strategy-library SHA; its ledger format and Python provenance fingerprints

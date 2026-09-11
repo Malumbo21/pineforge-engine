@@ -513,18 +513,12 @@ struct PendingOrder {
     // close(id) fill cannot impersonate close_all. -1/0 means no provenance.
     int same_id_stop_deferred_close_all_bar = -1;
     uint64_t same_id_stop_deferred_close_all_incarnation = 0;
-    // KI-65 dual same-bar opposite entry (probe pf-probe-ki65-dual-entry-
-    // precedence): true when this priced (stop/limit) ENTRY was placed from
-    // FLAT and an EARLIER same-on_bar OPPOSITE-direction MARKET entry is
-    // pending. TV runs no arbitration on two opposite same-bar strategy.entry
-    // calls — BOTH execute; the second call's sizing freezes at placement as
-    // own + the pending opposite MARKET qty (a pending STOP contributes 0 — the
-    // SS cells stay single-close; a placement-rejected market never reaches the
-    // pending queue, so it contributes 0 too). When set, apply_entry_order_fill
-    // scopes the M2a close_only_opposite gate OUT so this leg FULLY REVERSES the
-    // position the market leg opened (flip_market_position_to) instead of
-    // collapsing to close-only-flat. Scoped to created-FLAT so the deferred-flip
-    // carry (created OPPOSITE) is untouched.
+    // KI-65 priced-entry precedence uses the derived
+    // placement_has_opposite_market_predecessor journal query. An accepted
+    // flat-born priced ENTRY retains full reversal when its original book
+    // contained an earlier opposite MARKET on the same source bar. Removed
+    // same-id predecessors and placement-rejected calls do not contribute.
+    // No independently writable predecessor result is stored on the order.
     // KI-65 MARKET/MARKET follow-up candidate. Every own-affordable explicit
     // MARKET call in the pinned broker scope carries this snapshot until the
     // next broker-processing boundary, where the complete source-bar set is

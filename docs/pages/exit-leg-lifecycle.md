@@ -74,7 +74,8 @@ All nested definition, generation, cause, obligation, window and latest-receipt
 facts are reflected/hashed once from canonical state. Legacy D/R/T/O/H/K/B/B0
 fields are read-only projections. This model removes three stored booleans.
 Admission, cancellation and placement-fact consolidation have reduced the
-direct PendingOrder boolean census from 17 to 6; this includes two ordinary
+direct PendingOrder boolean census from 17 to 5; the opposite-predecessor
+result is now derived from the accepted command journal. The five include two ordinary
 direction/activation facts and does not count every engine policy option.
 Optional obligations, three leg generations,
 retirement receipts, immutable definition references and action/domain variants

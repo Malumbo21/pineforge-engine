@@ -22,7 +22,7 @@ An actual margin fill can revise resolved sizing without changing the original
 observation. Original opening qualification is also distinct from the later
 broker `OpeningReceipt` Check/Exempt decision, which belongs to a committed fill.
 
-Two historical placement views now derive from these same original facts:
+Three historical placement views now derive from original admission evidence:
 
 - `placement_has_prior_close(order)` compares the original accepted-close
   quantity with the existing quantity tolerance. This describes a source-time
@@ -31,14 +31,24 @@ Two historical placement views now derive from these same original facts:
 - `placement_at_entry_capacity(order)` compares original placement side,
   requested direction and held-entry count with the original configured cap.
   Later fills, cancellation, sizing revisions or cap changes cannot alter it.
+- `placement_has_opposite_market_predecessor(journal, order)` finds the order's
+  accepted command event and examines its original physical book, excluding
+  incarnations that the command removed. Earlier opposite MARKET instructions
+  on the same source bar count even if later canceled or removed. A canceled
+  peer that was still physically resident at placement also counts.
 
-These views remove two independently writable copies of already stored facts.
-No replacement mask, enum profile or extra state is introduced. A manual order
+The first two views remove independently writable copies of already stored
+facts. The third removes a stored result and adds `BookObservation.buy`, the
+raw instruction direction captured from every physical peer. Held position side
+cannot supply this fact, especially for flat-born or manually constructed
+MARKET peers. No predecessor-result cache, mask or profile is retained. A manual order
 without an original admission observation retains the historical false default.
 Native callers that construct orders directly must supply their real original
 observation when these placement facts matter; a later executable quantity or
 position snapshot is not a substitute. The legacy C mirror columns remain at
 their original offsets as derived outputs, alongside the original observation.
+The predecessor view additionally requires the matching accepted command event
+in the owning journal; a standalone observation does not establish that history.
 
 ## Causal receipts
 
@@ -68,6 +78,11 @@ It has no arbitrary last-N truncation. This currently retains a full prior-book
 observation for each live command: N simultaneous resting orders can retain
 N(N-1)/2 prior-book rows. This cost still needs a separate representation change;
 the journal is not a fixed-memory or durable venue-event store.
+
+The C pending-order accessor supplies the owning journal to derive the
+predecessor column without changing its offset. A context-free internal mirror
+call refuses a bound flat-born priced entry before writing output; it cannot
+invent a false result when the required history was not supplied.
 
 These identities belong to one engine run. Reset begins a new run; callers must
 not submit persisted receipts from a different engine or run. External broker
