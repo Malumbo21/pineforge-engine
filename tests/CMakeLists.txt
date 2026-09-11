@@ -458,3 +458,5 @@ add_test(NAME test_market_admission_schema COMMAND ${Python3_EXECUTABLE}
     ${PROJECT_SOURCE_DIR}/scripts/check_market_admission_schema.py)
 add_test(NAME test_market_admission_schema_mutations COMMAND ${Python3_EXECUTABLE}
     ${PROJECT_SOURCE_DIR}/scripts/test_market_admission_schema.py)
+add_test(NAME test_cancellation_hash_coverage COMMAND ${Python3_EXECUTABLE} -B
+    ${PROJECT_SOURCE_DIR}/scripts/check_cancellation_hash_coverage.py)

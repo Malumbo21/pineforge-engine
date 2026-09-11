@@ -158,12 +158,34 @@ void check_claim_inputs_fail_closed() {
     CHECK(!c.release_close_claim_once(ledger));
     CHECK(std::abs(ledger - 1.5) < 1e-12);
 }
+
+void check_atomic_cancel_and_release() {
+    OrderCancellationReceipt c;
+    CHECK(c.bind_close_claim(2.0, 0.25));
+    const auto t = target(901, 4, 6);
+    double ledger = 3.0;
+    CHECK(c.cancel_and_release(CancellationCause::Dependency, 77, 8,
+                               t, t, &ledger) == CancellationResult::Applied);
+    CHECK(c.cancelled() && c.close_claim_release() == CloseClaimRelease::Released);
+    CHECK(std::abs(ledger - 5.25) < 1e-12);
+
+    OrderCancellationReceipt invalid;
+    CHECK(invalid.bind_close_claim(2.0, 0.25));
+    const auto before = invalid;
+    double nan_ledger = std::numeric_limits<double>::quiet_NaN();
+    CHECK(invalid.cancel_and_release(CancellationCause::Dependency, 77, 8,
+                                     t, t, &nan_ledger) == CancellationResult::Invalid);
+    CHECK(!invalid.cancelled());
+    CHECK(invalid.close_claim_release() == before.close_claim_release());
+    CHECK(invalid.source_incarnation() == before.source_incarnation());
+}
 }
 
 int main() {
     check_hash_and_mirror_leaf_pins();
     check_replay_and_invalid_target_no_effect();
     check_claim_inputs_fail_closed();
+    check_atomic_cancel_and_release();
     std::printf("cancellation mirror/hash coverage: %d failures\n", failures);
     return failures ? 1 : 0;
 }

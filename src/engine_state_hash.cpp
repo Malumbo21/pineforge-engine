@@ -311,9 +311,6 @@ uint64_t BacktestEngine::broker_state_hash() const {
         if (const auto& receiver = o.reservation_growth_source.reservation_owner()) {
             f.u(*receiver);
         }
-        // Suppressed-close ledger re-credit amounts.
-        f.d(o.cancellation.close_claim_consumed());
-        f.d(o.cancellation.close_claim_retired());
     }
     market_admission_journal_.reflect("journal",[&](const auto& field){hash_admission_field(f,field);});
 
