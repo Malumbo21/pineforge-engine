@@ -708,8 +708,12 @@ Trade BacktestEngine::build_close_trade_with_costs(const PyramidEntry& pe, doubl
     // (see calc_commission) — same convention as pnl above.
     trade.max_runup = std::max(
         0.0, runup * pv * active_account_currency_fx() - entry_commission);
-    trade.max_drawdown = drawdown * pv * active_account_currency_fx()
-                         + entry_commission;
+    // Excursion columns are nonnegative magnitudes even when an observed
+    // entry rebate is negative. Keep positive-fee behavior unchanged while
+    // preventing a rebate from producing an impossible negative drawdown.
+    trade.max_drawdown = std::max(
+        0.0, drawdown * pv * active_account_currency_fx()
+                 + entry_commission);
     return trade;
 }
 

@@ -377,9 +377,32 @@ void zero_fee_waiver_and_rebate() {
         near(rebate.rows()[0].commission,-5);
         CHECK(rebate.rows()[0].exit_id=="RX" && rebate.rows()[0].entry_id=="R");
         CHECK(rebate.rows()[0].qty==2);
+        near(rebate.rows()[0].max_drawdown,0);
+        near(rebate.rows()[0].max_runup,5);
+        near(rebate.rows()[0].pnl,5);
     }
     near(rebate.net(),5);
     near(rebate.marked(100),10005);
+}
+
+void native_percent_fee_uses_absolute_resolved_notional() {
+    Book native;
+    native.fee(CommissionType::PERCENT, 1.0);
+    const auto opened = native.settle(order_action::Transact{2}, -100,
+                                      "NEG", 84);
+    CHECK(opened.status==execution::Status::Applied);
+    CHECK(native.lots().size()==1);
+    if(!native.lots().empty()) near(native.lots()[0].entry_commission_account,2);
+    near(native.marked(-100),9998);
+
+    const auto flat = native.settle(execution::Flatten{}, -100, "NEG-X", 85);
+    CHECK(flat.status==execution::Status::Applied);
+    CHECK(native.position()==0 && native.lots().empty());
+    CHECK(native.rows().size()==1);
+    if(!native.rows().empty()) {
+        near(native.rows()[0].commission,4);
+        near(native.rows()[0].pnl,-4);
+    }
 }
 
 void quote_split_does_not_reprice_entry_costs() {
@@ -664,6 +687,7 @@ int main() {
     transact_same_side_and_reduce_cannot_flip();
     quoted_fee_overrides_unsuitable_modeled_rate();
     zero_fee_waiver_and_rebate();
+    native_percent_fee_uses_absolute_resolved_notional();
     quote_split_does_not_reprice_entry_costs();
     quote_split_across_closed_lots();
     quantity_quoted_fees_are_not_tickets();

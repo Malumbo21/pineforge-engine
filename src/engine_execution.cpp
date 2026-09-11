@@ -229,10 +229,20 @@ std::vector<double> BacktestEngine::quote_execution_commissions(
     // ticket charge is shared across the entire execution, including a flip's
     // opening remainder. Row count must not multiply a per-order fee.
     std::vector<double> costs(closed_units.size() + 1, 0.0);
+    const auto native_modeled_commission = [&](double quantity) {
+        // Native resolved executions charge a positive percentage against
+        // absolute resolved notional. Keep calc_commission's signed-price
+        // behavior unchanged for all legacy Pine paths.
+        if (commission_type_ == CommissionType::PERCENT) {
+            return std::abs(fill.price) * quantity * syminfo_.pointvalue
+                * active_account_currency_fx() * (commission_value_ / 100.0);
+        }
+        return calc_commission(fill.price, quantity);
+    };
     if (!fill.commission_account && commission_type_ != CommissionType::CASH_PER_ORDER) {
         for (size_t i = 0; i < closed_units.size(); ++i)
-            costs[i] = calc_commission(fill.price, closed_units[i]);
-        costs.back() = opening_units > 0.0 ? calc_commission(fill.price, opening_units) : 0.0;
+            costs[i] = native_modeled_commission(closed_units[i]);
+        costs.back() = opening_units > 0.0 ? native_modeled_commission(opening_units) : 0.0;
         return costs;
     }
     double units = opening_units;

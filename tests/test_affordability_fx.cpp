@@ -496,9 +496,10 @@ int main() {
     // E2. TradingView converts a realized trade's complete net symbol-currency
     // PnL at the EXIT bar's daily rate, including both percent-commission legs
     // (335/336 exact; archived investigation linked in docs/pages/metrics.md).
-    // Gross account-currency PnL is 50*2 = 100. The entry fee is paid at
-    // entry-time FX: 400*10%*2*1 = 40. The exit fee is paid at exit-time FX:
-    // 450*10%*2*2 = 90. Net PnL is therefore 100 - 40 - 90 = -30.
+    // With qty 1, gross account-currency PnL is 50*FX2 = 100. The entry fee
+    // is paid at entry-time FX: 400*10%*FX1 = 40. The exit fee is paid at
+    // exit-time FX: 450*10%*FX2 = 90. Net PnL is therefore 100 - 40 - 90 =
+    // -30.
     {
         std::vector<Bar> bars = {mk_bar(1000, 400.0), mk_bar(2000, 450.0)};
         const int64_t timestamps[] = {1500};

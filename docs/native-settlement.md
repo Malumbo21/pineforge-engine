@@ -49,6 +49,14 @@ An explicit `Fill::commission_account` overrides the modeled total and can
 represent a zero-fee waiver or a negative rebate. A nonfinite quote, or a
 nonzero quote attached to a no-effect quantity, is refused.
 
+For a modeled native percent schedule, the resolved notional uses the absolute
+fill price: `abs(fill.price) × quantity × pointvalue × account FX × rate`.
+Thus a positive 1% schedule charges 2 on a two-unit execution at a resolved
+price of -100; the signed price cannot turn that modeled charge into a rebate.
+An explicit negative `Fill::commission_account` remains an observed rebate and
+is preserved as such. Excursion fields remain nonnegative magnitudes, so a
+flat-price rebate may increase run-up but cannot produce a negative drawdown.
+
 For example, with a cash ticket of 6, opening 3 units and reducing 1 unit
 allocates 2 of the paid entry ticket plus 6 for the reduction to the closed
 row. The remaining 2 units carry entry cost 4. Flattening those units costs
