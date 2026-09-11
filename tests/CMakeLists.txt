@@ -383,6 +383,11 @@ add_test(
     COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/scripts/check_pending_order_prefix.py
 )
+add_test(
+    NAME test_pending_order_v1_compiler_prefix
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/check_pending_order_prefix_compiler.py
+)
 
 # Spec §3.4's reflection gate: every hashed-region struct member must be
 # either hashed by engine_state_hash.cpp or explicitly waived. Previously

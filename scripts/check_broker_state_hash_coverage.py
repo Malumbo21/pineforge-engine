@@ -546,7 +546,7 @@ def _reservation_expansion_version_coverage(header: str, source: str) -> None:
 
 
 def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
-    """The v9 layout and serialized-state contracts must advance together.
+    """The v10 layout and serialized-state contracts must advance together.
 
     Pin the actual hash entry points, rather than accepting a version string
     mentioned in a comment or an unrelated helper. Public C ABI versions have
@@ -554,16 +554,16 @@ def _runtime_version_coverage(header: str, source: str, stream: str) -> None:
     """
     header = _strip_cpp_comments(header)
     namespaces = re.findall(r"inline\s+namespace\s+(engine_script_run_v\d+)\s*\{", header)
-    if namespaces != ["engine_script_run_v9", "engine_script_run_v9"]:
-        raise ValueError("PendingOrder and BacktestEngine layouts require internal namespace engine_script_run_v9")
+    if namespaces != ["engine_script_run_v10", "engine_script_run_v10"]:
+        raise ValueError("PendingOrder and BacktestEngine layouts require internal namespace engine_script_run_v10")
     broker = _one_braced_body(source,
         r"uint64_t\s+BacktestEngine::broker_state_hash\(\)\s+const\s*\{", "broker hash")
-    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v9"\);', broker):
-        raise ValueError("broker hash must start with pineforge-broker-state/v9")
+    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v10"\);', broker):
+        raise ValueError("broker hash must start with pineforge-broker-state/v10")
     stream_body = _one_braced_body(_strip_cpp_comments(stream),
         r"uint64_t\s+BacktestEngine::stream_state_hash\(\)\s+const\s*\{", "stream hash")
     compact = re.sub(r"\s+", "", stream_body)
-    fold = "integer(9);integer(broker_state_hash());"
+    fold = "integer(10);integer(broker_state_hash());"
     if compact.count(fold) != 1:
         raise ValueError("stream hash requires version 9 followed by the broker hash")
     prefix = compact[:compact.index(fold)]

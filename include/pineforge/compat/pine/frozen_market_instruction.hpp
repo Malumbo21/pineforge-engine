@@ -9,7 +9,7 @@
 #include <vector>
 
 namespace pineforge {
-inline namespace engine_script_run_v9 { struct PendingOrder; }
+inline namespace engine_script_run_v10 { struct PendingOrder; }
 }
 
 namespace pineforge::compat::pine {

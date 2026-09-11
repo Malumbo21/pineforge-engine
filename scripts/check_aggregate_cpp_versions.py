@@ -44,16 +44,16 @@ def standalone_scope(text, outer, version):
 def check_texts(files):
     header = clean(files[FILES[0]])
     namespaces = re.findall(r'inline\s+namespace\s+(engine_script_run_v\d+)\s*\{', header)
-    if namespaces != ["engine_script_run_v9", "engine_script_run_v9"]:
-        raise ValueError("PendingOrder/BacktestEngine require engine_script_run_v9")
+    if namespaces != ["engine_script_run_v10", "engine_script_run_v10"]:
+        raise ValueError("PendingOrder/BacktestEngine require engine_script_run_v10")
     broker = body(clean(files[FILES[1]]),
                   r'uint64_t\s+BacktestEngine::broker_state_hash\(\)\s+const\s*\{', "broker hash")
-    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v9"\);', broker):
-        raise ValueError("broker entry requires v9 domain")
+    if not re.match(r'\s*Fnv\s+f;\s*f\.s\("pineforge-broker-state/v10"\);', broker):
+        raise ValueError("broker entry requires v10 domain")
     stream = body(clean(files[FILES[2]]),
                   r'uint64_t\s+BacktestEngine::stream_state_hash\(\)\s+const\s*\{', "stream hash")
     compact = re.sub(r'\s+', '', stream)
-    fold = "integer(9);integer(broker_state_hash());"
+    fold = "integer(10);integer(broker_state_hash());"
     if compact.count(fold) != 1:
         raise ValueError("stream entry requires v9 then broker hash")
     prefix = compact[:compact.index(fold)]
@@ -86,7 +86,7 @@ def check_texts(files):
     for name, text in files.items():
         if name.startswith("include/pineforge/compat/pine/"):
             found = re.findall(r'inline\s+namespace\s+(engine_script_run_v\d+)\s*\{', clean(text))
-            if any(value != "engine_script_run_v9" for value in found):
+            if any(value != "engine_script_run_v10" for value in found):
                 raise ValueError(name + " has a stale PendingOrder forward declaration")
 
 
@@ -103,4 +103,4 @@ def check(root=ROOT):
 
 if __name__ == "__main__":
     check()
-    print("aggregate v9 and standalone lifecycle/admission/cancellation v1 ownership verified")
+    print("aggregate v10 and standalone lifecycle/admission/cancellation v1 ownership verified")

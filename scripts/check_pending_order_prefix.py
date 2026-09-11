@@ -26,20 +26,22 @@ DECL = re.compile(
 )
 
 
-def _header_from_fixture() -> str:
-    manifest = json.loads((FIXTURE / "manifest.json").read_text())
-    if manifest["source_commit"] != COMMIT or manifest["source_tree"] != TREE:
-        raise SystemExit("basev8 fixture provenance changed")
-    archive = (FIXTURE / manifest["archive"]).read_bytes()
+def _header_from_fixture(fixture: Path = FIXTURE,
+                         commit: str = COMMIT,
+                         tree: str = TREE) -> str:
+    manifest = json.loads((fixture / "manifest.json").read_text())
+    if manifest["source_commit"] != commit or manifest.get("source_tree") != tree:
+        raise SystemExit(f"{fixture.name} fixture provenance changed")
+    archive = (fixture / manifest["archive"]).read_bytes()
     if hashlib.sha256(archive).hexdigest() != manifest["archive_sha256"]:
-        raise SystemExit("basev8 fixture archive digest mismatch")
+        raise SystemExit(f"{fixture.name} fixture archive digest mismatch")
     contents = json.loads(gzip.decompress(archive))
     expected = manifest["files"]["pineforge/pending_order_mirror.hpp"]
     raw = contents["pineforge/pending_order_mirror.hpp"].encode()
     blob = b"blob " + str(len(raw)).encode() + b"\0" + raw
     if (hashlib.sha256(raw).hexdigest() != expected["sha256"]
             or hashlib.sha1(blob).hexdigest() != expected["git_blob"]):
-        raise SystemExit("basev8 pending-order fixture digest mismatch")
+        raise SystemExit(f"{fixture.name} pending-order fixture digest mismatch")
     return raw.decode()
 
 
