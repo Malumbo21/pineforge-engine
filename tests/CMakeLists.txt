@@ -3,6 +3,12 @@ set(TEST_SOURCES
     test_resolved_execution
     test_native_reversal_contract
     test_order_action
+    test_native_order_core
+    test_native_order_terminal
+    test_native_market_vertical
+    test_native_market_vertical_contract
+    test_native_calendar_driver_contract
+    test_native_host_repairs
     test_order_action_integration
     test_placement_facts
     test_order_cancellation
@@ -74,6 +80,8 @@ set(TEST_SOURCES
     test_matrix_na
     test_matrix_snapshot_compat
     test_session_time
+    test_native_calendar
+    test_native_run_spec
     test_session_day_anchors
     test_time_tradingday
     test_chart_timezone
@@ -306,6 +314,22 @@ add_test(
 )
 
 add_test(
+    NAME test_native_cpp_versions
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_native_cpp_versions.py
+)
+add_test(
+    NAME test_native_cpp_abi
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/check_native_cpp_abi.py
+            --compiler ${CMAKE_CXX_COMPILER}
+            --library $<TARGET_FILE:pineforge>
+            --include ${PROJECT_SOURCE_DIR}/include
+            --generated-include ${PROJECT_BINARY_DIR}/include
+            ${_pf_script_cpp_abi_flags}
+)
+set_tests_properties(test_native_cpp_abi PROPERTIES TIMEOUT 240)
+
+add_test(
     NAME test_derive_corpus_feeds
     COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/scripts/derive_corpus_feeds_self_test.py
@@ -427,6 +451,9 @@ if(PINEFORGE_ENABLE_COVERAGE)
     endif()
 endif()
 
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/test_native_market_vertical.cpp"
+     PINEFORGE_NATIVE_MARKET_VERTICAL_SHA256)
+
 foreach(test_name ${TEST_SOURCES})
     add_executable(${test_name} ${test_name}.cpp)
     target_link_libraries(${test_name} PRIVATE pineforge)
@@ -443,6 +470,9 @@ foreach(test_name ${TEST_SOURCES})
     endif()
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+
+target_compile_definitions(test_native_market_vertical PRIVATE
+    PINEFORGE_NATIVE_SYNTHETIC_SOURCE_SHA256="${PINEFORGE_NATIVE_MARKET_VERTICAL_SHA256}")
 
 # std::thread needs an explicit pthread link on some toolchains.
 target_link_libraries(test_timezone_concurrency PRIVATE Threads::Threads)
@@ -472,3 +502,18 @@ add_test(NAME test_market_admission_schema_mutations COMMAND ${Python3_EXECUTABL
     ${PROJECT_SOURCE_DIR}/scripts/test_market_admission_schema.py)
 add_test(NAME test_cancellation_hash_coverage COMMAND ${Python3_EXECUTABLE} -B
     ${PROJECT_SOURCE_DIR}/scripts/check_cancellation_hash_coverage.py)
+
+# Independent native vertical contract fixture identity.
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/test_native_market_vertical_contract.cpp"
+     PINEFORGE_NATIVE_MARKET_VERTICAL_CONTRACT_SHA256)
+target_compile_definitions(test_native_market_vertical_contract PRIVATE
+    PINEFORGE_NATIVE_SYNTHETIC_SOURCE_SHA256="${PINEFORGE_NATIVE_MARKET_VERTICAL_CONTRACT_SHA256}")
+
+# Reconfigure source-bound native evidence when either fixture changes.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/test_native_market_vertical_contract.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/test_native_calendar_driver_contract.cpp")
+file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/test_native_calendar_driver_contract.cpp"
+     PINEFORGE_NATIVE_CALENDAR_DRIVER_SHA256)
+target_compile_definitions(test_native_calendar_driver_contract PRIVATE
+    PINEFORGE_NATIVE_SYNTHETIC_SOURCE_SHA256="${PINEFORGE_NATIVE_CALENDAR_DRIVER_SHA256}")

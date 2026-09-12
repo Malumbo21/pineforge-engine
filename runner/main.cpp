@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "json.hpp"
+#include "native_startup.hpp"
 #include "parser.hpp"
 #include "store.hpp"
 #include "transport.hpp"
@@ -7,6 +8,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <memory>
 #include <chrono>
 #include <climits>
 #include <csignal>
@@ -17,6 +19,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <locale>
 #include <poll.h>
 #include <set>
@@ -35,8 +38,10 @@ struct Config {
     std::string strategy, warmup, feed = "-", ledger, webhook, mode = "", input_tf = "1", script_tf,
                                   symbol, name = "strategy";
     std::string session = "24x7", timezone = "UTC", chart_timezone = "UTC", secret_env, feed_url,
-                parser_path, parser_config_path, subscribe_path;
+                parser_path, parser_config_path, subscribe_path, native_config;
     std::vector<std::pair<std::string, std::string>> inputs, overrides, syminfo;
+    std::set<std::string> explicit_flags;
+    NativeConfigValues native;
     std::uint64_t from_input = 0, max_events = 0, max_attempts = 8;
     long poll_ms = 1000;
     bool check = false, allow_http = false;
@@ -55,6 +60,7 @@ void help() {
                  "         --subscribe subscription.json (WebSocket only)\n"
                  "         --webhook-secret-env NAME --allow-insecure-http\n"
                  "         --from-input N --max-events N --max-attempts 8\n"
+                 "         --native-config FILE (strict native run specification)\n"
                  "         --check (one HTTP snapshot) --poll-ms 1000\n"
                  "JSONL: {\"type\":\"tick\",\"ts\":60000,\"seq\":1,\"price\":100,\"qty\":1}\n"
                  "       "
@@ -96,6 +102,7 @@ Config args(int argc, char **argv) {
         std::string a = argv[i];
         if (a != "--input" && a != "--override" && a != "--syminfo" && !seen.insert(a).second)
             throw std::runtime_error("duplicate option: " + a);
+        c.explicit_flags.insert(a);
         if (a == "--check") {
             c.check = true;
             continue;
@@ -155,6 +162,8 @@ Config args(int argc, char **argv) {
             c.max_events = unsigned_arg(v);
         else if (a == "--max-attempts")
             c.max_attempts = unsigned_arg(v);
+        else if (a == "--native-config")
+            c.native_config = v;
         else if (a == "--poll-ms") {
             auto n = unsigned_arg(v);
             if (n < 100 || n > 3600000)
@@ -163,17 +172,22 @@ Config args(int argc, char **argv) {
         } else
             throw std::runtime_error("unknown option: " + a);
     }
-    if (c.strategy.empty() || c.warmup.empty() || c.ledger.empty() || c.webhook.empty() ||
-        c.symbol.empty() || c.script_tf.empty())
-        throw std::runtime_error(
-            "strategy, warmup, ledger, webhook-url, symbol and script-tf are required");
+    if (c.strategy.empty() || c.warmup.empty() || c.ledger.empty() || c.webhook.empty())
+        throw std::runtime_error("strategy, warmup, ledger and webhook-url are required");
     if (c.mode != "bars" && c.mode != "ticks")
         throw std::runtime_error("mode must be bars or ticks");
-    if (c.input_tf != "1")
-        throw std::runtime_error("native runner input-tf currently must be 1 minute");
-    validate_script_tf(c.script_tf);
-    if (c.chart_timezone.empty())
-        c.chart_timezone = "UTC";
+    if (!c.native_config.empty()) {
+        if (!c.inputs.empty() || !c.overrides.empty() || !c.syminfo.empty())
+            throw std::runtime_error("native-config refuses --input, --override and --syminfo");
+    } else {
+        if (c.symbol.empty() || c.script_tf.empty())
+            throw std::runtime_error("symbol and script-tf are required");
+        if (c.input_tf != "1")
+            throw std::runtime_error("native runner input-tf currently must be 1 minute");
+        validate_script_tf(c.script_tf);
+        if (c.chart_timezone.empty())
+            c.chart_timezone = "UTC";
+    }
     if (!c.feed_url.empty() && seen.count("--feed"))
         throw std::runtime_error("choose feed or feed-url");
     const bool websocket = c.feed_url.rfind("ws://", 0) == 0 || c.feed_url.rfind("wss://", 0) == 0;
@@ -240,63 +254,28 @@ bool line(std::istream &in, std::string &out) {
     return !out.empty();
 }
 bool blank(const std::string &s) { return s.find_first_not_of(" \t\r\n") == std::string::npos; }
-std::vector<pf_bar_t> history(const std::string &csv) {
-    std::istringstream in(csv);
-    std::string row;
-    if (!line(in, row))
-        throw std::runtime_error("empty warmup");
-    if (!row.empty() && row.back() == '\r')
-        row.pop_back();
-    if (row != "timestamp,open,high,low,close,volume")
-        throw std::runtime_error("warmup CSV header must be timestamp,open,high,low,close,volume");
-    std::vector<pf_bar_t> bars;
-    while (line(in, row)) {
-        if (!row.empty() && row.back() == '\r')
-            row.pop_back();
-        if (row.empty())
-            throw std::runtime_error("blank warmup row");
-        std::vector<std::string> cells;
-        std::size_t begin = 0;
-        for (;;) {
-            auto end = row.find(',', begin);
-            cells.push_back(row.substr(begin, end - begin));
-            if (end == std::string::npos)
-                break;
-            begin = end + 1;
-        }
-        if (cells.size() != 6)
-            throw std::runtime_error("warmup requires six CSV columns");
-        auto stamp = parse_json(cells[0]).integer<std::int64_t>();
-        pf_bar_t b{};
-        b.timestamp = stamp;
-        b.open = parse_json(cells[1]).real();
-        b.high = parse_json(cells[2]).real();
-        b.low = parse_json(cells[3]).real();
-        b.close = parse_json(cells[4]).real();
-        b.volume = parse_json(cells[5]).real();
-        if (stamp < 0 || stamp % 60000 || stamp > INT64_MAX - 60000 || b.low <= 0 ||
-            b.high < std::max(b.open, b.close) || b.low > std::min(b.open, b.close) ||
-            b.high < b.low || b.volume < 0)
-            throw std::runtime_error("invalid warmup bar");
-        if (!bars.empty() && stamp != bars.back().timestamp + 60000)
-            throw std::runtime_error("warmup must contain contiguous confirmed 1m bars");
-        bars.push_back(b);
-        if (bars.size() >= static_cast<std::size_t>(INT_MAX))
-            throw std::runtime_error("too many warmup rows");
-    }
-    if (bars.empty())
-        throw std::runtime_error("warmup requires at least one bar");
-    return bars;
-}
 
 class Strategy {
     void *library_ = nullptr;
+    decltype(&strategy_stream_begin) begin_ = nullptr;
+    decltype(&strategy_configure_native_v1) configure_native_ = nullptr;
     template <class T> T symbol(const char *name) {
         auto p = dlsym(library_, name);
         if (!p)
             throw std::runtime_error(std::string("compiled strategy lacks native ABI symbol: ") +
                                      name);
         return reinterpret_cast<T>(p);
+    }
+    template <class T> T optional_symbol(const char *name) {
+        return reinterpret_cast<T>(dlsym(library_, name));
+    }
+    void release() {
+        if (state && free)
+            free(state);
+        state = nullptr;
+        if (library_)
+            dlclose(library_);
+        library_ = nullptr;
     }
 
   public:
@@ -310,8 +289,21 @@ class Strategy {
     decltype(&strategy_stream_order_action_get) get = nullptr;
     decltype(&strategy_stream_order_actions_clear) clear = nullptr;
     decltype(&strategy_stream_state_hash) hash = nullptr;
-    Strategy(const Config &c, const std::vector<pf_bar_t> &warmup) {
-        library_ = dlopen(fs::absolute(c.strategy).c_str(), RTLD_NOW | RTLD_LOCAL);
+    int contract = 1;
+    bool has_configure_native = false;
+    Strategy() = default;
+    ~Strategy() { release(); }
+    Strategy(const Strategy &) = delete;
+    Strategy &operator=(const Strategy &) = delete;
+    void check(int rc) {
+        if (rc != 0) {
+            const char *e = error ? error(state) : nullptr;
+            throw std::runtime_error(std::string("native stream refused: ") +
+                                     (e ? e : "unknown error"));
+        }
+    }
+    void load(const std::string &path) {
+        library_ = dlopen(fs::absolute(path).c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!library_)
             throw std::runtime_error("cannot load compiled strategy library");
         try {
@@ -330,83 +322,128 @@ class Strategy {
             get = symbol<decltype(get)>("strategy_stream_order_action_get");
             clear = symbol<decltype(clear)>("strategy_stream_order_actions_clear");
             hash = symbol<decltype(hash)>("strategy_stream_state_hash");
+            begin_ = symbol<decltype(&strategy_stream_begin)>("strategy_stream_begin");
             state = symbol<decltype(&strategy_create)>("strategy_create")(nullptr);
             if (!state)
                 throw std::runtime_error("strategy creation failed");
-            auto set_input = symbol<decltype(&strategy_set_input)>("strategy_set_input");
-            auto set_override = symbol<decltype(&strategy_set_override)>("strategy_set_override");
-            for (const auto &[k, v] : c.inputs)
-                set_input(state, k.c_str(), v.c_str());
-            for (const auto &[k, v] : c.overrides)
-                set_override(state, k.c_str(), v.c_str());
-            symbol<decltype(&strategy_set_syminfo_timezone)>("strategy_set_syminfo_timezone")(
-                state, c.timezone.c_str());
-            symbol<decltype(&strategy_set_chart_timezone)>("strategy_set_chart_timezone")(
-                state, c.chart_timezone.c_str());
-            symbol<decltype(&strategy_set_syminfo_session)>("strategy_set_syminfo_session")(
-                state, c.session.c_str());
-            auto set_string =
-                symbol<decltype(&strategy_set_syminfo_string)>("strategy_set_syminfo_string");
-            if (set_string(state, "tickerid", c.symbol.c_str()) != 0)
-                throw std::runtime_error("strategy rejected tickerid");
-            auto ticker = c.symbol.substr(
-                c.symbol.find(':') == std::string::npos ? 0 : c.symbol.find(':') + 1);
-            if (set_string(state, "ticker", ticker.c_str()) != 0)
-                throw std::runtime_error("strategy rejected ticker");
-            for (const auto &[key, value] : c.syminfo) {
-                if (key == "type" || key == "currency" || key == "basecurrency" ||
-                    key == "description" || key == "volumetype") {
-                    if (set_string(state, key.c_str(), value.c_str()) != 0)
-                        throw std::runtime_error("strategy rejected string metadata");
-                } else {
-                    double v = parse_json(value).real();
-                    if (key == "mintick" || key == "pointvalue" || key == "qty_step") {
-                        if (v <= 0)
-                            throw std::runtime_error(
-                                "symbol tick/point/quantity steps must be positive");
-                    } else if (key == "margin_long" || key == "margin_short") {
-                        if (v < 0)
-                            throw std::runtime_error("symbol margins must be nonnegative");
-                    } else
-                        throw std::runtime_error("unsupported syminfo key: " + key);
-                    if (key == "mintick")
-                        symbol<decltype(&strategy_set_syminfo_mintick)>(
-                            "strategy_set_syminfo_mintick")(state, v);
-                    else if (key == "pointvalue")
-                        symbol<decltype(&strategy_set_syminfo_pointvalue)>(
-                            "strategy_set_syminfo_pointvalue")(state, v);
-                    else
-                        symbol<decltype(&strategy_set_syminfo_metadata)>(
-                            "strategy_set_syminfo_metadata")(state, key.c_str(), v);
-                }
+            auto contract_fn = optional_symbol<decltype(&strategy_execution_contract)>(
+                "strategy_execution_contract");
+            contract = 1;
+            if (contract_fn) {
+                contract = contract_fn(state);
+                if (contract != 1 && contract != 2)
+                    throw std::runtime_error("unknown strategy execution contract");
             }
-            auto begin = symbol<decltype(&strategy_stream_begin)>("strategy_stream_begin");
-            check(begin(state, warmup.data(), static_cast<int>(warmup.size()), c.input_tf.c_str(),
-                        c.script_tf.c_str()));
-            clear(state);
+            configure_native_ = optional_symbol<decltype(&strategy_configure_native_v1)>(
+                "strategy_configure_native_v1");
+            has_configure_native = configure_native_ != nullptr;
         } catch (...) {
-            if (state && free)
-                free(state);
-            state = nullptr;
-            dlclose(library_);
-            library_ = nullptr;
+            release();
             throw;
         }
     }
-    ~Strategy() {
-        if (state && free)
-            free(state);
-        if (library_)
-            dlclose(library_);
-    }
-    Strategy(const Strategy &) = delete;
-    Strategy &operator=(const Strategy &) = delete;
-    void check(int rc) {
-        if (rc != 0) {
-            const char *e = error(state);
-            throw std::runtime_error(std::string("native stream refused: ") +
-                                     (e ? e : "unknown error"));
+    void require_contract(const Config &c) const {
+        if (c.native.present) {
+            if (contract != 2)
+                throw std::runtime_error("native-config requires NativeMarketV1");
+            if (!has_configure_native)
+                throw std::runtime_error(
+                    "compiled strategy lacks native ABI symbol: strategy_configure_native_v1");
+        } else if (contract == 2) {
+            throw std::runtime_error("native strategy requires --native-config");
         }
+    }
+    void configure(const Config &c) {
+        if (c.native.present) {
+            pf_native_run_spec_v1 spec{};
+            spec.struct_size = sizeof(spec);
+            spec.session_key = c.native.session_key.c_str();
+            spec.run_number = c.native.run_number;
+            spec.input_tf = c.native.input_tf.c_str();
+            spec.script_tf = c.native.script_tf.c_str();
+            spec.ticker = c.native.ticker.c_str();
+            spec.tickerid = c.native.tickerid.c_str();
+            spec.type = c.native.type.c_str();
+            spec.currency = c.native.currency.c_str();
+            spec.basecurrency = c.native.basecurrency.c_str();
+            spec.description = c.native.description.c_str();
+            spec.volumetype = c.native.volumetype.c_str();
+            spec.timezone = c.native.timezone.c_str();
+            spec.session = c.native.session.c_str();
+            spec.chart_timezone = c.native.chart_timezone.c_str();
+            spec.initial_capital = c.native.initial_capital;
+            spec.point_value = c.native.point_value;
+            spec.account_fx = c.native.account_fx;
+            spec.price_tick = c.native.price_tick;
+            spec.slippage_ticks = c.native.slippage_ticks;
+            spec.fee_kind = c.native.fee_kind;
+            spec.fee_value = c.native.fee_value;
+            spec.optional_mask = c.native.optional_mask;
+            spec.close_execution = c.native.close_execution;
+            spec.allowed_open_directions = c.native.allowed_open_directions;
+            spec.quantity_grid = c.native.quantity_grid;
+            spec.max_abs_units = c.native.max_abs_units;
+            spec.initial_margin_fraction = c.native.initial_margin_fraction;
+            spec.max_open_lots = c.native.max_open_lots;
+            if (configure_native_(state, &spec) != 0) {
+                const char *e = error(state);
+                throw std::runtime_error(std::string("native configure refused: ") +
+                                         (e ? e : "unknown error"));
+            }
+            return;
+        }
+        auto set_input = symbol<decltype(&strategy_set_input)>("strategy_set_input");
+        auto set_override = symbol<decltype(&strategy_set_override)>("strategy_set_override");
+        for (const auto &[k, v] : c.inputs)
+            set_input(state, k.c_str(), v.c_str());
+        for (const auto &[k, v] : c.overrides)
+            set_override(state, k.c_str(), v.c_str());
+        symbol<decltype(&strategy_set_syminfo_timezone)>("strategy_set_syminfo_timezone")(
+            state, c.timezone.c_str());
+        symbol<decltype(&strategy_set_chart_timezone)>("strategy_set_chart_timezone")(
+            state, c.chart_timezone.c_str());
+        symbol<decltype(&strategy_set_syminfo_session)>("strategy_set_syminfo_session")(
+            state, c.session.c_str());
+        auto set_string =
+            symbol<decltype(&strategy_set_syminfo_string)>("strategy_set_syminfo_string");
+        if (set_string(state, "tickerid", c.symbol.c_str()) != 0)
+            throw std::runtime_error("strategy rejected tickerid");
+        auto ticker = c.symbol.substr(
+            c.symbol.find(':') == std::string::npos ? 0 : c.symbol.find(':') + 1);
+        if (set_string(state, "ticker", ticker.c_str()) != 0)
+            throw std::runtime_error("strategy rejected ticker");
+        for (const auto &[key, value] : c.syminfo) {
+            if (key == "type" || key == "currency" || key == "basecurrency" ||
+                key == "description" || key == "volumetype") {
+                if (set_string(state, key.c_str(), value.c_str()) != 0)
+                    throw std::runtime_error("strategy rejected string metadata");
+            } else {
+                double v = parse_json(value).real();
+                if (key == "mintick" || key == "pointvalue" || key == "qty_step") {
+                    if (v <= 0)
+                        throw std::runtime_error(
+                            "symbol tick/point/quantity steps must be positive");
+                } else if (key == "margin_long" || key == "margin_short") {
+                    if (v < 0)
+                        throw std::runtime_error("symbol margins must be nonnegative");
+                } else
+                    throw std::runtime_error("unsupported syminfo key: " + key);
+                if (key == "mintick")
+                    symbol<decltype(&strategy_set_syminfo_mintick)>("strategy_set_syminfo_mintick")(
+                        state, v);
+                else if (key == "pointvalue")
+                    symbol<decltype(&strategy_set_syminfo_pointvalue)>(
+                        "strategy_set_syminfo_pointvalue")(state, v);
+                else
+                    symbol<decltype(&strategy_set_syminfo_metadata)>(
+                        "strategy_set_syminfo_metadata")(state, key.c_str(), v);
+            }
+        }
+    }
+    void begin(const Config &c, const std::vector<pf_bar_t> &warmup) {
+        check(begin_(state, warmup.data(), static_cast<int>(warmup.size()), c.input_tf.c_str(),
+                     c.script_tf.c_str()));
+        clear(state);
     }
 };
 
@@ -515,37 +552,6 @@ void apply_record(Strategy &strategy, const Config &c, Cursor &cursor, const Jso
     for (const auto &event : events.items)
         apply(strategy, c, cursor, event);
 }
-std::string identity(const Config &c, const std::string &warmup, const std::string &library,
-                     const std::string &parser_bytes, const std::string &parser_config) {
-    Json j = Json::object({{"schema", Json::string("pineforge-native-ledger/v1")},
-                           {"library", Json::string(sha256_hex(library))},
-                           {"warmup", Json::string(sha256_hex(warmup))},
-                           {"mode", Json::string(c.mode)},
-                           {"input_tf", Json::string(c.input_tf)},
-                           {"script_tf", Json::string(c.script_tf)},
-                           {"session", Json::string(c.session)},
-                           {"timezone", Json::string(c.timezone)},
-                           {"chart_timezone", Json::string(c.chart_timezone)},
-                           {"symbol", Json::string(c.symbol)},
-                           {"name", Json::string(c.name)},
-                           {"webhook", Json::string(c.webhook)},
-                           {"parser", Json::string(sha256_hex(parser_bytes))},
-                           {"parser_config", Json::string(sha256_hex(parser_config))}});
-    Json input, overrides;
-    input.kind = overrides.kind = Json::Kind::Array;
-    for (const auto &[k, v] : c.inputs)
-        input.items.push_back(Json::object({{"key", Json::string(k)}, {"value", Json::string(v)}}));
-    for (const auto &[k, v] : c.overrides)
-        overrides.items.push_back(
-            Json::object({{"key", Json::string(k)}, {"value", Json::string(v)}}));
-    Json metadata = Json::object({});
-    for (const auto &[k, v] : c.syminfo)
-        metadata.members[k] = Json::string(v);
-    j.members["syminfo"] = metadata;
-    j.members["inputs"] = input;
-    j.members["overrides"] = overrides;
-    return sha256_hex(j.dump());
-}
 std::vector<Json> normalize(Parser *parser, const std::string &message) {
     if (!parser)
         return {parse_json(message)};
@@ -596,9 +602,26 @@ bool drain(Ledger &ledger, const HttpOptions &options, const Config &c, std::uin
     }
     return false;
 }
-int run(const Config &c) {
+LegacyIdentityFields legacy_fields(const Config &c) {
+    return {c.mode,     c.input_tf, c.script_tf, c.session, c.timezone, c.chart_timezone,
+            c.symbol,   c.name,     c.webhook,   c.inputs,  c.overrides, c.syminfo};
+}
+
+int run(Config c) {
+    if (!c.native_config.empty()) {
+        c.native = parse_native_config(read_file(c.native_config, MAX_FRAME));
+        NativeClockBindings clock{c.input_tf, c.script_tf, c.timezone, c.session,
+                                  c.chart_timezone, c.symbol, c.explicit_flags};
+        apply_native_config(clock, c.native);
+        c.input_tf = clock.input_tf;
+        c.script_tf = clock.script_tf;
+        c.timezone = clock.timezone;
+        c.session = clock.session;
+        c.chart_timezone = clock.chart_timezone;
+        c.symbol = clock.symbol;
+        validate_native_config(c.native);
+    }
     auto original = read_file(c.warmup, 512ULL * 1024 * 1024);
-    auto warmup = history(original);
     auto library = read_file(c.strategy, 512ULL * 1024 * 1024);
     std::string parser_bytes =
         c.parser_path.empty() ? "" : read_file(c.parser_path, 64ULL * 1024 * 1024);
@@ -610,13 +633,23 @@ int run(const Config &c) {
     if (!c.parser_path.empty() &&
         sha256_hex(read_file(c.parser_path, 64ULL * 1024 * 1024)) != sha256_hex(parser_bytes))
         throw std::runtime_error("parser library changed during initialization");
-    std::string deployment = identity(c, original, library, parser_bytes, parser_config);
-    Ledger ledger(c.ledger, deployment);
-    Strategy strategy(c, warmup);
-    Cursor cursor;
-    // Library bytes are identity-critical. Refuse replacement during dlopen.
+    Strategy strategy;
+    strategy.load(c.strategy);
     if (sha256_hex(read_file(c.strategy, 512ULL * 1024 * 1024)) != sha256_hex(library))
         throw std::runtime_error("strategy library changed during initialization");
+    strategy.require_contract(c);
+    auto warmup = history(original, c.native.present);
+    if (c.native.present)
+        require_native_warmup(c.native, warmup);
+    std::string deployment =
+        c.native.present
+            ? native_identity(c.native, c.mode, c.name, c.webhook, original, library, parser_bytes,
+                              parser_config)
+            : identity(legacy_fields(c), original, library, parser_bytes, parser_config);
+    Ledger ledger(c.ledger, deployment);
+    strategy.configure(c);
+    strategy.begin(c, warmup);
+    Cursor cursor;
     auto recorded = ledger.input_count();
     for (std::uint64_t i = 0; i < recorded; ++i) {
         if (stopped)
