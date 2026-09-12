@@ -1,14 +1,19 @@
-# Native market engine {#native_engine}
+# Native engine {#native_engine}
 
 @tableofcontents
 
-Hand-written C++ strategies can run a **standalone native market-order** path:
-one `NativeRunSpec`, one working request roster, one physical lot book, and
+Hand-written C++ strategies can run a **standalone native** path: one
+`NativeRunSpec`, one working request roster, one physical lot book, and
 close-only callbacks. Pine `strategy.*` commands, cap/priority adapters, default
 source sizing, and complete Pine policy extraction are **not** this surface.
-Codegen and source adapters select those policies separately. Resting
-limit/stop/bracket relationships are a later roadmap; do not infer them from
-this slice.
+Codegen and source adapters select those policies separately. Resting requests
+use the general host commands; request-value members live in
+`<pineforge/native_order.hpp>` and are not restated here.
+
+The resting-order lifecycle is implemented in the current R2 candidate;
+final merge acceptance, compatibility and CI verification are still
+pending. [Refactor progress](../native-refactor-progress.md) separates this
+candidate from the completed R2a scoped-settlement prerequisite.
 
 Subclass `pineforge::NativeStrategyHost`. Configure with `configure_native`,
 then `run` or `stream_*`. Submit from native begin/bar callbacks, or between
@@ -66,8 +71,13 @@ host high-water.
 events, ordinals, floor, or identity at the handoff.
 
 `last_error()` is presentation text. `native_state().failure` is the durable
-record (`code`, `operation`, optional `ordinal`, `discriminator`). See
-`NativeFailureCode` / `NativeFailureOperation` in `native_host.hpp`.
+record (`code`, `operation`, optional `ordinal`, `discriminator`, and
+allocation-free `context`). Cause/recipient/cursor facts use
+`NativeInRunCause` / `NativeInRunRecipient` / `NativeInRunCursor` selected by
+`NativeFailureContextKind`; identifiers belong to the failed spec's
+`RunIdentity` (`native_failure_context_in_run`, `native_failed_run_identity`).
+A foreign run is dropped, not relabeled. Failure copy/move does not allocate.
+See `NativeFailureCode` / `NativeFailureOperation` in `native_host.hpp`.
 
 ## NativeRunSpec
 
@@ -120,26 +130,40 @@ byte-identical** to the spec. Conflicting values are a preflight refusal:
 an unsupported source mutation (`Failed`). Magnifier/source-feed arguments are
 not native spec fields.
 
-## Market requests
+## Native requests
 
 From a native callback in `Batch` / `Warmup` / `Realtime`:
 
 ```cpp
+submit(request);
+replace(handle, request);
+cancel(handle);
 submit_market(request);
 replace_market(handle, request);
-cancel(handle);
 ```
 
+`submit` / `replace` are the complete host commands. `submit_market` /
+`replace_market` keep the existing market-only call sites and must reject
+nondefault trigger, capacity, owner, or group extras rather than drop them.
 Serialized external C++ calls may command only **between realtime inputs**,
 never reentrantly during input processing. There is no C request API in this
 slice.
 
-`native_order::Request` is `{ Action, label, comment }`. Label/comment are
-inert text. `Action` is:
+`native_order::Request` values belong to `native_order_v2`; identity types stay
+`native_order_v1`. Label/comment remain inert text. The market default path
+still constructs from:
 
 - `order_action::Transact{signed_units}` — finite nonzero
-- `order_action::Reduce{units}` — finite positive
+- `native_order::Reduce{native_order::ExplicitUnits{units}}` — finite positive
 - `execution::Flatten{}` — quantity-free whole-book close
+
+General requests also select typed `Market`, `Limit`, `Stop`, `StopLimit` or
+`Trail` triggers; `ImmediateRemaining` or per-point `PointBudget` capacity;
+and explicit owner/group relationships. Partial executions retain live
+remaining quantity. Owner-bound closes use committed opening exposure and
+cycle identity through scoped settlement. Group cancellation/reduction is
+caused by committed execution events. See the request header for the exact
+value types; source-specific Pine lowering remains codegen/adapter work.
 
 A `quantity_grid`, when present, admits Transact/Reduce quantities on the
 exact binary64 grid in `native_order.hpp`. Flatten is not gridded. Rejection
@@ -153,8 +177,8 @@ does not rewrite the attempted bits.
 - `Rejected` — rejection ordinal, no handle (`InvalidQuantity` / `OffGrid`).
 
 Fills appear later as `ExecutionAppliedEvent` on the same command history
-(`native_events(0)`). Matching walks live requests in acceptance/incarnation
-order at a matching driver point. Eligibility is
+(`native_events(0)`). Default market requests retain acceptance/incarnation
+priority at an eligible matching driver point. Their birth eligibility is
 `point_ordinal > birth.acceptance_ordinal` and
 `effective_time_ms >= birth.decision_time_lower_bound` (`point_eligible` in
 the header). A request accepted on bar *N* cannot fill on that bar’s already
@@ -167,8 +191,8 @@ absent, replaced, or already terminal → `NotWorking`. Foreign or malformed
 handle → `InvalidHandle`. Every outcome is an event. Commands never move
 lots or cash.
 
-At a matching point, Reduce/Flatten use **current** exposure, not the
-acceptance-cycle book: a flatten accepted while flat can still close a
+For independent market requests, Reduce/Flatten use **current** exposure,
+not the acceptance-cycle book: a flatten accepted while flat can still close a
 same-point opening that already filled. If the book is flat at execution,
 Reduce/Flatten terminalize `NoEffectEvent`: no execution identity, no fill,
 no fee, no physical action. `MatchRejectedEvent` is an event ordinal without
@@ -265,14 +289,20 @@ completed run with no events.
 Two driver models only: confirmed OHLCV and observed ticks. Mixing them on
 one stream is refused. Callbacks stay **close-only** (script-bar calculation).
 
-Confirmed script OHLC: modeled **Opening** at the first contributor’s actual
-open (**match**), high/low in the existing AUTO order (**excursion only**),
-close (**excursion only**), then calculation, then optional
-AfterCalculation close (**match**).
+Confirmed OHLC retains the modeled **Opening**, high/low in the existing
+AUTO order, close, calculation and optional AfterCalculation close sequence.
+Default market requests match at the modeled opening and eligible
+AfterCalculation close; high/low/close traversal updates their excursions.
+Resting requests additionally match along the remaining continuous modeled
+price segments. The earliest eligible hit is resolved before later hits;
+trigger activation, partial fills and newly eligible relationships retain
+their causal cursor. Geometric fractions keep the original point's time
+and identity rather than inventing intermediate timestamps.
 
 Observed tick: the real price at its timestamp/sequence (**match** /
 excursion). Sequence, when nonzero, must increase. Off-session **observed**
-prints are still delivered and may fill an eligible live request.
+prints are still delivered and may fill an eligible live request. Resting
+triggers evaluate each actual print without interpolating between prints.
 
 Quiet **tradable** interval with no prints: explicit **carried open** at that
 interval’s tradable open, last known price (**match** if eligible), then
@@ -303,7 +333,6 @@ These are existing refusals, not implied future features:
   entry/exit/cancel commands — native hosts latch `Failed`
   (`UnsupportedSource`) before mutation
 - C-level native request submit/replace/cancel
-- Limit, stop, trail, or bracket **relationships**
 
 Rebuild strategy libraries against this engine. An ABI-v4 module without the
 native contract is legacy and cannot take `--native-config`.
