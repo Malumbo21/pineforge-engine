@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Driver control-flow, config, aggregation, and receipt-reuse tests for ci_verify.
 
-Source guards, tool help, git object presence, compiler identity, and VERSION
-are real. Full engine configure/build/CTest is not substituted as a passing
+Source guards, tool help, compiler identity, and VERSION are real. The scripted
+driver has an explicit Git object inventory; a separate tiny Git fixture checks
+real object discovery. Full engine configure/build/CTest is not substituted as a passing
 root verification — those stages are scripted here so failure aggregation and
 ordering can be asserted. Root must still run the actual profiles.
 """
@@ -12,8 +13,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import ci_verify
 from ci_verify import (
@@ -91,11 +94,16 @@ class Scripted:
             return default_runner(argv, extra_env=None, timeout=timeout,
                                   combine_stderr=True, stream_output=False)
         if argv[0] == 'git' and 'cat-file' in argv:
-            key = 'prior-cat-file' if PRIOR_COMMIT + '^{commit}' in argv else 'cat-file'
-            if key in self.exits:
-                return Completed(int(self.exits[key]), b'', b'')
-            return default_runner(argv, extra_env=None, timeout=timeout,
-                                  combine_stderr=True, stream_output=False)
+            if PRIOR_COMMIT + '^{commit}' in argv:
+                key = 'prior-cat-file'
+            elif BASE_COMMIT + '^{commit}' in argv:
+                key = 'cat-file'
+            else:
+                return Completed(128, b'', b'unknown fixture object\n')
+            # Control-flow tests start with both providers present; individual
+            # tests explicitly remove one. Never depend on checkout depth or
+            # on a previous full verifier run having fetched old commits.
+            return Completed(int(self.exits.get(key, 0)), b'', b'')
         if argv[0] == 'git' and 'fetch' in argv:
             key = 'prior-fetch' if PRIOR_COMMIT in argv else 'fetch'
             return Completed(int(self.exits.get(key, 0)), b'fetched\n', b'')
@@ -126,6 +134,9 @@ class Scripted:
         if argv[0] == 'cmake' and '--install' in argv:
             return self._install()
         if argv[0] == 'ctest':
+            if self.exits.get('actual_empty_ctest'):
+                return default_runner(argv, extra_env=extra_env, timeout=timeout,
+                                      combine_stderr=combine_stderr, stream_output=False)
             env_ok = True
             if self.profile == 'sanitizers':
                 env_ok = extra_env == SANITIZER_RUN_ENV
@@ -160,6 +171,7 @@ class Scripted:
             'PINEFORGE_BUILD_LIVE_RUNNER': live,
             'PINEFORGE_ENABLE_SANITIZERS': sanitizers,
             'PINEFORGE_VERSION_SOURCE': 'FILE',
+            'Python3_EXECUTABLE': self.exits.get('cache_python', sys.executable),
         }
         if self.exits.get('cache_version_source'):
             values['PINEFORGE_VERSION_SOURCE'] = self.exits['cache_version_source']
@@ -173,6 +185,10 @@ class Scripted:
         if code != 0:
             return Completed(code, b'', b'configure failed\n')
         write_cache(self.build_dir / 'CMakeCache.txt', self._cache_values())
+        if self.exits.get('actual_empty_ctest'):
+            # A real, empty CTest inventory proves the no-test exit policy.
+            # Configure/build remain scripted; no engine executable is run.
+            (self.build_dir / 'CTestTestfile.cmake').write_text('# deliberately empty inventory\n')
         if self.profile == 'sanitizers':
             commands = [{
                 'directory': str(self.build_dir),
@@ -523,7 +539,71 @@ def read_cache_for_test(path: Path) -> dict[str, str]:
     return read_cache(path)
 
 
+class GitObjectDiscovery(unittest.TestCase):
+    def test_real_object_lookup_uses_the_supplied_repository(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            def git(*args):
+                result = default_runner(['git', '-C', temporary, *args], stream_output=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout.decode().strip()
+            git('init', '--quiet')
+            self.assertFalse(ci_verify.pinned_object_present(source, default_runner, '0' * 40))
+            git('-c', 'user.name=CI fixture', '-c', 'user.email=ci@example.invalid',
+                '-c', 'commit.gpgsign=false', 'commit', '--quiet', '--allow-empty', '-m', 'fixture')
+            commit = git('rev-parse', 'HEAD')
+            self.assertTrue(ci_verify.pinned_object_present(source, default_runner, commit))
+            self.assertFalse(ci_verify.pinned_object_present(source, default_runner, BASE_COMMIT))
+
+    def test_scripted_inventory_does_not_read_ambient_git_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)  # deliberately not a Git repository
+            scripted = Scripted(source / 'build', source)
+            for commit in (BASE_COMMIT, PRIOR_COMMIT):
+                self.assertTrue(ci_verify.pinned_object_present(source, scripted, commit))
+            self.assertFalse(ci_verify.pinned_object_present(source, scripted, '0' * 40))
+
+
 class DriverOrderingAndAggregation(unittest.TestCase):
+    def test_configure_binds_invoking_python_without_resolving_venv_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            entry = Path(temporary) / 'venv' / 'bin' / 'python'
+            entry.parent.mkdir(parents=True)
+            entry.symlink_to(sys.executable)
+            with mock.patch.object(ci_verify.sys, 'executable', str(entry)):
+                cfg = ci_verify.build_config(['release', '--build-dir', str(Path(temporary) / 'build')])
+                definitions = cmake_cache_definitions(cfg)
+                self.assertEqual(definitions.get('Python3_EXECUTABLE'), str(entry))
+                self.assertNotEqual(definitions['Python3_EXECUTABLE'], str(entry.resolve()))
+
+    def test_different_configured_python_refuses_before_build(self):
+        code, summary, scripted, _ = self.run_profile(cache_python='/not-the-invoking-python')
+        self.assertEqual(code, 1)
+        self.assertIn('profile-options', failure_stages(summary))
+        self.assertNotIn('build', scripted.names())
+        self.assertIn('Python3_EXECUTABLE', summary['failures'][0]['error'])
+
+    def test_empty_inventory_fails_real_ctest_without_hiding_package_checks(self):
+        code, summary, scripted, build_dir = self.run_profile(actual_empty_ctest=True)
+        self.assertEqual(code, 1)
+        self.assertIn('ctest', failure_stages(summary))
+        self.assertIn('install', scripted.names())
+        self.assertIn('smoke-version', scripted.names())
+        self.assertIn('No tests were found', (build_dir / 'ci-logs/ctest.log').read_text())
+        ctest = next(argv for argv in scripted.calls if argv[0] == 'ctest' and '--test-dir' in argv)
+        self.assertIn('--no-tests=error', ctest)
+
+    def test_real_empty_ctest_default_succeeds_but_strict_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            (Path(temporary) / 'CTestTestfile.cmake').write_text('# deliberately empty inventory\n')
+            argv = ['ctest', '--test-dir', temporary]
+            default = default_runner(argv, stream_output=False)
+            strict = default_runner([*argv, '--no-tests=error'], stream_output=False)
+        self.assertEqual(default.returncode, 0, default.stdout)
+        self.assertNotEqual(strict.returncode, 0)
+        self.assertIn(b'No tests were found', default.stdout + default.stderr)
+        self.assertIn(b'No tests were found', strict.stdout + strict.stderr)
+
     def test_local_ccache_uses_content_identity(self):
         seen = []
         def runner(argv, **kwargs):
