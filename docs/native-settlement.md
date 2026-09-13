@@ -36,6 +36,73 @@ epsilon silently discards it. `Flatten` explicitly closes all lots and avoids
 using rounded aggregate equality to mean a whole-book close. Quantities whose
 changes cannot be represented are refused before settlement.
 
+The source `execute_partial_exit_qty` adapter retains its existing `1e-10`
+FIFO endpoint policy. After its existing whole-book Flatten check, it may
+translate a quantity ending at an interior whole-lot prefix into one selected
+Flatten. It walks physical lots in FIFO order, stops before the next lot once
+the source endpoint is reached, and selects complete opening incarnations,
+independently of the logical order label that supplied the close quantity.
+A genuine partial lot, an unowned selected lot, or an opening with a fragment
+outside the prefix keeps the original scalar Reduce path. Selected Flatten
+closes the exact live quantities and all their remaining paid entry costs in
+one execution; it does not reproduce historical residual-cost discards.
+The native Reduce contract, entry-scoped adapters and transaction-flow requests
+retain their existing behavior. This source translation requires separate
+compatibility measurement; it does not establish that every observed extra
+trade row has the same cause.
+
+## Reversal to an exact exposure
+
+`execution::reverse_to_v1::ReverseTo{signed_units}`, declared in
+`<pineforge/execution_reverse_to.hpp>`, closes the entire opposite live book
+and opens exactly `abs(signed_units)` units in the requested direction. Positive
+targets open long; negative targets open short. It is a separate, call-local
+resolved-execution value available to trusted C++ adapters through four protected,
+nonvirtual methods:
+
+| Method | Result and context |
+| --- | --- |
+| `inspect_native_reversal_v1(reversal, fill)` | Non-mutating `SettlementInspection` of physical effects and the current ticket. |
+| `project_native_reversal_v1(reversal, fill)` | Non-mutating `AccountEffectProjection`, including account effects and the next cycle without consuming it. |
+| `settle_native_reversal_at_v1(reversal, fill, context)` | `Result` from settlement using the supplied `PhysicalExecutionContext` and empty lifecycle effects. |
+| `settle_reversal_with_lifecycle_v1(reversal, fill, lifecycle)` | `Result` from settlement using the engine's current time, interval and preceding exit-path facts with supplied transient lifecycle effects. |
+
+For example, reversing a held long position of `1` unit to a short target of
+`0.1` opens the exact binary64 quantity supplied as `-0.1`. The opening quantity
+is never reconstructed by adding the old position to the target and subtracting
+the closed position. Every existing lot closes in roster order using whole-lot
+Flatten allocation, and one new lot opens at the same resolved `Fill::price`.
+Close and open effects share one current ticket and the existing financial
+commit owner. No selection or partial-close scope participates in this seam.
+
+A valid call requires a nonflat book opposite to a finite, nonzero target.
+Zero or nonfinite targets return `InvalidQuantity`; a flat or same-side book
+returns `InvalidCloseTarget`; malformed physical books return `InvalidBook`.
+There is no valid no-effect reversal. Callers use `Flatten` to close without
+opening. If finite closed and opening quantities have a nonfinite gross sum,
+the call returns `UnrepresentableQuantity` before quoting fees. A tiny target
+such as `0.1` against a held quantity of `1e16` remains valid even when their
+floating-point sum absorbs the target: after all old lots close, the exact new
+quantity is representable on its own. Existing accounting, lifecycle and
+sequence preflight checks still apply before effects.
+
+Inspection, projection and settlement share allocation and fee calculations.
+Successful `opened_units` and projected `signed_units_after` preserve the signed
+target bits; the resulting book contains one lot of exactly its absolute size.
+Projection includes the opening's paid cost once and peeks the fresh cycle;
+settlement revalidates the live book and consumes that cycle when it opens.
+Invalid projections contain no usable account quote. These values grant no
+saved or replayable settlement authority.
+
+`Transact` continues to describe signed transaction flow, including its existing
+opposite-book remainder arithmetic. Native queued requests and their action and
+event algebra are unchanged; `ReverseTo` is not an `Action` or request variant.
+The source F7 reversal adapter uses this seam after resolving its opening size.
+Other flow callers, including F8, retain `Transact`. This opening-intent repair
+does not establish that the seven additional trade rows or the EURUSD (ERA)
+quantity/margin differences observed during refactor verification are repaired;
+those remain separate compatibility acceptance work.
+
 ## Costs and marked equity
 
 Every opening lot receives its paid entry commission before its entry
@@ -70,13 +137,40 @@ PnL, minus remaining paid entry costs of every fee type. At an unchanged mark,
 a native execution decreases this value by its current charge, subject to
 ordinary floating-point rounding. A rebate increases it.
 
+## Selected exposure and account projection
+
+`execution::SelectedOpeningSet` selects one or more opening identities in the
+current position cycle. The separately named selected settlement methods accept
+it by const reference; it is not another `CloseScope` alternative or a queued
+request field. All fragments of each selected opening participate in roster FIFO
+order. Empty sets, zero or duplicate identities, missing openings and stale cycles
+are refused before effects. Source adapters construct distinct identities from
+`from_entry` or other source predicates; the native owner does not interpret them.
+
+`project_native_settlement_v1`, `project_native_settlement_scoped_v1` and
+`project_native_settlement_selected_v1` quote the resulting physical and account
+facts without changing the engine. The projection includes realized balance,
+remaining paid entry costs, marked equity, signed exposure and resulting cycle.
+It includes unselected surviving lots and any prospective opening's paid cost.
+A valid no-effect action quotes the unchanged book at the supplied mark; invalid
+input supplies no usable quote. An unavailable fresh cycle throws without
+consuming it. Same-side additions retain the existing cycle.
+
+Projection and settlement share allocation and fee logic. Realized balance adds
+close-row PnL in commit order, and marked equity applies each resulting lot's mark
+and paid cost in roster order. A projection is data, not commit authority: later
+settlement revalidates against the current book. Source percent sizing can consume
+a close-only projection's equity before resolving one reversal opening quantity.
+
 ## Integration and limits
 
-The kernel currently serves full market exits, the close-opposite-then-enter
-reversal family, and selected frozen-transaction and same-side materialization
-paths. Existing source scheduling and dust decisions remain at their call
-sites. The reversal helper consumes one already-resolved `Fill` and one current
-fee; it does not slip again. `compat::pine` suspension selection stays at the
+The kernel serves native execution and the source adapters' full, partial,
+bound and percent closes, scratch fills, reversals, RAW orders and opening/add
+paths. Callers resolve source scheduling, quantity grids, price and slot policy;
+the owner applies the physical effects and accounting once. A separately matched
+scratch fill remains its own execution. Reversal closing and opening share one
+already-resolved price and one current ticket.
+`compat::pine` suspension selection stays at the
 replacement caller. `settle_resolved_execution` remains the original
 two-argument symbol and forwards empty effects to
 `settle_execution_with_lifecycle`, the protected seam that consumes transient
@@ -94,9 +188,9 @@ reallocate `pending_orders_`. Native settlement does not recognize source
 cases, rewrite supplied window/barrier facts, or install a callback/plan.
 Migrated frozen transactions and the
 final short-seed crossing settle their close/open effects in one native call.
-Other legacy close loops are not yet
-grouped into one parent execution; their per-row current ticket behavior is
-not a claim about the native contract.
+Production fill paths no longer use the old per-row close loops as a separate
+accounting owner. Historical private helpers remain for source compatibility and
+tests; they are not an alternate production execution path.
 
 The shared close builder now consumes historical entry costs. This changes
 the former reconstruction that converted both commission legs at exit-time
@@ -114,6 +208,7 @@ lifecycle exceptions abort the owning run; callers must discard that failed
 run rather than retry a partially committed execution in place. Strong
 rollback on allocation failure is not promised.
 
-The work does not remove `ShortSeedCollisionRole` or complete migration to a
-generic queued order machine. Existing executable state remains represented
-in ABI projections and fingerprints.
+The work retains `ShortSeedCollisionRole` while its source-policy consumers
+remain. Admission, source day/quota counters, script-visible observations and
+complete Pine lowering remain separate refactor work. Existing executable state
+remains represented in ABI projections and fingerprints.
