@@ -1,7 +1,8 @@
 # Standalone native engine refactor
 
-Status at 2026-09-13: **4 of 9 roadmap phases complete (44%)**. This counts
-completed phases; it is not an estimate of elapsed work or remaining time.
+Status at 2026-09-14: R4-A is complete; R4-B native execution terms are in
+implementation. The table records acceptance status, not elapsed work or a
+forecast.
 
 The acceptance boundary is a standalone C++ backtest and forward-execution
 state machine. Codegen and explicit adapters own PineScript policy. During
@@ -12,19 +13,19 @@ improvement resumes after the final native audit.
 
 | Phase | Scope | Status |
 | --- | --- | --- |
-| R0 | Native settlement and CI convergence | Complete, [PR #241](https://github.com/pineforge-4pass/pineforge-engine/pull/241) |
-| R1 | Native market orders, host, drivers, calendar and forward runner | Complete, [PR #243](https://github.com/pineforge-4pass/pineforge-engine/pull/243) |
-| R2 | Resting orders, partial execution, owner-bound children and group effects | Complete, [PR #246](https://github.com/pineforge-4pass/pineforge-engine/pull/246) |
-| R3 | Accounting, admission, risk and observation ownership | Accounting implementation in progress; admission/risk/observation remain open |
-| R3a | Reversal execution and lifecycle settlement | Complete, [PR #242](https://github.com/pineforge-4pass/pineforge-engine/pull/242) |
-| R3b | Migrate remaining physical fill paths to shared settlement | Implementation in progress |
-| R4 | Complete codegen/adapter policy ownership and native independence | Open |
+| R0–R3a | Native settlement, resting requests, scoped settlement and lifecycle prerequisites | Complete; retained as the native foundation |
+| R3b | Shared settlement fill migration | Complete ([PR #247](https://github.com/pineforge-4pass/pineforge-engine/pull/247)) |
+| R3 observation | Source-day observation isolation | Complete ([PR #248](https://github.com/pineforge-4pass/pineforge-engine/pull/248)) |
+| R4-A | Selected closes, current-point execution, native run specification and forward lifecycle | Complete ([PR #250](https://github.com/pineforge-4pass/pineforge-engine/pull/250)) |
+| R4-B | Host-sized terms, exact reversal, precommit view, immutable native FX curve, ABI fencing, example and docs | In implementation; no R4 acceptance claim |
+| Slice B | Source-layer cut, including the generic native FX broker-open epoch clock | Not started |
+| Slice C | Pine compatibility adapter lowering onto the native seams | Not started |
 | R5 | Final requirement and compatibility audit | Open |
 | R6 | Resume the parity improvement campaign after the audit | Queued |
 
-These are the nine phases in the campaign ledger, including the queued
-return to parity improvement. No R2 design document or partial implementation
-marks R2 complete.
+The campaign ledger still retains its historical sub-phases. A design document,
+partial implementation, example, or test oracle never by itself marks a phase
+accepted.
 
 ## Accepted scoped-settlement prerequisite
 
@@ -68,10 +69,11 @@ PR #246 completed the native resting-order contract:
    replacement and exhaustion finish their dependency cleanup before a
    command returns. One opening request may own several physical fragments.
    Canceling its working remainder does not undo committed exposure.
-3. Request/core/event values use `native_order_v2`; identity values remain
-   `native_order_v1`. Engine, pending, host and consumer C++ boundaries move
-   together to epoch 13, with broker/stream hash version 13. Existing native
-   run-spec, calendar/driver value domains and C ABI 4 prefixes remain.
+3. PR #246's historical baseline used `native_order_v2` for request/core/event
+   values; identity values remained `native_order_v1`. Engine, pending, host
+   and consumer C++ boundaries were at epoch 13, with broker/stream hash version
+   13. Existing native run-spec, calendar/driver value domains and C ABI 4
+   prefixes remained.
 
 The local Release suite and separate native acceptance checks pass. One
 WebSocket transport test is skipped when the selected macOS libcurl lacks
@@ -103,23 +105,27 @@ The native R2 boundary is pinned; complete Pine lowering remains mandatory
 R4 work. The parity-improvement campaign remains paused through the final
 native audit.
 
-## Current R3 accounting and fill migration
+## Current R4-B epoch baseline
 
-The next implementation brings the remaining partial, bound, percent, scratch,
-reversal, RAW and open/add fill paths onto the shared settlement owner. A
-transient set of opening identities selects physical exposure without putting
-Pine `from_entry` strings into the kernel. A non-applying account projection
-supplies post-close equity to source sizing before one resolved reversal.
+The current R4-B baseline uses `native_order_v4`, engine/host
+`engine_script_run_v15`, `native-consumer/v6`, and broker/stream version 15.
+Identity values remain `native_order_v1`; native run-spec and calendar remain
+v1, the driver remains v4, and `PF_ABI_VERSION` remains 4.
 
-The native owner retains historical paid costs, one current execution ticket,
-physical residual quantities and deterministic observations. Adapters retain
-quantity provenance, source slot policy and the existing exit-ordering rules.
-Existing native request/event layouts and C ABI 4 remain stable. This work
-requires implementation, native and real-caller tests, independent review and
-the full publication proof below before R3b can be marked complete.
+## Completed R3 settlement and observation milestones
 
-R3's remaining admission, quota/day clocks, source counters and physical versus
-script-visible observation ownership stay open and must finish before R4.
+PR #247 completed R3b shared settlement fill migration. It moved partial,
+bound, percent, scratch, reversal, RAW and open/add fill paths onto
+the shared native settlement owner while retaining historical paid costs, one
+current execution ticket, physical residual quantities, and the established
+source-policy boundaries.
+
+PR #248 completed R3 source-day observation isolation. Native settlement and
+financial counter checks are independent of source-day state; source
+coordinators retain their preflight order and observe only committed rows.
+
+These completed R3 milestones do not make an R4 acceptance claim. R4-B remains
+in implementation as recorded above.
 
 ## Publication and acceptance
 

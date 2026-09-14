@@ -159,6 +159,12 @@ uint64_t f64_bits(double x) {
     return bits;
 }
 
+double bits_to(uint64_t bits) {
+    double value = 0.0;
+    std::memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
 std::string unsupported_number(double x) {
     const char* tag = "nonfinite";
     if (std::isnan(x)) tag = "NaN";
@@ -327,6 +333,16 @@ std::string action_json(const Request& request) {
             out << "{\"type\":\"Reduce\",";
             append_f64(out, "units", units ? units->units : 0.0);
             out << "}";
+        } else if constexpr (std::is_same_v<T, native_order::ReverseTo>) {
+            out << "{\"type\":\"ReverseTo\",\"signedTargetBits\":"
+                << json_escape(hex64(f64_bits(action.signed_units))) << "}";
+        } else if constexpr (std::is_same_v<T, native_order::HostSized>) {
+            out << "{\"type\":\"HostSized\",\"kind\":"
+                << json_u64(static_cast<uint64_t>(action.kind));
+            if (action.side) out << ",\"side\":"
+                                 << json_u64(static_cast<uint64_t>(*action.side));
+            else out << ",\"sideUnspecified\":true";
+            out << "}";
         } else {
             out << "{\"type\":\"Flatten\"}";
         }
@@ -357,6 +373,9 @@ const char* command_kind_name(const CommandEvent& event) {
         }
         if constexpr (std::is_same_v<T, native_order::QuantityBoundEvent>) return "QuantityBound";
         if constexpr (std::is_same_v<T, native_order::ArmedEvent>) return "Armed";
+        if constexpr (std::is_same_v<T, native_order::TermsResolvedEvent>) {
+            return "TermsResolved";
+        }
         return "Unknown";
     }, event);
 }
@@ -372,15 +391,16 @@ bool r1_command_event(const CommandEvent& event) {
         || std::strcmp(kind, "InvalidHandle") == 0
         || std::strcmp(kind, "NoEffect") == 0
         || std::strcmp(kind, "MatchRejected") == 0
-        || std::strcmp(kind, "ExecutionApplied") == 0;
+        || std::strcmp(kind, "ExecutionApplied") == 0
+        || std::strcmp(kind, "TermsResolved") == 0;
 }
 
 uint64_t command_ordinal(const CommandEvent& event) {
     return std::visit([](const auto& payload) { return payload.ordinal; }, event);
 }
 
-double request_quantity(const Request& request) {
-    return std::visit([](const auto& action) -> double {
+std::optional<double> request_quantity(const Request& request) {
+    return std::visit([](const auto& action) -> std::optional<double> {
         using T = std::decay_t<decltype(action)>;
         if constexpr (std::is_same_v<T, Transact>) return action.signed_units;
         if constexpr (std::is_same_v<T, native_order::Reduce>) {
@@ -389,8 +409,90 @@ double request_quantity(const Request& request) {
             }
             return 0.0;
         }
+        if constexpr (std::is_same_v<T, native_order::ReverseTo>) return action.signed_units;
+        if constexpr (std::is_same_v<T, native_order::HostSized>) return std::nullopt;
         return 0.0;
     }, request.intent);
+}
+
+std::string terms_json(const native_order::ExecutionTerms& terms) {
+    std::ostringstream out;
+    out << "{\"resolvedPriceBits\":" << json_escape(hex64(f64_bits(terms.resolved_price)));
+    if (terms.units) out << ",\"unitsBits\":" << json_escape(hex64(f64_bits(*terms.units)));
+    out << ",\"shape\":" << json_u64(static_cast<uint64_t>(terms.shape)) << "}";
+    return out.str();
+}
+
+std::string terms_run_json(const native_order::RunIdentity& run) {
+    return "{\"sessionKey\":" + json_escape(run.session_key)
+        + ",\"runNumber\":" + json_u64(run.run_number) + "}";
+}
+
+std::string terms_handle_json(const native_order::RequestHandle& handle) {
+    return "{\"run\":" + terms_run_json(handle.run)
+        + ",\"incarnation\":" + json_u64(handle.incarnation) + "}";
+}
+
+std::string terms_event_id_json(const native_order::EventId& id) {
+    return "{\"run\":" + terms_run_json(id.run)
+        + ",\"ordinal\":" + json_u64(id.ordinal) + "}";
+}
+
+std::string terms_projection_json(const native_order::RemainingProjection& value) {
+    std::ostringstream out;
+    out << "{\"index\":" << json_u64(value.index());
+    if (const auto* units = std::get_if<native_order::RemainingProjectionUnits>(&value)) {
+        out << ",\"unitsBits\":" << json_escape(hex64(f64_bits(units->q)));
+    }
+    out << "}";
+    return out.str();
+}
+
+std::string terms_allowance_json(const native_order::Allowance& value) {
+    std::ostringstream out;
+    out << "{\"index\":" << json_u64(value.index());
+    if (const auto* units = std::get_if<native_order::AllowanceUnits>(&value)) {
+        out << ",\"pointOrdinal\":" << json_u64(units->point_ordinal)
+            << ",\"initialBits\":" << json_escape(hex64(f64_bits(units->initial)))
+            << ",\"leftBits\":" << json_escape(hex64(f64_bits(units->left)));
+    } else if (const auto* all = std::get_if<native_order::AllowanceAllScope>(&value)) {
+        out << ",\"pointOrdinal\":" << json_u64(all->point_ordinal);
+    } else if (const auto* deferred = std::get_if<native_order::AllowanceDeferred>(&value)) {
+        out << ",\"pointOrdinal\":" << json_u64(deferred->point_ordinal);
+    }
+    out << "}";
+    return out.str();
+}
+
+std::string terms_receipt_json(const native_order::TermsResolvedEvent& event) {
+    std::ostringstream out;
+    out << "{\"definitionHandle\":" << terms_handle_json(event.handle())
+        << ",\"definitionBirth\":{\"acceptanceOrdinal\":"
+        << json_u64(event.birth().acceptance_ordinal)
+        << ",\"decisionTimeLowerBound\":" << json_i64(event.birth().decision_time_lower_bound)
+        << "}"
+        << ",\"cursor\":{\"coordinate\":" << coordinate_json(event.cursor.point)
+        << ",\"cursorTBits\":" << json_escape(hex64(f64_bits(event.cursor.t)))
+        << "}"
+        << ",\"priceKind\":" << json_u64(static_cast<uint64_t>(event.input.price_kind))
+        << ",\"sharedCursorCollision\":" << json_bool(event.input.shared_cursor_collision)
+        << ",\"rawPriceBits\":" << json_escape(hex64(f64_bits(event.input.raw_price)))
+        << ",\"defaultResolvedPriceBits\":"
+        << json_escape(hex64(f64_bits(event.input.default_resolved_price)))
+        << ",\"terms\":" << terms_json(event.input.terms)
+        << ",\"pendingTotalBits\":" << json_escape(hex64(f64_bits(event.pending_total)))
+        << ",\"effectiveDeductionBits\":"
+        << json_escape(hex64(f64_bits(event.effective_deduction)))
+        << ",\"remainingBefore\":" << terms_projection_json(event.remaining_before)
+        << ",\"remainingAfter\":" << terms_projection_json(event.remaining_after)
+        << ",\"allowanceAfter\":" << terms_allowance_json(event.allowance_after)
+        << ",\"priorIds\":[";
+    for (std::size_t i = 0; i < event.prior_adjustment_ids.size(); ++i) {
+        if (i) out << ",";
+        out << terms_event_id_json(event.prior_adjustment_ids[i]);
+    }
+    out << "]}";
+    return out.str();
 }
 
 NativeRunSpec spec(const char* input = "1", const char* script = "1") {
@@ -422,12 +524,20 @@ public:
     std::vector<NativeDecisionContext> contexts;
     std::vector<double> callback_positions;
     std::function<void(TraceHost&)> callback;
+    mutable std::function<native_order::ExecutionTerms(const NativeExecutionTermsFacts&)> resolver;
 
     TraceHost() {
         if (proof_capture) host_ordinal_ = next_host_ordinal++;
     }
 
     ~TraceHost() override { snapshot(); }
+
+    native_order::ExecutionTerms resolve_execution_terms(
+            const NativeExecutionTermsFacts& facts) const override {
+        if (resolver) return resolver(facts);
+        return {facts.default_resolved_price, std::nullopt,
+                native_order::OpeningShape::Transact};
+    }
 
     NativeSetupResult configure_native(const NativeRunSpec& value) {
         attempted_spec_ = value;
@@ -512,8 +622,8 @@ public:
         if (proof_capture) {
             std::ostringstream out;
             out << "{\"kind\":\"request\",\"ordinal\":" << json_u64(input_ordinal_++);
-            const double qty = request_quantity(request);
-            if (std::isfinite(qty)) out << ",\"quantity\":" << json_num(qty);
+            const auto qty = request_quantity(request);
+            if (qty && std::isfinite(*qty)) out << ",\"quantity\":" << json_num(*qty);
             out << ",\"calendar\":{\"hostOrdinal\":" << host_ordinal_
                 << ",\"label\":" << json_escape(request.label)
                 << ",\"comment\":" << json_escape(request.comment)
@@ -522,10 +632,40 @@ public:
                 << ",\"submitStatus\":"
                 << json_u64(static_cast<uint64_t>(result.status))
                 << ",\"eventOrdinal\":" << json_u64(result.event_ordinal);
-            if (!std::isfinite(qty)) {
-                out << ",\"quantity\":" << unsupported_number(qty);
+            if (qty && !std::isfinite(*qty)) {
+                out << ",\"quantity\":" << unsupported_number(*qty);
+            } else if (!qty) {
+                out << ",\"requestQuantityUnresolved\":true";
             }
             out << "}}";
+            input_items_.push_back(out.str());
+        }
+        return result;
+    }
+
+    SubmitResult submit(const Request& request) {
+        const auto result = NativeStrategyHost::submit(request);
+        const bool new_intent = std::holds_alternative<native_order::ReverseTo>(request.intent)
+            || std::holds_alternative<native_order::HostSized>(request.intent);
+        if (proof_capture && new_intent) {
+            const auto quantity = request_quantity(request);
+            std::ostringstream out;
+            out << "{\"kind\":\"request\",\"ordinal\":"
+                << json_u64(input_ordinal_++);
+            if (quantity) {
+                out << ",\"requestQuantityBits\":"
+                    << json_escape(hex64(f64_bits(*quantity)));
+            } else {
+                out << ",\"requestQuantityUnresolved\":true";
+            }
+            out << ",\"calendar\":{\"hostOrdinal\":" << host_ordinal_
+                << ",\"label\":" << json_escape(request.label)
+                << ",\"comment\":" << json_escape(request.comment)
+                << ",\"action\":" << action_json(request)
+                << ",\"admitted\":" << json_bool(result.status == SubmitStatus::Accepted)
+                << ",\"submitStatus\":"
+                << json_u64(static_cast<uint64_t>(result.status))
+                << ",\"eventOrdinal\":" << json_u64(result.event_ordinal) << "}}";
             input_items_.push_back(out.str());
         }
         return result;
@@ -658,6 +798,13 @@ private:
                 }
                 if (const auto* mr = std::get_if<MatchRejectedEvent>(&command)) {
                     out << ",\"reason\":" << json_u64(static_cast<uint64_t>(mr->reason));
+                    if (mr->attempted_terms) {
+                        out << ",\"attemptedTerms\":" << terms_json(*mr->attempted_terms);
+                    }
+                }
+                if (const auto* receipt = std::get_if<native_order::TermsResolvedEvent>(&command)) {
+                    out << ",\"termsReceipt\":" << terms_receipt_json(*receipt)
+                        << ",\"declaredAction\":" << action_json(receipt->request());
                 }
                 out << ",\"labels\":[\"host-" << host_ordinal_ << "\"]";
                 out << "}";
@@ -670,7 +817,9 @@ private:
                     effect << ",\"timestampMs\":" << json_i64(applied->effective_time_ms())
                            << ",\"provenance\":" << json_u64(applied->provenance())
                            << ",";
-                    append_f64(effect, "quantity", request_quantity(applied->request()));
+                    const auto quantity = request_quantity(applied->request());
+                    if (quantity) append_f64(effect, "quantity", *quantity);
+                    else effect << "\"requestQuantityUnresolved\":true";
                     effect << ",\"observations\":{\"hostOrdinal\":" << host_ordinal_
                            << ",\"resolvedPrice\":";
                     if (std::isfinite(applied->resolved_price))
@@ -683,7 +832,25 @@ private:
                     effect << ",\"openedLotIncarnation\":"
                            << json_u64(applied->opened_lot_incarnation)
                            << ",\"closedTradeCount\":"
-                           << json_u64(applied->closed_trade_count) << "}}";
+                           << json_u64(applied->closed_trade_count);
+                    if (std::holds_alternative<native_order::ReverseTo>(applied->request().intent)
+                        || std::holds_alternative<native_order::HostSized>(applied->request().intent)) {
+                        effect << ",\"closedUnitsBits\":"
+                               << json_escape(hex64(f64_bits(applied->closed_units)))
+                               << ",\"openedUnitsBits\":"
+                               << json_escape(hex64(f64_bits(applied->opened_units)))
+                               << ",\"filledWorkingBits\":"
+                               << json_escape(hex64(f64_bits(applied->filled_working)))
+                               << ",\"remainingBeforeIndex\":"
+                               << json_u64(applied->remaining_before.index())
+                               << ",\"remainingAfterIndex\":"
+                               << json_u64(applied->remaining_after.index())
+                               << ",\"allowanceBeforeIndex\":"
+                               << json_u64(applied->allowance_before.index())
+                               << ",\"allowanceAfterIndex\":"
+                               << json_u64(applied->allowance_after.index());
+                    }
+                    effect << "}}";
                     physical->push_back(effect.str());
                 }
             }
@@ -770,6 +937,13 @@ private:
                 if (const auto* mr = std::get_if<MatchRejectedEvent>(&command)) {
                     out << ",\"reason\":"
                         << json_u64(static_cast<uint64_t>(mr->reason));
+                    if (mr->attempted_terms) {
+                        out << ",\"attemptedTerms\":" << terms_json(*mr->attempted_terms);
+                    }
+                }
+                if (const auto* receipt = std::get_if<native_order::TermsResolvedEvent>(&command)) {
+                    out << ",\"termsReceipt\":" << terms_receipt_json(*receipt)
+                        << ",\"declaredAction\":" << action_json(receipt->request());
                 }
                 out << ",\"labels\":[\"host-" << host_ordinal_ << "\"]}";
                 snap.lifecycle.push_back(out.str());
@@ -1618,6 +1792,46 @@ void partial_end_does_not_seal_coarser_script() {
     }
 }
 
+void terms_resolved_lifecycle_fixture() {
+    TraceHost host;
+    bool submitted = false;
+    host.resolver = [](const NativeExecutionTermsFacts& facts) {
+        if (std::holds_alternative<native_order::HostSized>(facts.definition->request.intent)) {
+            return native_order::ExecutionTerms{facts.default_resolved_price, 1.0,
+                                                 native_order::OpeningShape::Transact};
+        }
+        return native_order::ExecutionTerms{facts.default_resolved_price, std::nullopt,
+                                             native_order::OpeningShape::Transact};
+    };
+    host.callback = [&](TraceHost& h) {
+        if (submitted) return;
+        submitted = true;
+        Request request;
+        request.intent = native_order::HostSized{native_order::HostSizedKind::Open,
+                                                  native_order::Side::Long};
+        request.label = "calendar-terms";
+        const auto result = h.submit(request);
+        CHECK(result.status == SubmitStatus::Accepted);
+    };
+    CHECK(host.configure_native(spec()).status == NativeSetupStatus::Applied);
+    const Bar bars[] = {{100, 100, 100, 100, 1, 0},
+                        {100, 100, 100, 100, 1, 60000}};
+    host.run(bars, 2);
+    CHECK(host.native_state().kind == NativeLifecycleKind::Completed);
+    bool found_terms = false;
+    for (const auto& event : host.native_events(0)) {
+        if (!event.command) continue;
+        if (const auto* receipt = std::get_if<native_order::TermsResolvedEvent>(&*event.command)) {
+            found_terms = true;
+            const auto encoded = terms_receipt_json(*receipt);
+            CHECK(encoded.find("definitionHandle") != std::string::npos);
+            CHECK(encoded.find("cursorTBits") != std::string::npos);
+            CHECK(encoded.find("allowanceAfter") != std::string::npos);
+        }
+    }
+    CHECK(found_terms);
+}
+
 ScenarioArt assemble_group(const char* id, bool passed) {
     ScenarioArt art;
     art.id = id;
@@ -1705,6 +1919,31 @@ void run_case(const char* id, const char* name, void (*body)()) {
     std::printf("%s [%s]\n", passed ? "PASS" : "FAIL", name);
     if (proof_capture) arts.push_back(assemble_group(id, passed));
 }
+
+void a_h3_calendar_new_value_serializers() {
+    Request reverse;
+    reverse.intent = native_order::ReverseTo{bits_to(0x3fb999999999999aULL)};
+    const auto reverse_action = action_json(reverse);
+    CHECK(reverse_action.find("ReverseTo") != std::string::npos);
+    CHECK(reverse_action.find("3fb999999999999a") != std::string::npos);
+    CHECK(request_quantity(reverse).has_value());
+    CHECK(f64_bits(*request_quantity(reverse)) == 0x3fb999999999999aULL);
+
+    Request sized;
+    sized.intent = native_order::HostSized{native_order::HostSizedKind::Open,
+                                            native_order::Side::Long};
+    const auto sized_action = action_json(sized);
+    CHECK(sized_action.find("HostSized") != std::string::npos);
+    CHECK(!request_quantity(sized));
+
+    native_order::ExecutionTerms terms;
+    terms.resolved_price = bits_to(0x7ff8000000000001ULL);
+    terms.units = bits_to(0x8000000000000000ULL);
+    terms.shape = native_order::OpeningShape::CloseOpposite;
+    const auto encoded = terms_json(terms);
+    CHECK(encoded.find("7ff8000000000001") != std::string::npos);
+    CHECK(encoded.find("8000000000000000") != std::string::npos);
+}
 } // namespace
 
 int main() {
@@ -1728,6 +1967,11 @@ int main() {
         proof_capture = true;
 #endif
     }
+
+    a_h3_calendar_new_value_serializers();
+
+    run_case("R4B-terms-resolved-lifecycle",
+             "R4-B TermsResolved lifecycle serializers", terms_resolved_lifecycle_fixture);
 
     run_case("C1-equal-timeframe-families-and-final-monthly-bars",
              "C1 equal timeframe families and final monthly bars",

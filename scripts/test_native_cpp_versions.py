@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """Mutation controls for native C++ ABI ownership; no compiler or engine runs."""
+import hashlib
 import json
+import re
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from check_native_cpp_versions import DRIVER_FORWARD, FILES, check_texts, load
+from check_aggregate_cpp_versions import body
+from check_native_cpp_versions import (
+    DRIVER_FORWARD, FILES, NATIVE_FX_CURVE_HEADER, NATIVE_FX_CURVE_SOURCE,
+    ROOT, authenticate_historical_host_manifests, check, check_fx_curve_introduced_at,
+    check_texts, load,
+)
 
 DATA = load()
 
@@ -19,8 +28,11 @@ class NativeVersions(unittest.TestCase):
             check_texts(changed)
 
     def test_current_command_and_preview_have_one_authority(self):
-        self.reject(FILES[8], 'native_order::RequestHandle target;',
-                    'native_order::RequestHandle target; std::optional<execution::SelectedOpeningSet> selected_close;')
+        self.reject(
+            FILES[8],
+            'struct NativeCurrentExecution {\n    native_order::RequestHandle target;',
+            'struct NativeCurrentExecution {\n    native_order::RequestHandle target; '
+            'std::optional<execution::SelectedOpeningSet> selected_close;')
         self.reject(FILES[8], 'std::optional<execution::Status> settlement_readiness;', '')
         self.reject(FILES[6], 'CurrentExecution = 8', 'CurrentExecution = 7')
         self.reject(FILES[6], 'Calculation = 7', 'Calculation = 9')
@@ -39,29 +51,29 @@ class NativeVersions(unittest.TestCase):
 
     def test_stale_wrapper(self):
         for path, namespace, stale in (
-            (FILES[0], "native_order_v3", "native_order_v1"),
-            (FILES[1], "native_order_v3", "native_order_v1"),
-            (FILES[11], "native_order_v1", "native_order_v3"),
+            (FILES[0], "native_order_v4", "native_order_v1"),
+            (FILES[1], "native_order_v4", "native_order_v1"),
+            (FILES[11], "native_order_v1", "native_order_v4"),
             (FILES[2], "native_calendar_v2", "native_calendar_v1"),
             (FILES[3], "native_calendar_v2", "native_calendar_v3"),
             (FILES[4], "native_run_spec_v1", "native_run_spec_v2"),
             (FILES[5], "native_run_spec_v1", "native_run_spec_v2"),
             (FILES[6], "native_driver_v4", "native_driver_v2"),
             (FILES[7], "native_driver_v4", "native_driver_v3"),
-            (FILES[8], "engine_script_run_v14", "engine_script_run_v12"),
-            (FILES[9], "engine_script_run_v14", "engine_script_run_v12"),
-            (FILES[10], "engine_script_run_v14", "engine_script_run_v12"),
+            (FILES[8], "engine_script_run_v15", "engine_script_run_v12"),
+            (FILES[9], "engine_script_run_v15", "engine_script_run_v12"),
+            (FILES[10], "engine_script_run_v15", "engine_script_run_v12"),
         ):
             with self.subTest(path=path, namespace=namespace):
                 self.reject(path, namespace, stale)
 
     def test_duplicate_wrapper(self):
         for path, namespace in (
-            (FILES[0], "native_order_v3"),
+            (FILES[0], "native_order_v4"),
             (FILES[2], "native_calendar_v2"),
             (FILES[4], "native_run_spec_v1"),
             (FILES[6], "native_driver_v4"),
-            (FILES[8], "engine_script_run_v14"),
+            (FILES[8], "engine_script_run_v15"),
             (FILES[11], "native_order_v1"),
         ):
             with self.subTest(path=path):
@@ -70,11 +82,11 @@ class NativeVersions(unittest.TestCase):
 
     def test_empty_namespace_is_not_ownership(self):
         for path, namespace in (
-            (FILES[0], "native_order_v3"),
+            (FILES[0], "native_order_v4"),
             (FILES[2], "native_calendar_v2"),
             (FILES[4], "native_run_spec_v1"),
             (FILES[6], "native_driver_v4"),
-            (FILES[8], "engine_script_run_v14"),
+            (FILES[8], "engine_script_run_v15"),
             (FILES[11], "native_order_v1"),
         ):
             with self.subTest(path=path):
@@ -83,10 +95,10 @@ class NativeVersions(unittest.TestCase):
 
     def test_comment_only_namespace_is_not_ownership(self):
         for path, namespace, decoy in (
-            (FILES[0], "native_order_v3", "struct WorkingRequestCore"),
+            (FILES[0], "native_order_v4", "struct WorkingRequestCore"),
             (FILES[11], "native_order_v1", "struct RunIdentity"),
             (FILES[2], "native_calendar_v2", "parse_timeframe NativeInterval"),
-            (FILES[8], "engine_script_run_v14", "class NativeStrategyHost"),
+            (FILES[8], "engine_script_run_v15", "class NativeStrategyHost"),
         ):
             with self.subTest(path=path):
                 self.reject(
@@ -196,8 +208,8 @@ class NativeVersions(unittest.TestCase):
         needle = "WorkingRequestCore::reset("
         self.assertIn(needle, changed[src])
         changed[src] = changed[src].replace(
-            "}  // inline namespace native_order_v3",
-            "}  // inline namespace native_order_v3\nvoid WorkingRequestCore::reset(RunIdentity) {}\n",
+            "}  // inline namespace native_order_v4",
+            "}  // inline namespace native_order_v4\nvoid WorkingRequestCore::reset(RunIdentity) {}\n",
             1)
         with self.assertRaises(ValueError):
             check_texts(changed)
@@ -213,7 +225,7 @@ class NativeVersions(unittest.TestCase):
             DRIVER_FORWARD,
             "inline namespace native_run_spec_v1 { struct NativeRunSpec {}; }")
 
-    def test_host_public_values_cannot_leave_v14(self):
+    def test_host_public_values_cannot_leave_v15(self):
         self.reject(FILES[8], "struct NativeStateView {", "} struct NativeStateView {")
         self.reject(FILES[8], "struct NativeFailure {", "} struct NativeFailure {")
         self.reject(FILES[8], "struct NativeFailureContext {", "} struct NativeFailureContext {")
@@ -225,8 +237,377 @@ class NativeVersions(unittest.TestCase):
             "")
         self.reject(
             FILES[6],
-            'kNativeConsumerSemanticVersion = "native-consumer/v5"',
+            'kNativeConsumerSemanticVersion = "native-consumer/v6"',
             'kNativeConsumerSemanticVersion = "native-consumer/v3"')
+
+    def test_terms_ownership_and_alias_shapes_are_exact(self):
+        for path, before, after in (
+            (FILES[0], "struct HostSized {", "struct MissingHostSized {"),
+            (FILES[0], "enum class HostSizedKind", "enum class MissingHostSizedKind"),
+            (FILES[0], "struct ReverseTo {", "struct MissingReverseTo {"),
+            (FILES[0], "struct RemainingDeferred {}", "struct MissingRemainingDeferred {}"),
+            (FILES[0], "struct RemainingProjectionDeferred {}", "struct MissingRemainingProjectionDeferred {}"),
+            (FILES[0], "struct AllowanceDeferred {", "struct MissingAllowanceDeferred {"),
+            (FILES[0], "enum class OpeningShape", "enum class MissingOpeningShape"),
+            (FILES[0], "struct ExecutionTerms {", "struct MissingExecutionTerms {"),
+            (FILES[0], "struct TermsResolvedInput {", "struct MissingTermsResolvedInput {"),
+            (FILES[0], "struct TermsResolvedEvent {", "struct MissingTermsResolvedEvent {"),
+            (FILES[0], "enum class NativeCandidatePriceKind", "enum class MissingNativeCandidatePriceKind"),
+            (FILES[0], "prepare_terms(const RequestHandle& target,", "prepare_terms_missing(const RequestHandle& target,"),
+            (FILES[0], "evaluated_allowance(const LiveRequest& live, uint64_t point)",
+             "evaluated_allowance_missing(const LiveRequest& live, uint64_t point)"),
+            (FILES[0], "effective_host_units(const PendingAdjustments& pending,",
+             "effective_host_units_missing(const PendingAdjustments& pending,"),
+            (FILES[8], "struct NativeExecutionTermsFacts {", "struct MissingNativeExecutionTermsFacts {"),
+            (FILES[8], "struct NativePrecommitView {", "struct MissingNativePrecommitView {"),
+            (FILES[8], "enum class NativePrecommitVerdict", "enum class MissingNativePrecommitVerdict"),
+            (FILES[8], "struct NativeFxCurveSetupResult {", "struct MissingNativeFxCurveSetupResult {"),
+            (FILES[8], "resolve_execution_terms(\n", "resolve_execution_terms_missing(\n"),
+            (FILES[8], "validate_execution_precommit(\n", "validate_execution_precommit_missing(\n"),
+            (FILES[8], "configure_native_fx_curve(const NativeFxCurve& curve)",
+             "configure_native_fx_curve_missing(const NativeFxCurve& curve)"),
+        ):
+            with self.subTest(before=before):
+                self.reject(path, before, after)
+
+        aliases = (
+            ("using OrderIntent = std::variant<Flatten, Reduce, Transact, ReverseTo, HostSized>;",
+             "using OrderIntent = std::variant<Flatten, Reduce, Transact, HostSized, ReverseTo>;"),
+            ("using Remaining = std::variant<RemainingUnbound, RemainingFlattenAll, RemainingUnits,\n"
+             "                               RemainingDeferred>;",
+             "using Remaining = std::variant<RemainingUnbound, RemainingFlattenAll, RemainingDeferred,\n"
+             "                               RemainingUnits>;"),
+            ("using RemainingProjection =\n        std::variant<RemainingProjectionUnbound, RemainingProjectionFlattenAll,\n"
+             "                     RemainingProjectionUnits, RemainingProjectionDeferred>;",
+             "using RemainingProjection =\n        std::variant<RemainingProjectionUnbound, RemainingProjectionFlattenAll,\n"
+             "                     RemainingProjectionDeferred, RemainingProjectionUnits>;"),
+            ("using Allowance = std::variant<AllowanceUnset, AllowanceUnits, AllowanceAllScope,\n"
+             "                               AllowanceDeferred>;",
+             "using Allowance = std::variant<AllowanceUnset, AllowanceUnits, AllowanceDeferred,\n"
+             "                               AllowanceAllScope>;"),
+            ("using ExecutionPlan = std::variant<execution::Flatten, order_action::Reduce,\n"
+             "                                   order_action::Transact, execution::ReverseTo>;",
+             "using ExecutionPlan = std::variant<execution::Flatten, order_action::Reduce,\n"
+             "                                   execution::ReverseTo, order_action::Transact>;"),
+        )
+        for before, after in aliases:
+            with self.subTest(alias=before.split('=', 1)[0]):
+                self.reject(FILES[0], before, after)
+
+        result = ("using NativeCurrentExecutionResult = std::variant<NativeCurrentRefusal,\n"
+                  "    native_order::ExecutionAppliedEvent, native_order::NoEffectEvent,\n"
+                  "    native_order::MatchRejectedEvent, native_order::CancelledEvent>;")
+        self.reject(FILES[8], result,
+                    result.replace(", native_order::CancelledEvent", ""))
+        self.reject(FILES[8], result,
+                    result.replace("native_order::NoEffectEvent,\n    native_order::MatchRejectedEvent",
+                                   "native_order::MatchRejectedEvent,\n    native_order::NoEffectEvent"))
+        self.reject(FILES[8], "native_order::CancelledEvent", "/* native_order::CancelledEvent */")
+
+        rejection = "std::optional<native_order::MatchRejectReason> terms_rejection;"
+        cancellation = "std::optional<native_order::CancelReason> terms_cancellation;"
+        self.reject(FILES[8], rejection, "")
+        self.reject(FILES[8], cancellation, "/* " + cancellation + " */")
+        changed = dict(DATA)
+        changed[FILES[8]] = changed[FILES[8]].replace(rejection, "@REJECTION@", 1).replace(
+            cancellation, rejection, 1).replace("@REJECTION@", cancellation, 1)
+        with self.assertRaises(ValueError):
+            check_texts(changed)
+
+    def test_phase1c_native_abi_templates_are_active(self):
+        from check_native_cpp_abi import (
+            CURRENT_EXECUTION_V15_CALLER, NATIVE_FX_CURVE_CALLER,
+            CURRENT_TERMS_SURFACE_READY, control_applicability,
+        )
+        self.assertTrue(CURRENT_TERMS_SURFACE_READY)
+        self.assertIn('R4B_CURRENT_RESULT_ALTERNATIVES', CURRENT_EXECUTION_V15_CALLER)
+        self.assertIn('configure_native_fx_curve', CURRENT_EXECUTION_V15_CALLER)
+        self.assertIn('validate_native_fx_curve', NATIVE_FX_CURVE_CALLER)
+        controls = {row['name']: row for row in control_applicability()}
+        self.assertEqual(controls['v14_current_execution_shape_agnostic_compile']['status'], 'required')
+        for name in ('v15_current_execution_surface_compile',
+                     'v15_current_result_missing_cancelled_compile_reject',
+                     'v15_native_fx_curve_surface_compile'):
+            self.assertEqual(controls[name]['status'], 'required')
+
+    def test_order_namespace_is_derived_not_literal(self):
+        from check_native_cpp_abi import current_order_namespace
+        self.assertEqual(current_order_namespace(
+            'inline namespace native_order_v4 { struct X {}; }'), 'native_order_v4')
+        with self.assertRaises(RuntimeError):
+            current_order_namespace(
+                'inline namespace native_order_v4 { }\n'
+                'inline namespace native_order_v3 { }')
+
+    def test_missing_cancelled_mutation_is_exactly_one(self):
+        from check_native_cpp_abi import remove_current_result_cancelled
+        source = ('using NativeCurrentExecutionResult = std::variant<NativeCurrentRefusal, '
+                  'native_order::ExecutionAppliedEvent, native_order::NoEffectEvent, '
+                  'native_order::MatchRejectedEvent, native_order::CancelledEvent>;\n')
+        changed = remove_current_result_cancelled(source)
+        prefix, marker, suffix = source.partition(', native_order::CancelledEvent')
+        self.assertTrue(marker)
+        self.assertEqual(changed, prefix + suffix)
+        self.assertNotIn('CancelledEvent', changed)
+        with self.assertRaises(RuntimeError):
+            remove_current_result_cancelled(source.replace('CancelledEvent', 'NoEffectEvent'))
+        with self.assertRaises(RuntimeError):
+            remove_current_result_cancelled(source.replace(
+                'native_order::CancelledEvent>;',
+                'native_order::CancelledEvent, native_order::CancelledEvent>;'))
+
+    def test_compile_rejection_requires_named_diagnostic(self):
+        from check_native_cpp_abi import (
+            CURRENT_EXECUTION_V15_CALLER, expect_compile_rejection,
+            remove_current_result_cancelled,
+        )
+        self.assertIn('R4B_CURRENT_RESULT_ALTERNATIVES', CURRENT_EXECUTION_V15_CALLER)
+        compiler = shutil.which('c++') or shutil.which('clang++')
+        if not compiler:
+            self.fail('the named compile-rejection mirror requires a C++ compiler')
+        with tempfile.TemporaryDirectory(prefix='pf-native-reject-mirror-') as temp:
+            root = Path(temp)
+            include = root / 'include'
+            header = include / 'pineforge/native_host.hpp'
+            header.parent.mkdir(parents=True)
+            original = ('#include <variant>\nnamespace pineforge { struct NativeCurrentRefusal {}; '
+                        'namespace native_order { struct ExecutionAppliedEvent {}; '
+                        'struct NoEffectEvent {}; struct MatchRejectedEvent {}; struct CancelledEvent {}; }\n'
+                        'using NativeCurrentExecutionResult = std::variant<NativeCurrentRefusal, '
+                        'native_order::ExecutionAppliedEvent, native_order::NoEffectEvent, '
+                        'native_order::MatchRejectedEvent, native_order::CancelledEvent>; }\n')
+            header.write_text(original)
+            mutated = remove_current_result_cancelled(original)
+            header.write_text(mutated)
+            source = ('#include <pineforge/native_host.hpp>\n#include <variant>\n'
+                      'static_assert(std::variant_size_v<pineforge::NativeCurrentExecutionResult> == 5, '
+                      '"R4B_CURRENT_RESULT_ALTERNATIVES");\n')
+            receipt = expect_compile_rejection(
+                'named-negative', source, include,
+                compiler_flags=[compiler, '-std=c++17'], generated_include=str(root),
+                scratch=root, original_header_sha256=hashlib.sha256(
+                    original.encode()).hexdigest())
+            self.assertEqual(receipt['outcome'], 'expected_compile_rejection')
+            self.assertIn('R4B_CURRENT_RESULT_ALTERNATIVES', receipt['diagnostics'])
+            self.assertEqual(receipt['source_sha256'], hashlib.sha256(source.encode()).hexdigest())
+            self.assertEqual(receipt['original_header_sha256'], hashlib.sha256(
+                original.encode()).hexdigest())
+            self.assertEqual(receipt['header_sha256'], hashlib.sha256(
+                mutated.encode()).hexdigest())
+            header.write_text(original)
+            with self.assertRaises(RuntimeError):
+                expect_compile_rejection(
+                    'unexpected-success', source, include,
+                    compiler_flags=[compiler, '-std=c++17'], generated_include=str(root),
+                    scratch=root, original_header_sha256='x')
+            bad = source.replace('static_assert', 'static_assertion', 1)
+            header.write_text(mutated)
+            with self.assertRaises(RuntimeError):
+                expect_compile_rejection(
+                    'unnamed-negative', bad, include,
+                    compiler_flags=[compiler, '-std=c++17'], generated_include=str(root),
+                    scratch=root, original_header_sha256='x')
+
+    def test_v14_tar_authentication_rejects_archive_and_manifest_tampering(self):
+        from check_native_cpp_abi import FIXTURE, authenticate_v14_fixture
+        fixture = FIXTURE / 'host-f736676'
+        with tempfile.TemporaryDirectory(prefix='pf-native-v14-auth-') as temp:
+            root = Path(temp)
+            valid = root / 'valid'
+            manifest = root / 'manifest-copy'
+            shutil.copytree(fixture, manifest)
+            authenticate_v14_fixture(manifest, valid)
+            tampered = root / 'tampered'
+            shutil.copytree(fixture, tampered)
+            archive = bytearray((tampered / 'headers.tar').read_bytes())
+            archive[-1] ^= 1
+            (tampered / 'headers.tar').write_bytes(archive)
+            with self.assertRaises(RuntimeError):
+                authenticate_v14_fixture(tampered, root / 'bad-archive')
+            mislabeled = root / 'mislabeled'
+            shutil.copytree(fixture, mislabeled)
+            data = json.loads((mislabeled / 'manifest.json').read_text())
+            data['tree'] = '0' * 40
+            (mislabeled / 'manifest.json').write_text(json.dumps(data))
+            with self.assertRaises(RuntimeError):
+                authenticate_v14_fixture(mislabeled, root / 'bad-manifest')
+
+    def test_current_execution_caller_is_rendered_per_provider(self):
+        from check_native_cpp_abi import render_current_execution_caller
+        v14 = render_current_execution_caller('engine_script_run_v14')
+        v15 = render_current_execution_caller('engine_script_run_v15')
+        self.assertIn('engine_script_run_v14', v14)
+        self.assertNotIn('engine_script_run_v15', v14)
+        self.assertIn('engine_script_run_v15', v15)
+        self.assertNotIn('engine_script_run_v14', v15)
+        with self.assertRaises(RuntimeError):
+            render_current_execution_caller('engine_script_run_v13')
+
+
+class NativeFxCurveVersions(unittest.TestCase):
+    def reject(self, path, before, after):
+        self.assertIn(before, DATA[path])
+        changed = dict(DATA)
+        changed[path] = changed[path].replace(before, after, 1)
+        with self.assertRaises(ValueError):
+            check_texts(changed)
+
+    def test_new_paths_append_without_reindexing_existing_pins(self):
+        self.assertEqual(FILES[-2:], (NATIVE_FX_CURVE_HEADER, NATIVE_FX_CURVE_SOURCE))
+        self.assertEqual(FILES[11], 'include/pineforge/native_order_identity.hpp')
+        self.assertEqual(FILES.count(NATIVE_FX_CURVE_HEADER), 1)
+        self.assertEqual(FILES.count(NATIVE_FX_CURVE_SOURCE), 1)
+
+    def test_standard_includes_are_exact_and_format_independent(self):
+        header = NATIVE_FX_CURVE_HEADER
+        for before, after in (
+            ('#include <cstddef>', ''),
+            ('#include <cstdint>', '// #include <cstdint>'),
+            ('#include <vector>', '#include <vector>\n#include <vector>'),
+            ('#include <vector>', '#include <vector>\n#include <pineforge/engine.hpp>'),
+            ('#include <vector>', '#include <vector>\n#include "pineforge/native_host.hpp"'),
+            ('#include <vector>', '#include <vector>\n#include <limits>'),
+            ('#include <vector>', '#include <vector>\n#include_next <pineforge/engine.hpp>'),
+        ):
+            with self.subTest(after=after):
+                self.reject(header, before, after)
+        changed = dict(DATA)
+        changed[header] = changed[header].replace('#include ', '#  include')
+        check_texts(changed)
+
+    def test_wrappers_are_real_unique_current_owners(self):
+        for path in (NATIVE_FX_CURVE_HEADER, NATIVE_FX_CURVE_SOURCE):
+            for replacement in (
+                'inline namespace native_fx_curve_v2 {',
+                'inline namespace native_fx_curve_v1 {} namespace misplaced {',
+                'inline namespace native_fx_curve_v1 { /* NativeFxCurve validate_native_fx_curve */ } namespace misplaced {',
+                'inline namespace native_fx_curve_v1 {} inline namespace native_fx_curve_v1 {',
+            ):
+                with self.subTest(path=path, replacement=replacement):
+                    self.reject(path, 'inline namespace native_fx_curve_v1 {', replacement)
+
+    def test_three_public_types_are_required_once_in_order(self):
+        header = NATIVE_FX_CURVE_HEADER
+        for declaration in ('struct NativeFxCurve {',
+                            'enum class NativeFxCurveError : std::uint8_t {',
+                            'struct NativeFxCurveValidation {'):
+            with self.subTest(declaration=declaration):
+                self.reject(header, declaration, '} ' + declaration)
+                self.reject(header, declaration, declaration.replace('NativeFxCurve', 'MissingFxCurve', 1))
+        curve = re.search(r'struct NativeFxCurve \{.*?\};', DATA[header], re.S).group()
+        validation = re.search(r'struct NativeFxCurveValidation \{.*?\};', DATA[header], re.S).group()
+        self.reject(header, curve, curve + '\n' + curve)
+        changed = dict(DATA)
+        changed[header] = changed[header].replace(curve, '', 1).replace(validation, validation + '\n' + curve, 1)
+        with self.assertRaises(ValueError):
+            check_texts(changed)
+        self.reject(header, curve, '/* ' + curve + ' */')
+
+    def test_host_pairing_type_cannot_enter_value_header(self):
+        self.reject(NATIVE_FX_CURVE_HEADER, 'struct NativeFxCurve {',
+                    'struct NativeFxCurveSetupResult {};\nstruct NativeFxCurve {')
+        self.reject(NATIVE_FX_CURVE_HEADER, '#pragma once',
+                    '#pragma once\nstruct NativeFxCurveSetupResult {};')
+        self.reject(NATIVE_FX_CURVE_HEADER, 'struct NativeFxCurve {',
+                    'using NativeFxCurveSetupResult = int;\nstruct NativeFxCurve {')
+        self.reject(NATIVE_FX_CURVE_HEADER, 'struct NativeFxCurve {',
+                    'struct NativeFxCurveSetupResult;\nstruct NativeFxCurve {')
+
+    def test_curve_array_members_keep_their_types_and_order(self):
+        header = NATIVE_FX_CURVE_HEADER
+        first = 'std::vector<std::int64_t> effective_from_ms;'
+        second = 'std::vector<double> account_per_quote;'
+        for before, after in ((first, ''), (second, '/* ' + second + ' */'),
+                              (first, first + first), (first, first.replace('int64_t', 'int32_t'))):
+            with self.subTest(after=after):
+                self.reject(header, before, after)
+        changed = dict(DATA)
+        changed[header] = DATA[header].replace(first, '@FIRST@', 1).replace(second, first, 1).replace('@FIRST@', second, 1)
+        with self.assertRaises(ValueError):
+            check_texts(changed)
+
+    def test_error_values_keep_width_names_numbers_and_order(self):
+        header = NATIVE_FX_CURVE_HEADER
+        self.reject(header, 'NativeFxCurveError : std::uint8_t', 'NativeFxCurveError : std::uint16_t')
+        for entry in ('None = 0', 'LengthMismatch = 1', 'NotStrictlyIncreasing = 2',
+                      'NotFinitePositive = 3', 'AllocationFailure = 4', 'WrongPhase = 5'):
+            with self.subTest(entry=entry):
+                self.reject(header, entry, '/* ' + entry + ' */')
+                self.reject(header, entry, entry + ', ' + entry)
+                self.reject(header, entry, entry[:-1] + '9')
+        changed = dict(DATA)
+        changed[header] = changed[header].replace('None = 0', '@NONE@', 1).replace(
+            'LengthMismatch = 1', 'None = 0', 1).replace('@NONE@', 'LengthMismatch = 1', 1)
+        with self.assertRaises(ValueError):
+            check_texts(changed)
+
+    def test_validation_fields_keep_defaults_types_and_order(self):
+        header = NATIVE_FX_CURVE_HEADER
+        error = 'NativeFxCurveError error = NativeFxCurveError::None;'
+        index = 'std::size_t index = 0;'
+        for before, after in ((error, ''), (index, index + index),
+                              (error, error.replace('::None', '::WrongPhase')),
+                              (index, 'std::uint64_t index = 0;'), (index, 'std::size_t index = 1;')):
+            with self.subTest(after=after):
+                self.reject(header, before, after)
+        changed = dict(DATA)
+        changed[header] = changed[header].replace(error, '@ERROR@', 1).replace(
+            index, error, 1).replace('@ERROR@', index, 1)
+        with self.assertRaises(ValueError):
+            check_texts(changed)
+
+    def test_value_functions_require_declarations_and_real_definitions(self):
+        for return_type, name in (('NativeFxCurveValidation', 'validate_native_fx_curve'),
+                                  ('std::uint64_t', 'native_fx_curve_digest')):
+            signature = return_type + ' ' + name + '(const NativeFxCurve& curve) noexcept'
+            declaration = signature + ';'
+            definition = signature + ' {' + body(
+                DATA[NATIVE_FX_CURVE_SOURCE], re.escape(signature) + r'\s*\{', name) + '}'
+            with self.subTest(name=name):
+                self.reject(NATIVE_FX_CURVE_HEADER, declaration, '')
+                self.reject(NATIVE_FX_CURVE_HEADER, declaration, '/* ' + declaration + ' */')
+                self.reject(NATIVE_FX_CURVE_HEADER, declaration, declaration + '\n' + declaration)
+                self.reject(NATIVE_FX_CURVE_HEADER, declaration, declaration.replace(' noexcept', ''))
+                self.reject(NATIVE_FX_CURVE_HEADER, declaration, declaration.replace('const NativeFxCurve&', 'NativeFxCurve&'))
+                self.reject(NATIVE_FX_CURVE_SOURCE, definition, '')
+                self.reject(NATIVE_FX_CURVE_SOURCE, definition, declaration)
+                self.reject(NATIVE_FX_CURVE_SOURCE, signature + ' {', signature.replace(name, name + '_removed') + ' {')
+                self.reject(NATIVE_FX_CURVE_SOURCE, signature + ' {', signature + ' { }\n' + signature + ' {')
+                self.reject(NATIVE_FX_CURVE_SOURCE, signature + ' {', 'namespace misplaced {\n' + signature + ' {')
+        header = NATIVE_FX_CURVE_HEADER
+        declaration = 'NativeFxCurveValidation validate_native_fx_curve(const NativeFxCurve& curve) noexcept;'
+        changed = dict(DATA)
+        changed[header] = changed[header].replace(declaration, '', 1).replace(
+            '} // inline namespace native_fx_curve_v1',
+            '} // inline namespace native_fx_curve_v1\n' + declaration, 1)
+        with self.assertRaises(ValueError):
+            check_texts(changed)
+
+    def test_introduced_at_authenticates_historical_host_closures(self):
+        manifests = authenticate_historical_host_manifests()
+        self.assertEqual(set(manifests), {'v13', 'v14'})
+        check_fx_curve_introduced_at(manifests)
+        for label in manifests:
+            poisoned = {name: {**manifest, 'files': dict(manifest['files'])}
+                        for name, manifest in manifests.items()}
+            poisoned[label]['files'][NATIVE_FX_CURVE_HEADER] = {}
+            with self.subTest(label=label):
+                with self.assertRaises(ValueError):
+                    check_fx_curve_introduced_at(poisoned)
+                with mock.patch('check_native_cpp_versions.authenticate_historical_host_manifests',
+                                return_value=poisoned) as authenticate:
+                    with self.assertRaises(ValueError):
+                        check()
+                    authenticate.assert_called_once_with(ROOT)
+
+    def test_introduced_at_cannot_skip_authentication_or_accept_wrong_identity(self):
+        from prepare_settlement_cpp_abi_base import PROVIDERS
+        with self.assertRaises(ValueError):
+            authenticate_historical_host_manifests(providers={})
+        providers = {label: dict(provider) for label, provider in PROVIDERS.items()}
+        providers['v14']['commit'] = '0' * 40
+        with self.assertRaises(RuntimeError):
+            authenticate_historical_host_manifests(providers=providers)
 
 
 class FixtureAuthentication(unittest.TestCase):

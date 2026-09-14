@@ -44,6 +44,159 @@ double bits_to(std::uint64_t x) {
     std::memcpy(&v, &x, sizeof v);
     return v;
 }
+
+bool equal_handle_bits(const no::RequestHandle& a, const no::RequestHandle& b) {
+    return a.run.session_key == b.run.session_key && a.run.run_number == b.run.run_number
+        && a.incarnation == b.incarnation;
+}
+bool equal_event_id_bits(const no::EventId& a, const no::EventId& b) {
+    return a.run.session_key == b.run.session_key && a.run.run_number == b.run.run_number
+        && a.ordinal == b.ordinal;
+}
+bool equal_intent_bits(const no::OrderIntent& a, const no::OrderIntent& b) {
+    if (a.index() != b.index()) return false;
+    if (const auto* value = std::get_if<no::Transact>(&a)) {
+        return bits_eq(value->signed_units, std::get<no::Transact>(b).signed_units);
+    }
+    if (const auto* value = std::get_if<no::Reduce>(&a)) {
+        const auto& other = std::get<no::Reduce>(b);
+        if (value->size.index() != other.size.index()) return false;
+        if (const auto* units = std::get_if<no::ExplicitUnits>(&value->size)) {
+            return bits_eq(units->units, std::get<no::ExplicitUnits>(other.size).units);
+        }
+        return true;
+    }
+    if (const auto* value = std::get_if<no::ReverseTo>(&a)) {
+        return bits_eq(value->signed_units, std::get<no::ReverseTo>(b).signed_units);
+    }
+    if (const auto* value = std::get_if<no::HostSized>(&a)) {
+        const auto& other = std::get<no::HostSized>(b);
+        return value->kind == other.kind && value->side == other.side;
+    }
+    return std::holds_alternative<no::Flatten>(a);
+}
+bool equal_execution_terms_bits(const no::ExecutionTerms& a, const no::ExecutionTerms& b) {
+    return bits_eq(a.resolved_price, b.resolved_price)
+        && a.units.has_value() == b.units.has_value()
+        && (!a.units || bits_eq(*a.units, *b.units))
+        && a.shape == b.shape;
+}
+bool equal_attempted_terms_bits(const std::optional<no::ExecutionTerms>& a,
+                                const std::optional<no::ExecutionTerms>& b) {
+    return a.has_value() == b.has_value()
+        && (!a || equal_execution_terms_bits(*a, *b));
+}
+bool equal_allowance_bits(const no::Allowance& a, const no::Allowance& b) {
+    if (a.index() != b.index()) return false;
+    if (const auto* value = std::get_if<no::AllowanceUnits>(&a)) {
+        const auto& other = std::get<no::AllowanceUnits>(b);
+        return value->point_ordinal == other.point_ordinal
+            && bits_eq(value->initial, other.initial) && bits_eq(value->left, other.left);
+    }
+    if (const auto* value = std::get_if<no::AllowanceAllScope>(&a)) {
+        return value->point_ordinal == std::get<no::AllowanceAllScope>(b).point_ordinal;
+    }
+    if (const auto* value = std::get_if<no::AllowanceDeferred>(&a)) {
+        return value->point_ordinal == std::get<no::AllowanceDeferred>(b).point_ordinal;
+    }
+    return true;
+}
+bool equal_trigger_bits(const no::Trigger& a, const no::Trigger& b) {
+    if (a.index() != b.index()) return false;
+    if (const auto* value = std::get_if<no::Limit>(&a))
+        return bits_eq(value->price, std::get<no::Limit>(b).price);
+    if (const auto* value = std::get_if<no::Stop>(&a))
+        return bits_eq(value->price, std::get<no::Stop>(b).price);
+    if (const auto* value = std::get_if<no::StopLimit>(&a)) {
+        const auto& other = std::get<no::StopLimit>(b);
+        return bits_eq(value->stop, other.stop) && bits_eq(value->limit, other.limit);
+    }
+    if (const auto* value = std::get_if<no::Trail>(&a)) {
+        const auto& other = std::get<no::Trail>(b);
+        return bits_eq(value->offset, other.offset)
+            && value->arm_price.has_value() == other.arm_price.has_value()
+            && (!value->arm_price || bits_eq(*value->arm_price, *other.arm_price));
+    }
+    return true;
+}
+bool equal_request_bits(const no::Request& a, const no::Request& b, bool text) {
+    if (!equal_intent_bits(a.intent, b.intent) || !equal_trigger_bits(a.trigger, b.trigger)
+        || a.capacity.index() != b.capacity.index() || a.owner.index() != b.owner.index()
+        || a.group.index() != b.group.index()) return false;
+    if (text && (a.label != b.label || a.comment != b.comment)) return false;
+    if (const auto* capacity = std::get_if<no::PointBudget>(&a.capacity)) {
+        if (!bits_eq(capacity->units, std::get<no::PointBudget>(b.capacity).units)) return false;
+    }
+    if (const auto* owner = std::get_if<no::WaitForApplied>(&a.owner)) {
+        if (!equal_handle_bits(owner->parent, std::get<no::WaitForApplied>(b.owner).parent)) return false;
+    } else if (const auto* owner = std::get_if<no::BindOpening>(&a.owner)) {
+        const auto& other = std::get<no::BindOpening>(b.owner);
+        if (!equal_handle_bits(owner->opening, other.opening) || owner->cycle != other.cycle) return false;
+    } else if (const auto* owner = std::get_if<no::BindOpenings>(&a.owner)) {
+        const auto& other = std::get<no::BindOpenings>(b.owner);
+        if (owner->cycle != other.cycle || owner->openings.size() != other.openings.size()) return false;
+        for (std::size_t i = 0; i < owner->openings.size(); ++i) {
+            if (!equal_handle_bits(owner->openings[i], other.openings[i])) return false;
+        }
+    }
+    if (const auto* group = std::get_if<no::Member>(&a.group)) {
+        const auto& other = std::get<no::Member>(b.group);
+        if (group->group != other.group || group->cohort != other.cohort
+            || group->effect != other.effect) return false;
+    }
+    return true;
+}
+bool equal_cursor_bits(const no::MatchCursor& a, const no::MatchCursor& b) {
+    const auto& x = a.point;
+    const auto& y = b.point;
+    return bits_eq(a.t, b.t) && x.ordinal == y.ordinal && x.interval_index == y.interval_index
+        && x.open_ms == y.open_ms && x.eligible_open_ms == y.eligible_open_ms
+        && x.last_traded_close_ms == y.last_traded_close_ms
+        && x.next_period_open_ms == y.next_period_open_ms
+        && x.next_input_open_ms == y.next_input_open_ms
+        && x.effective_time_ms == y.effective_time_ms
+        && x.source_price_time_ms == y.source_price_time_ms
+        && x.provenance == y.provenance && x.path_phase == y.path_phase
+        && x.completion == y.completion;
+}
+bool equal_projection_bits(const no::RemainingProjection& a,
+                           const no::RemainingProjection& b) {
+    if (a.index() != b.index()) return false;
+    if (const auto* value = std::get_if<no::RemainingProjectionUnits>(&a)) {
+        return bits_eq(value->q, std::get<no::RemainingProjectionUnits>(b).q);
+    }
+    return true;
+}
+bool equal_definition_bits(const no::DefinitionRef& a, const no::DefinitionRef& b, bool text) {
+    if (bool(a) != bool(b)) return false;
+    if (!a) return true;
+    return equal_handle_bits(a->handle, b->handle)
+        && equal_request_bits(a->request, b->request, text)
+        && a->birth.acceptance_ordinal == b->birth.acceptance_ordinal
+        && a->birth.decision_time_lower_bound == b->birth.decision_time_lower_bound
+        && a->predecessor.has_value() == b->predecessor.has_value()
+        && (!a->predecessor || equal_handle_bits(*a->predecessor, *b->predecessor));
+}
+bool equal_terms_resolved_bits(const no::TermsResolvedEvent& a,
+                               const no::TermsResolvedEvent& b, bool text) {
+    if (a.ordinal != b.ordinal || !equal_definition_bits(a.definition, b.definition, text)
+        || !equal_cursor_bits(a.cursor, b.cursor)
+        || a.input.price_kind != b.input.price_kind
+        || a.input.shared_cursor_collision != b.input.shared_cursor_collision
+        || !bits_eq(a.input.raw_price, b.input.raw_price)
+        || !bits_eq(a.input.default_resolved_price, b.input.default_resolved_price)
+        || !equal_execution_terms_bits(a.input.terms, b.input.terms)
+        || a.prior_adjustment_ids.size() != b.prior_adjustment_ids.size()
+        || !bits_eq(a.pending_total, b.pending_total)
+        || !bits_eq(a.effective_deduction, b.effective_deduction)
+        || !equal_projection_bits(a.remaining_before, b.remaining_before)
+        || !equal_projection_bits(a.remaining_after, b.remaining_after)
+        || !equal_allowance_bits(a.allowance_after, b.allowance_after)) return false;
+    for (std::size_t i = 0; i < a.prior_adjustment_ids.size(); ++i) {
+        if (!equal_event_id_bits(a.prior_adjustment_ids[i], b.prior_adjustment_ids[i])) return false;
+    }
+    return true;
+}
 void same_d(double a, double b) {
     if (!bits_eq(a, b))
         std::printf("  bits %a (%llx) vs %a (%llx)\n",
@@ -57,12 +210,17 @@ void same_str(const std::string& a, const std::string& b) { CHECK(a == b); }
 struct Host final : NativeStrategyHost {
     std::function<void(Host&)> beginning;
     std::function<void(Host&)> calculation;
+    mutable std::function<no::ExecutionTerms(const NativeExecutionTermsFacts&)> resolver;
     int calculations = 0;
     uint64_t sequence = 0;
     void on_native_run_begin() override { if (beginning) beginning(*this); }
     void on_native_bar(const Bar&, const NativeDecisionContext&) override {
         ++calculations;
         if (calculation) calculation(*this);
+    }
+    no::ExecutionTerms resolve_execution_terms(const NativeExecutionTermsFacts& facts) const override {
+        if (resolver) return resolver(facts);
+        return {facts.default_resolved_price, std::nullopt, no::OpeningShape::Transact};
     }
     bool input(int64_t offset, double price) {
         return stream_push_tick(TradeTick{T + offset + 1, ++sequence, price, 1});
@@ -109,6 +267,12 @@ no::Request reduce(double q, const char* label = "", const char* comment = "") {
 }
 no::Request flat(const char* label = "", const char* comment = "") {
     return {no::Flatten{}, label, comment};
+}
+no::Request host_open(const char* label = "") {
+    no::Request request;
+    request.intent = no::HostSized{no::HostSizedKind::Open, no::Side::Long};
+    request.label = label;
+    return request;
 }
 // A selected (cohort) close: Flatten bound to an explicit opening set of the
 // live cycle. Mirrors the helper the selected-request acceptance uses.
@@ -162,6 +326,14 @@ void same_intent(const no::OrderIntent& a, const no::OrderIntent& b) {
         if (const auto* u = std::get_if<no::ExplicitUnits>(&r->size))
             same_d(u->units, std::get<no::ExplicitUnits>(std::get<no::Reduce>(b).size).units);
     }
+    else if (const auto* reverse = std::get_if<no::ReverseTo>(&a)) {
+        same_d(reverse->signed_units, std::get<no::ReverseTo>(b).signed_units);
+    } else if (const auto* sized = std::get_if<no::HostSized>(&a)) {
+        const auto& other = std::get<no::HostSized>(b);
+        CHECK(sized->kind == other.kind);
+        CHECK(sized->side == other.side);
+    }
+    CHECK(equal_intent_bits(a, b));
 }
 void same_trigger(const no::Trigger& a, const no::Trigger& b) {
     REQUIRE(a.index() == b.index());
@@ -286,7 +458,11 @@ void same_allowance(const no::Allowance& a, const no::Allowance& b) {
         same_d(u->left, std::get<no::AllowanceUnits>(b).left);
     } else if (const auto* all = std::get_if<no::AllowanceAllScope>(&a)) {
         same_u64(all->point_ordinal, std::get<no::AllowanceAllScope>(b).point_ordinal);
+    } else if (const auto* deferred = std::get_if<no::AllowanceDeferred>(&a)) {
+        same_u64(deferred->point_ordinal,
+                 std::get<no::AllowanceDeferred>(b).point_ordinal);
     }
+    CHECK(equal_allowance_bits(a, b));
 }
 void same_pending(const no::PendingAdjustments& a, const no::PendingAdjustments& b) {
     REQUIRE(a.index() == b.index());
@@ -375,6 +551,7 @@ void same_match_rejected(const no::MatchRejectedEvent& a, const no::MatchRejecte
     same_remaining_proj(a.remaining, b.remaining);
     same_authority(a.authority, b.authority);
     same_cursor(a.cursor, b.cursor);
+    CHECK(equal_attempted_terms_bits(a.attempted_terms, b.attempted_terms));
 }
 void same_close_bound(const no::CloseBoundEvent& a, const no::CloseBoundEvent& b, bool text) {
     same_u64(a.ordinal, b.ordinal);
@@ -462,6 +639,26 @@ void same_armed(const no::ArmedEvent& a, const no::ArmedEvent& b, bool text) {
     same_enrollment(a.enrollment, b.enrollment);
     same_opt_event(a.quantity_resolution, b.quantity_resolution);
 }
+void same_terms_resolved(const no::TermsResolvedEvent& a,
+                         const no::TermsResolvedEvent& b, bool text) {
+    same_u64(a.ordinal, b.ordinal);
+    same_definition(a.definition, b.definition, text);
+    same_cursor(a.cursor, b.cursor);
+    CHECK(a.input.price_kind == b.input.price_kind);
+    CHECK(a.input.shared_cursor_collision == b.input.shared_cursor_collision);
+    same_d(a.input.raw_price, b.input.raw_price);
+    same_d(a.input.default_resolved_price, b.input.default_resolved_price);
+    CHECK(equal_execution_terms_bits(a.input.terms, b.input.terms));
+    REQUIRE(a.prior_adjustment_ids.size() == b.prior_adjustment_ids.size());
+    for (std::size_t i = 0; i < a.prior_adjustment_ids.size(); ++i)
+        same_event_id(a.prior_adjustment_ids[i], b.prior_adjustment_ids[i]);
+    same_d(a.pending_total, b.pending_total);
+    same_d(a.effective_deduction, b.effective_deduction);
+    same_remaining_proj(a.remaining_before, b.remaining_before);
+    same_remaining_proj(a.remaining_after, b.remaining_after);
+    same_allowance(a.allowance_after, b.allowance_after);
+    CHECK(equal_terms_resolved_bits(a, b, text));
+}
 void same_command(const no::CommandEvent& a, const no::CommandEvent& b, bool text) {
     REQUIRE(a.index() == b.index());
     if (const auto* e = std::get_if<no::AcceptedEvent>(&a))
@@ -496,6 +693,8 @@ void same_command(const no::CommandEvent& a, const no::CommandEvent& b, bool tex
         same_qty_bound(*e, std::get<no::QuantityBoundEvent>(b), text);
     else if (const auto* e = std::get_if<no::ArmedEvent>(&a))
         same_armed(*e, std::get<no::ArmedEvent>(b), text);
+    else if (const auto* e = std::get_if<no::TermsResolvedEvent>(&a))
+        same_terms_resolved(*e, std::get<no::TermsResolvedEvent>(b), text);
 }
 void same_driver(const NativeDriverPoint& a, const NativeDriverPoint& b) {
     same_coord(a.coordinate, b.coordinate);
@@ -1413,6 +1612,144 @@ void ieee_rejection_payloads() {
     finish(a); finish(b);
 }
 
+void terms_predicate_mutations() {
+    const no::OrderIntent reverse_a{no::ReverseTo{bits_to(0x3ff0000000000001ULL)}};
+    auto reverse_b = reverse_a;
+    CHECK(equal_intent_bits(reverse_a, reverse_b));
+    std::get<no::ReverseTo>(reverse_b).signed_units = 2.0;
+    CHECK(!equal_intent_bits(reverse_a, reverse_b));
+
+    const no::OrderIntent sized_a{no::HostSized{no::HostSizedKind::Open, no::Side::Long}};
+    auto sized_b = sized_a;
+    CHECK(equal_intent_bits(sized_a, sized_b));
+    std::get<no::HostSized>(sized_b).side = no::Side::Short;
+    CHECK(!equal_intent_bits(sized_a, sized_b));
+
+    no::ExecutionTerms terms_a{bits_to(0x8000000000000000ULL), 1.0,
+                               no::OpeningShape::CloseOpposite};
+    auto terms_b = terms_a;
+    CHECK(equal_execution_terms_bits(terms_a, terms_b));
+    terms_b.shape = no::OpeningShape::Transact;
+    CHECK(!equal_execution_terms_bits(terms_a, terms_b));
+    CHECK(equal_attempted_terms_bits(std::optional<no::ExecutionTerms>{terms_a},
+                                     std::optional<no::ExecutionTerms>{terms_a}));
+    CHECK(!equal_attempted_terms_bits(std::optional<no::ExecutionTerms>{terms_a},
+                                      std::nullopt));
+
+    const no::Allowance allowance_a{no::AllowanceDeferred{17}};
+    auto allowance_b = allowance_a;
+    CHECK(equal_allowance_bits(allowance_a, allowance_b));
+    std::get<no::AllowanceDeferred>(allowance_b).point_ordinal = 18;
+    CHECK(!equal_allowance_bits(allowance_a, allowance_b));
+
+    no::TermsResolvedEvent receipt_a;
+    receipt_a.ordinal = 9;
+    receipt_a.input.price_kind = no::NativeCandidatePriceKind::TriggerLevel;
+    receipt_a.input.shared_cursor_collision = true;
+    receipt_a.input.raw_price = 2.0;
+    receipt_a.input.default_resolved_price = 2.0;
+    receipt_a.input.terms = terms_a;
+    receipt_a.allowance_after = no::AllowanceDeferred{17};
+    auto receipt_b = receipt_a;
+    CHECK(equal_terms_resolved_bits(receipt_a, receipt_b, true));
+    receipt_b.input.shared_cursor_collision = false;
+    CHECK(!equal_terms_resolved_bits(receipt_a, receipt_b, true));
+}
+
+void a_h1_h2_fresh_terms_replay_and_hash_mutations() {
+    auto run_terms = [](Host& host, const char* key, double price_delta) {
+        host.resolver = [price_delta](const NativeExecutionTermsFacts& facts) {
+            if (std::holds_alternative<no::HostSized>(facts.definition->request.intent)) {
+                return no::ExecutionTerms{facts.default_resolved_price + price_delta, 1.0,
+                                           no::OpeningShape::Transact};
+            }
+            return no::ExecutionTerms{facts.default_resolved_price, std::nullopt,
+                                       no::OpeningShape::Transact};
+        };
+        host.beginning = [](Host& h) { put(h, host_open("hash-host")); };
+        start(host, key);
+        host.tick(1, 100);
+        finish(host);
+    };
+    Host first, replay, changed;
+    run_terms(first, "H2-terms", 0.0);
+    run_terms(replay, "H2-terms", 0.0);
+    run_terms(changed, "H2-terms", 1.0);
+    CHECK(first.native_continuation_hash() == replay.native_continuation_hash());
+    CHECK(first.native_continuation_hash() != changed.native_continuation_hash());
+    const auto first_receipts = events_of<no::TermsResolvedEvent>(first);
+    const auto replay_receipts = events_of<no::TermsResolvedEvent>(replay);
+    REQUIRE(first_receipts.size() == 1 && replay_receipts.size() == 1);
+    CHECK(first_receipts[0].input.price_kind == replay_receipts[0].input.price_kind);
+    CHECK(equal_terms_resolved_bits(first_receipts[0], replay_receipts[0], true));
+
+    Host nan_a, nan_b;
+    const auto nan_one = bits_to(0x7ff8000000000001ULL);
+    const auto nan_two = bits_to(0x7ff8000000000002ULL);
+    auto run_nan = [](Host& host, const char* key, double payload) {
+        host.resolver = [payload](const NativeExecutionTermsFacts& facts) {
+            return no::ExecutionTerms{payload, std::nullopt, no::OpeningShape::Transact};
+        };
+        host.beginning = [](Host& h) { put(h, tx(1, "hash-nan")); };
+        start(host, key);
+        host.tick(1, 100);
+        finish(host);
+    };
+    run_nan(nan_a, "H1-nan", nan_one);
+    run_nan(nan_b, "H1-nan", nan_two);
+    CHECK(nan_a.native_continuation_hash() != nan_b.native_continuation_hash());
+    const auto rejection_a = events_of<no::MatchRejectedEvent>(nan_a);
+    const auto rejection_b = events_of<no::MatchRejectedEvent>(nan_b);
+    REQUIRE(rejection_a.size() == 1 && rejection_b.size() == 1);
+    CHECK(equal_attempted_terms_bits(rejection_a[0].attempted_terms,
+                                     rejection_a[0].attempted_terms));
+    CHECK(!equal_attempted_terms_bits(rejection_a[0].attempted_terms,
+                                      rejection_b[0].attempted_terms));
+}
+
+void d4_real_appended_histories_cover_terms_fields() {
+    auto run_host_sized = [](Host& host, const char* key, double units, double price_delta) {
+        host.resolver = [units, price_delta](const NativeExecutionTermsFacts& facts) {
+            if (std::holds_alternative<no::HostSized>(facts.definition->request.intent)) {
+                return no::ExecutionTerms{facts.default_resolved_price + price_delta, units,
+                                           no::OpeningShape::Transact};
+            }
+            return no::ExecutionTerms{facts.default_resolved_price, std::nullopt,
+                                       no::OpeningShape::Transact};
+        };
+        host.beginning = [](Host& h) { put(h, host_open("D4-host")); };
+        start(host, key);
+        host.tick(1, 100);
+        finish(host);
+        const auto receipt = events_of<no::TermsResolvedEvent>(host);
+        REQUIRE(receipt.size() == 1);
+        return receipt.front();
+    };
+    Host units_one, units_two, price_changed;
+    const auto one = run_host_sized(units_one, "D4-history", 1.0, 0.0);
+    const auto two = run_host_sized(units_two, "D4-history", 2.0, 0.0);
+    const auto price = run_host_sized(price_changed, "D4-history", 1.0, 1.0);
+    CHECK(units_one.native_continuation_hash() != units_two.native_continuation_hash());
+    CHECK(units_one.native_continuation_hash() != price_changed.native_continuation_hash());
+    CHECK(!equal_terms_resolved_bits(one, two, true));
+    CHECK(!equal_terms_resolved_bits(one, price, true));
+
+    Host curve_a, curve_b;
+    auto configure_curve = [](Host& host, const char* key, double rate) {
+        host.beginning = [](Host& h) { put(h, tx(1, "curve-history")); };
+        const auto run_spec = configuration(key);
+        REQUIRE(host.configure_native(run_spec).status == NativeSetupStatus::Applied);
+        REQUIRE(host.configure_native_fx_curve(NativeFxCurve{{T}, {rate}}).status
+                == NativeSetupStatus::Applied);
+        const Bar bar{100, 100, 100, 100, 1, T};
+        host.run(&bar, 1);
+        CHECK(host.native_state().kind == NativeLifecycleKind::Completed);
+    };
+    configure_curve(curve_a, "D4-curve", 1.25);
+    configure_curve(curve_b, "D4-curve", 1.5);
+    CHECK(curve_a.native_continuation_hash() != curve_b.native_continuation_hash());
+}
+
 void run_case(const char* name, const std::function<void()>& body) {
     scenario = name; boundary = ""; ++cases;
     const int previous = failures;
@@ -1459,6 +1796,11 @@ int main() {
                  [&] { reset_clears_state(sign); });
     }
     run_case("IEEE rejection payloads", [] { ieee_rejection_payloads(); });
+    run_case("terms replay predicates and mutations", [] { terms_predicate_mutations(); });
+    run_case("A-H1/A-H2 fresh terms replay and hashes",
+             [] { a_h1_h2_fresh_terms_replay_and_hash_mutations(); });
+    run_case("D4 real appended durable histories",
+             [] { d4_real_appended_histories_cover_terms_fields(); });
     std::printf("%s native resting replay: %d cases, %d checks, %d failures\n",
                 failures ? "FAIL" : "PASS", cases, checks, failures);
     return failures ? 1 : 0;
