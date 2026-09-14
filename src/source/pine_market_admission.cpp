@@ -1,43 +1,44 @@
-#include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/compat/pine/market_admission.hpp>
-#include "engine_internal.hpp"
+#include "../engine_internal.hpp"
 #include <algorithm>
 
 namespace pineforge {
+using namespace source;
 namespace {
 // Sole price capture/read seam for this component. Historical requested prices
 // never become a mutable current-price book; root may adapt these reads to the
 // lifecycle worker's immutable current definition in the integrated candidate.
 admission::PriceRequest capture_request_prices(double limit,double stop){return {limit,stop};}
 }
-admission::Configuration BacktestEngine::admission_configuration() const {
+admission::Configuration source::PineStrategyHost::admission_configuration() const {
     return {process_orders_on_close_,calc_on_order_fills_,bar_magnifier_enabled_,
         coof_fill_recalc_active_,coof_scheduler_active_,slippage_,pyramiding_,
         static_cast<int>(default_qty_type_),default_qty_value_,margin_long_,margin_short_,
         commission_value_,static_cast<int>(commission_type_),syminfo_.pointvalue,
         active_account_currency_fx(),qty_step_,syminfo_mintick_,static_cast<int>(risk_direction_),
         risk_max_cons_loss_days_,risk_max_drawdown_,risk_max_intraday_loss_,risk_max_position_size_,
-        max_intraday_filled_orders_.active(),risk_halted_};
+        adapter_.cap.active(),risk_halted_};
 }
-admission::CurrentPrices BacktestEngine::admission_current_prices(const PendingOrder& order) const {
+admission::CurrentPrices source::PineStrategyHost::admission_current_prices(const source::PendingOrder& order) const {
     const auto& prices = order.legs.prices();
     return {prices.limit_price, prices.stop_price, prices.trail_points,
             prices.trail_price, prices.trail_offset};
 }
-bool BacktestEngine::opening_admission_eligible(const MarketAdmissionDraft& draft) const {
+bool source::PineStrategyHost::opening_admission_eligible(const MarketAdmissionDraft& draft) const {
     // Pine is one policy adapter over the generic admission journal. Keep
     // that dependency in this translation unit so engine.hpp exposes the
     // native model without importing a source-language policy header.
     return compat::pine::opening_qualification(draft);
 }
-admission::BookObservation BacktestEngine::admission_book_observation(const PendingOrder& order) const {
+admission::BookObservation source::PineStrategyHost::admission_book_observation(const source::PendingOrder& order) const {
     return {order.incarnation,order.created_seq,order.created_bar,static_cast<int>(order.type),
             static_cast<int>(order.created_position_side),order.is_long,order.id,order.oca_name,order.oca_type,order.birth,admission_current_prices(order),order.market_admission};
 }
-admission::CommandCapture BacktestEngine::begin_market_command(admission::CommandKind kind,
+admission::CommandCapture source::PineStrategyHost::begin_market_command(admission::CommandKind kind,
         const std::string& id,bool buy,double qty,int qty_type,double limit,double stop,const std::string& oca,int oca_type) {
     admission::CommandObservation input;
-    auto allocation = market_admission_journal_.reserve();
+    auto allocation = adapter_.admission_journal.reserve();
     input.command=allocation.sequence();input.kind=kind;input.birth=capture_order_birth();
     input.id=id;input.requested_quantity=qty;input.quantity_type=qty_type;input.buy=buy;
     input.prices=capture_request_prices(limit,stop);input.oca_name=oca;input.oca_type=oca_type;input.configuration=admission_configuration();
@@ -61,10 +62,10 @@ admission::CommandCapture BacktestEngine::begin_market_command(admission::Comman
                 event.admitted_incarnation=order.incarnation;event.observation=observed;break;
             }
         }
-        market_admission_journal_.append(std::move(event));reclaim_market_admission();
+        adapter_.admission_journal.append(std::move(event));reclaim_market_admission();
     });
 }
-void BacktestEngine::bind_market_command(PendingOrder& order,admission::CommandCapture& command) {
+void source::PineStrategyHost::bind_market_command(source::PendingOrder& order,admission::CommandCapture& command) {
     const auto& input=command.input();const auto& c=input.configuration;
     std::optional<admission::SizingObservation> original;
     if((order.type==OrderType::MARKET||order.type==OrderType::RAW_ORDER)
@@ -75,9 +76,9 @@ void BacktestEngine::bind_market_command(PendingOrder& order,admission::CommandC
         original=admission::SizingObservation{order.frozen_default_qty,order.sizing_equity,order.sizing_price,order.sizing_mark,order.sizing_fx};
     command.bind(order.market_admission,original,order.explicit_placement_equity,order.explicit_slipped_signal_close);
 }
-admission::ReviewCapture BacktestEngine::begin_market_review(admission::Checkpoint checkpoint) {
+admission::ReviewCapture source::PineStrategyHost::begin_market_review(admission::Checkpoint checkpoint) {
     admission::ReviewEvent event;
-    auto allocation = market_admission_journal_.reserve();
+    auto allocation = adapter_.admission_journal.reserve();
     event.receipt={allocation.sequence(),checkpoint,bar_index_};
     event.configuration=admission_configuration();event.open_price=current_bar_.open;
     event.position_side=static_cast<int>(position_side_);event.position_cycle=position_cycle_seq_;
@@ -88,7 +89,7 @@ admission::ReviewCapture BacktestEngine::begin_market_review(admission::Checkpoi
             ||(checkpoint==admission::Checkpoint::ExplicitPair&&compat::pine::awaits_pair_review(order.market_admission)))
             event.reviewed.push_back(std::move(observed));
     }
-    const auto history=compat::pine::admission_history(market_admission_journal_);
+    const auto history=compat::pine::admission_history(adapter_.admission_journal);
     const auto& causes=checkpoint==admission::Checkpoint::DefaultGross?history.default_causes:history.pair_causes;
     for(const auto& order:event.reviewed) {
         const int source_bar=checkpoint==admission::Checkpoint::TerminalGross?bar_index_:order.bar;
@@ -104,29 +105,29 @@ admission::ReviewCapture BacktestEngine::begin_market_review(admission::Checkpoi
             if(found==pending_orders_.end())resolution.kind=admission::ResolutionKind::Rejected;
             review.resolutions.push_back(resolution);
         }
-        market_admission_journal_.append(std::move(review));reclaim_market_admission();
+        adapter_.admission_journal.append(std::move(review));reclaim_market_admission();
     });
 }
-void BacktestEngine::reclaim_market_admission() {
+void source::PineStrategyHost::reclaim_market_admission() {
     std::vector<uint64_t> live;for(const auto& order:pending_orders_)live.push_back(order.incarnation);
-    market_admission_journal_.retain(compat::pine::admission_retention(market_admission_journal_,live));
+    adapter_.admission_journal.retain(compat::pine::admission_retention(adapter_.admission_journal,live));
 }
-void BacktestEngine::record_market_sizing_revision(PendingOrder& order,admission::SizingObservation before,double affordability_before) {
+void source::PineStrategyHost::record_market_sizing_revision(source::PendingOrder& order,admission::SizingObservation before,double affordability_before) {
     // Only an actual committed liquidation/refresh caller owns this revision.
     if(!order.market_admission.observation()||broker_fill_event_seq_==0)return;
     admission::SizingEvent event;
-    auto allocation = market_admission_journal_.reserve();
+    auto allocation = adapter_.admission_journal.reserve();
     event.receipt={allocation.sequence(),broker_fill_event_seq_,bar_index_,
                    order.market_admission.observation()->command};
     event.incarnation=order.incarnation;event.before=before;
     event.after={order.frozen_default_qty,order.sizing_equity,order.sizing_price,order.sizing_mark,order.sizing_fx};
     event.affordability_equity_before=affordability_before;event.affordability_equity_after=order.affordability_placement_equity;
-    order.market_admission.sizing_revised(event.receipt);market_admission_journal_.append(std::move(event));
+    order.market_admission.sizing_revised(event.receipt);adapter_.admission_journal.append(std::move(event));
     reclaim_market_admission();
 }
-std::vector<admission::Field> BacktestEngine::market_admission_fields() const {
+std::vector<admission::Field> source::PineStrategyHost::market_admission_fields() const {
     std::vector<admission::Field> fields;const auto add=[&](const auto& field){fields.push_back(field);};
-    market_admission_journal_.reflect("journal",add);
+    adapter_.admission_journal.reflect("journal",add);
     for(const auto& order:pending_orders_)admission::reflect(order.market_admission,"orders["+std::to_string(order.incarnation)+"]",add);
     return fields;
 }

@@ -1,5 +1,6 @@
 // Literal calls to the real F7 and F8 adapters. No run(), tape or strategy loop.
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -10,6 +11,7 @@
 #include <string>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 namespace x = pineforge::execution;
 namespace {
 int checks = 0, failures = 0;
@@ -25,8 +27,8 @@ template<class Tag, auto Member> struct Access {
 };
 struct FlipTag { friend auto access(FlipTag); };
 struct SequentialTag { friend auto access(SequentialTag); };
-template struct Access<FlipTag, &BacktestEngine::flip_market_position_to>;
-template struct Access<SequentialTag, &BacktestEngine::sequential_same_tick_reversal_fill>;
+template struct Access<FlipTag, &pineforge::source::PineStrategyHost::flip_market_position_to>;
+template struct Access<SequentialTag, &pineforge::source::PineStrategyHost::sequential_same_tick_reversal_fill>;
 
 uint64_t bits(double value) {
     uint64_t result;
@@ -48,7 +50,7 @@ void near(double actual, double expected) {
     CHECK(ok);
 }
 
-struct Book final : BacktestEngine {
+struct Book final : pineforge::source::PineStrategyHost {
     Book() {
         initial_capital_ = 1000;
         commission_type_ = CommissionType::CASH_PER_ORDER;
@@ -64,7 +66,7 @@ struct Book final : BacktestEngine {
         current_bar_ = {100, 130, 70, 110, 1, 1736121660000LL};
         bar_index_ = 7;
     }
-    void on_bar(const Bar&) override {}
+    void on_source_bar(const Bar&) override {}
     void open(double quantity, double price, uint64_t incarnation) {
         const x::PhysicalExecutionContext context{1736121600000LL, 6, {}, {}};
         REQUIRE(settle_native_execution_at(order_action::Transact{quantity},
@@ -91,7 +93,7 @@ struct Book final : BacktestEngine {
     }
     void already_resolved_slippage() { slippage_ = 99; }
     void retain_exit() {
-        PendingOrder order;
+        PendingOrder order{};
         order.id = "retained";
         order.from_entry = "old";
         order.type = OrderType::EXIT;

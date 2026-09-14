@@ -11,6 +11,7 @@
 #include <pineforge/pineforge.h>
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/pending_order_mirror.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -20,8 +21,9 @@
 #include <string>
 #include <vector>
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 namespace pineforge {
-void fill_pending_order_mirror(const PendingOrder&, pf_pending_order_v1_t*);
+void fill_pending_order_mirror(const source::PendingOrder&, pf_pending_order_v1_t*);
 const pf_field_desc_t* pending_order_layout(int*);
 }
 namespace {
@@ -38,15 +40,15 @@ uint64_t fnv1a64(const std::string& s) {
 
 const std::string kLongId(70, 'x');   // > 63 bytes: exercises truncation + hash64
 
-class Probe final : public BacktestEngine {
+class Probe final : public pineforge::source::PineStrategyHost {
 public:
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         if (bar_index_ == 0) strategy_entry("L", true);
         // bar 1: the MARKET entry filled at this bar's open; rest a stop-only
         // exit with an over-long id so the mirror's char[64] truncates.
         if (bar_index_ == 1) strategy_exit(kLongId, "L", na<double>(), 95.0);
     }
-    const std::vector<PendingOrder>& book() const { return pending_orders_; }
+    const std::vector<source::PendingOrder>& book() const { return pending_orders_; }
 };
 
 Probe Build2Bars() {
@@ -65,7 +67,7 @@ int main() {
     Probe s = Build2Bars();
     CHECK(s.book().size() == 1);
     if (s.book().empty()) return 1;
-    const PendingOrder& o = s.book()[0];
+    const source::PendingOrder& o = s.book()[0];
 
     // --- fill_pending_order_mirror: value semantics -----------------------
     pf_pending_order_v1_t m;
@@ -108,7 +110,7 @@ int main() {
         CHECK(std::memcmp(&m, &m2, sizeof m) == 0);
     }
     {
-        PendingOrder cancelled = o;
+        source::PendingOrder cancelled = o;
         CancellationTarget target{cancelled.legs.target().incarnation,
                                   cancelled.legs.target().owner,
                                   cancelled.legs.revision()};
@@ -224,9 +226,9 @@ int main() {
     // --- the accessors track the live book -------------------------------------
     {
         const std::vector<Bar> bars = {flat_bar(100, 0), flat_bar(100, 60'000)};
-        class Empty final : public BacktestEngine {
+        class Empty final : public pineforge::source::PineStrategyHost {
         public:
-            void on_bar(const Bar&) override {}
+            void on_source_bar(const Bar&) override {}
         } e;
         e.run(bars.data(), 2);
         CHECK(strategy_pending_orders_len(&e) == 0);

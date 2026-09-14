@@ -16,8 +16,10 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -49,7 +51,7 @@ static Bar bar(double o, double h, double l, double c, int i) {
     return b;
 }
 
-class ExitProbe : public BacktestEngine {
+class ExitProbe : public pineforge::source::PineStrategyHost {
 public:
     enum class Mode {
         LiveLong,
@@ -78,7 +80,7 @@ public:
 
     double position() const { return signed_position_size(); }
 
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         const bool short_mode = mode_ == Mode::LiveShort;
         const bool deferred = mode_ == Mode::DeferredLong;
 

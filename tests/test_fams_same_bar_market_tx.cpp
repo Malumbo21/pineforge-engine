@@ -35,10 +35,12 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 #include "test_fams_same_bar_market_tx_data.hpp"
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -71,7 +73,7 @@ struct Fixture {
     int nrows;
 };
 
-class TapeProbe final : public BacktestEngine {
+class TapeProbe final : public pineforge::source::PineStrategyHost {
 public:
     explicit TapeProbe(const Fixture& f) : f_(f) {
         initial_capital_ = f.capital;
@@ -90,7 +92,7 @@ public:
         syminfo_.session = "1700-1600";
     }
 
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         const int k = bar_index_ % 8;
         if (k == 0 && f_.seed) {
             if (f_.seed_long) strategy_entry("Long", true);

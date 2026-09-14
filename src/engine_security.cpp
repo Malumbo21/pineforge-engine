@@ -487,10 +487,14 @@ bool BacktestEngine::security_input_precedes_range_start(
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
 bool BacktestEngine::aux_security_traded_between(int64_t from_ms,
                                                  int64_t to_ms) const {
+    const Bar* bars = nullptr;
+    int n = 0;
+    source_aux_security_input_view(bars, n);
+    if (bars == nullptr || n <= 0) return false;
     auto it = std::lower_bound(
-        aux_security_bars_.begin(), aux_security_bars_.end(), from_ms,
+        bars, bars + n, from_ms,
         [](const Bar& bar, int64_t ts) { return bar.timestamp < ts; });
-    return it != aux_security_bars_.end() && it->timestamp < to_ms;
+    return it != bars + n && it->timestamp < to_ms;
 }
 #endif
 

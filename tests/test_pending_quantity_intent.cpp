@@ -2,6 +2,7 @@
 // platform expected trades, strategy compilation or campaign measurement.
 #include <pineforge/pineforge.h>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/pending_order_mirror.hpp>
 #include <cmath>
 #include <cstddef>
@@ -16,6 +17,7 @@ namespace prior_mirror {
 }
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 static_assert(offsetof(pf_pending_order_v1_t, struct_version) == offsetof(prior_mirror::pf_pending_order_v1_t, struct_version), "legacy struct_version offset");
 static_assert(offsetof(pf_pending_order_v1_t, size) == offsetof(prior_mirror::pf_pending_order_v1_t, size), "legacy size offset");
 static_assert(offsetof(pf_pending_order_v1_t, id) == offsetof(prior_mirror::pf_pending_order_v1_t, id), "legacy id offset");
@@ -125,7 +127,7 @@ static_assert(offsetof(pf_pending_order_v1_t, suppressed_close_consumed_ledger_q
 static_assert(offsetof(pf_pending_order_v1_t, suppressed_close_retired_ledger_qty) == offsetof(prior_mirror::pf_pending_order_v1_t, suppressed_close_retired_ledger_qty), "legacy suppressed_close_retired_ledger_qty offset");
 static_assert(offsetof(pf_pending_order_v1_t, short_seed_collision_role) == offsetof(prior_mirror::pf_pending_order_v1_t, short_seed_collision_role), "legacy short_seed_collision_role offset");
 namespace pineforge {
-void fill_pending_order_mirror(const PendingOrder&, pf_pending_order_v1_t*);
+void fill_pending_order_mirror(const source::PendingOrder&, pf_pending_order_v1_t*);
 }
 namespace {
 int checks = 0, failures = 0;
@@ -160,7 +162,7 @@ void quantity_values_have_distinct_meaning() {
     CHECK(request.requests_all() && !request.reservation());
 }
 
-class Book : public BacktestEngine {
+class Book : public pineforge::source::PineStrategyHost {
 public:
     Book() {
         initial_capital_ = 100000;
@@ -169,7 +171,7 @@ public:
         pyramiding_ = 10;
         current_bar_ = {100,100,100,100,1,0};
     }
-    void on_bar(const Bar&) override {}
+    void on_source_bar(const Bar&) override {}
     void entry(double qty) { strategy_entry("E", true, nan, nan, qty); }
     void step(double price = 100) {
         ++bar_index_;
@@ -333,7 +335,7 @@ void legacy_mirror_prefix_and_new_facts() {
     CHECK(std::memcmp(prefix.data(),&out,sizeof(prior_mirror::pf_pending_order_v1_t)) == 0);
     for (size_t i=sizeof(prior_mirror::pf_pending_order_v1_t); i<prefix.size(); ++i)
         CHECK(prefix[i] == 0xA5);
-    PendingOrder plain;
+    PendingOrder plain{};
     fill_pending_order_mirror(plain,&out);
     CHECK(out.quantity_intent_kind == 0 && out.quantity_reservation_present == 0);
     CHECK(out.requested_partial == 0 && out.full_percent_exit_request == 0);

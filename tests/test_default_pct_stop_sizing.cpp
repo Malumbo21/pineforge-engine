@@ -57,8 +57,10 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -423,7 +425,7 @@ std::vector<Bar> aht0404_bars() {
     return b;
 }
 
-class Probe : public BacktestEngine {
+class Probe : public pineforge::source::PineStrategyHost {
 public:
     // NYSE:F: mintick 0.01, whole shares, Pine v6 defaults (margin 100,
     // pyramiding 0 = one entry, no commission / slippage, margin call ON in
@@ -446,7 +448,7 @@ public:
         set_margin_call_enabled(false);
     }
     std::function<void(Probe&, int)> script;
-    void on_bar(const Bar& /*bar*/) override {
+    void on_source_bar(const Bar& /*bar*/) override {
         if (script) script(*this, bar_index_);
     }
 
@@ -492,10 +494,10 @@ public:
         return n;
     }
     void enable_margin_call() { set_margin_call_enabled(true); }
-    using BacktestEngine::strategy_entry;
-    using BacktestEngine::strategy_exit;
-    using BacktestEngine::strategy_close;
-    using BacktestEngine::strategy_close_all;
+    using pineforge::source::PineStrategyHost::strategy_entry;
+    using pineforge::source::PineStrategyHost::strategy_exit;
+    using pineforge::source::PineStrategyHost::strategy_close;
+    using pineforge::source::PineStrategyHost::strategy_close_all;
 };
 
 // The four tapes' script: while flat a buy stop 0.20 above and/or a sell

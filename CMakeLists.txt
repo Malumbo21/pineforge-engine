@@ -76,6 +76,23 @@ else()
 endif()
 
 # === pineforge library =================================================
+set(PINEFORGE_SOURCE_LAYER_SOURCES
+    src/source/pine_strategy_host.cpp
+    src/source/pine_strategy_commands.cpp
+    src/source/pine_risk.cpp
+    src/source/pine_market_admission.cpp
+    src/source/pine_scheduler.cpp
+    src/source/pine_stream.cpp
+    src/source/pine_aux_security.cpp
+    src/source/pine_fills.cpp
+    src/source/pine_path_resolve.cpp
+    src/source/pine_orders.cpp
+    src/source/pine_execution_lifecycle.cpp
+    src/source/pine_policy_members.cpp
+    src/source/pine_state_hash.cpp
+    src/source/pine_pending_mirror.cpp
+)
+
 add_library(pineforge STATIC
     src/c_abi.cpp
     src/compat/pine/order_birth.cpp
@@ -88,18 +105,14 @@ add_library(pineforge STATIC
     src/engine_metrics.cpp
     src/engine_orders.cpp
     src/engine_execution.cpp
-    src/engine_execution_lifecycle.cpp
     src/engine_path_resolve.cpp
     src/engine_report.cpp
-    src/engine_risk.cpp
     src/engine_run.cpp
     src/engine_security.cpp
     src/engine_state_hash.cpp
     src/engine_stream.cpp
     src/market_admission.cpp
-    src/engine_market_admission.cpp
     src/compat/pine/market_admission.cpp
-    src/engine_strategy_commands.cpp
     src/engine_trade_accessors.cpp
     src/reservation_expansion.cpp
     src/compat/pine/reservation_expansion.cpp
@@ -123,6 +136,7 @@ add_library(pineforge STATIC
     src/native_calendar.cpp
     src/native_run_spec.cpp
     src/native_fx_curve.cpp
+    ${PINEFORGE_SOURCE_LAYER_SOURCES}
 )
 
 # Canonical alias for downstream find_package(PineForge) consumers.

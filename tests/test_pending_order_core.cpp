@@ -2,12 +2,14 @@
 // external broker, campaign, or generated expected values.
 #include <pineforge/pineforge.h>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/pending_order_mirror.hpp>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 namespace {
 int checks = 0, failures = 0;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; std::fprintf(stderr,"FAIL %d %s\n",__LINE__,#x); } } while (0)
@@ -16,12 +18,12 @@ constexpr double missing = std::numeric_limits<double>::quiet_NaN();
 template<class Tag, typename Tag::Type Member>
 struct PrivateMember { friend typename Tag::Type access(Tag) { return Member; } };
 struct BindLayers {
-    using Type = void (BacktestEngine::*)(const std::string&, std::vector<uint64_t>&);
+    using Type = void (pineforge::source::PineStrategyHost::*)(const std::string&, std::vector<uint64_t>&);
     friend Type access(BindLayers);
 };
-template struct PrivateMember<BindLayers, &BacktestEngine::reconcile_deferred_layered_exits>;
+template struct PrivateMember<BindLayers, &pineforge::source::PineStrategyHost::reconcile_deferred_layered_exits>;
 
-class Book : public BacktestEngine {
+class Book : public pineforge::source::PineStrategyHost {
 public:
     Book() {
         initial_capital_ = 100000;
@@ -33,7 +35,7 @@ public:
         close_entries_rule_any_ = true;
         current_bar_ = {100,100,100,100,1,0};
     }
-    void on_bar(const Bar&) override {}
+    void on_source_bar(const Bar&) override {}
     void step() {
         ++bar_index_;
         current_bar_ = {100,100,100,100,1,int64_t(bar_index_)*60000};

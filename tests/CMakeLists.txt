@@ -36,6 +36,9 @@ set(TEST_SOURCES
     test_native_market_vertical_contract
     test_native_calendar_driver_contract
     test_native_host_repairs
+    test_source_layer_native_defaults
+    test_source_fingerprint
+    test_source_host_intraday_cap_setter
     test_order_action_integration
     test_placement_facts
     test_order_cancellation
@@ -60,6 +63,7 @@ set(TEST_SOURCES
     test_exit_lifecycle_availability
     test_exit_activation_routes
     test_pending_order_core
+    test_pending_order_v1_canary
     test_pending_quantity_intent
     test_bulk_preflight
     test_opening_obligation
@@ -353,6 +357,16 @@ add_test(
             ${PROJECT_SOURCE_DIR}/scripts/test_native_cpp_versions.py
 )
 add_test(
+    NAME test_native_include_independence_tooling
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_native_include_independence.py
+)
+add_test(
+    NAME test_native_source_guard
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_native_source_guard.py
+)
+add_test(
     NAME test_native_cpp_abi
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/check_native_cpp_abi.py
             --compiler ${CMAKE_CXX_COMPILER}
@@ -378,6 +392,9 @@ set(PINEFORGE_NATIVE_ABI_V13_RECEIPT
 set(PINEFORGE_NATIVE_ABI_V14_RECEIPT
     "${PROJECT_BINARY_DIR}/native-abi-v14/receipt.json"
     CACHE FILEPATH "Prepared actual f736676 epoch 14 ABI provider receipt")
+set(PINEFORGE_NATIVE_ABI_V15_FROZEN_RECEIPT
+    "${PROJECT_BINARY_DIR}/native-abi-v15-frozen/receipt.json"
+    CACHE FILEPATH "Prepared actual e7cdf052 frozen epoch 15 ABI provider receipt")
 add_test(NAME test_settlement_cpp_abi
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/check_settlement_cpp_abi.py
         --compiler ${CMAKE_CXX_COMPILER}
@@ -388,6 +405,7 @@ add_test(NAME test_settlement_cpp_abi
         --prior-receipt ${PINEFORGE_SETTLEMENT_ABI_PRIOR_RECEIPT}
         --v13-receipt ${PINEFORGE_NATIVE_ABI_V13_RECEIPT}
         --v14-receipt ${PINEFORGE_NATIVE_ABI_V14_RECEIPT}
+        --v15-frozen-receipt ${PINEFORGE_NATIVE_ABI_V15_FROZEN_RECEIPT}
         --receipt ${PROJECT_BINARY_DIR}/settlement-abi-receipt.json
         ${_pf_script_cpp_abi_flags})
 set_tests_properties(test_settlement_cpp_abi PROPERTIES TIMEOUT 600)

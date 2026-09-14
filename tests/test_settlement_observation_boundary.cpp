@@ -1,5 +1,6 @@
 // Actual native/source settlement boundaries. No run(), tape or copied observer.
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/execution_projection.hpp>
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <vector>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 namespace x = pineforge::execution;
 namespace {
 int checks = 0, failures = 0;
@@ -52,7 +54,7 @@ constexpr int maximum = std::numeric_limits<int>::max();
 constexpr int64_t chart_time = 1743436800000LL; // 2025-04-01 00:00 Taipei, day104
 x::Fill fill(double price = 100, double fee = 0) { return {price, "effect", "literal", 90, fee}; }
 
-struct Book final : BacktestEngine {
+struct Book final : pineforge::source::PineStrategyHost {
     std::vector<uint64_t> members{11};
     double target = -.1;
     x::PhysicalExecutionContext native_context{999000, 9, {}, {}};
@@ -66,7 +68,7 @@ struct Book final : BacktestEngine {
         clock(chart_time, "Asia/Taipei");
         bar_index_ = 7;
     }
-    void on_bar(const Bar&) override {}
+    void on_source_bar(const Bar&) override {}
     void clock(int64_t time, const char* timezone) {
         current_bar_ = {100, 100, 100, 100, 1, time};
         set_chart_timezone(timezone);
@@ -132,7 +134,7 @@ struct Book final : BacktestEngine {
     uint64_t lifecycle_sequence() const { return exit_leg_event_seq_; }
     uint64_t next_order() const { return next_order_incarnation_; }
     void pending_exit() {
-        PendingOrder order;
+        PendingOrder order{};
         order.id = "pending"; order.type = OrderType::EXIT; order.incarnation = 700; order.created_seq = 700;
         order.legs.attach(order.incarnation, position_cycle_seq_);
         pending_orders_.push_back(std::move(order));

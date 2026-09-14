@@ -21,7 +21,8 @@ from pathlib import Path
 from check_native_cpp_versions import FILES, check as check_native_versions
 from check_aggregate_cpp_versions import clean
 from prepare_settlement_cpp_abi_base import (
-    V14_COMMIT, V14_TREE, authenticate_headers, extract_tar,
+    V14_COMMIT, V14_TREE, V15_FROZEN_COMMIT, V15_FROZEN_TREE,
+    authenticate_headers, extract_tar,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +45,8 @@ ORDER_V1_HEADER_SHA = "b13006e99554ba9caa3e5b444cca3e4f2b5ebd5e372d3dcbe44bb6a67
 
 V14_HEADERS_SHA256 = "37e9340e0a985db118006e7e3b265e0191445285ce5e8fd8fc77f1578275e28e"
 V14_ENGINE_EPOCH = "engine_script_run_v14"
+V15_FROZEN_HEADERS_SHA256 = "189a0e99ff60f7c9284243117fe501ebf9a9fb6269c787dad35957d0ca7a6ed3"
+V15_FROZEN_ENGINE_EPOCH = "engine_script_run_v15"
 CURRENT_TERMS_SURFACE_READY = True
 CURRENT_RESULT_DIAGNOSTIC = "R4B_CURRENT_RESULT_ALTERNATIVES"
 
@@ -129,11 +132,11 @@ int main() {
 HOST_CALLER = '''#include <pineforge/native_host.hpp>
 #include <type_traits>
 static_assert(std::is_same_v<pineforge::NativeStrategyHost,
-    pineforge::engine_script_run_v15::NativeStrategyHost>);
+    pineforge::engine_script_run_v16::NativeStrategyHost>);
 static_assert(std::is_same_v<pineforge::NativeStateView,
-    pineforge::engine_script_run_v15::NativeStateView>);
+    pineforge::engine_script_run_v16::NativeStateView>);
 static_assert(std::is_same_v<pineforge::NativeFailure,
-    pineforge::engine_script_run_v15::NativeFailure>);
+    pineforge::engine_script_run_v16::NativeFailure>);
 static_assert(std::is_trivially_copyable_v<pineforge::NativeFailure>);
 static_assert(std::is_trivially_copyable_v<pineforge::NativeFailureContext>);
 int main(int argc, char** argv) {
@@ -146,7 +149,7 @@ int main(int argc, char** argv) {
 HOST_EVENTS_CALLER = '''#include <pineforge/native_host.hpp>
 #include <type_traits>
 static_assert(std::is_same_v<pineforge::NativeStrategyHost,
-    pineforge::engine_script_run_v15::NativeStrategyHost>);
+    pineforge::engine_script_run_v16::NativeStrategyHost>);
 int main(int argc, char** argv) {
     auto* host = reinterpret_cast<pineforge::NativeStrategyHost*>(argv);
     auto events = host->native_events(0);
@@ -173,10 +176,10 @@ int main(int argc, char** argv) {
 CURRENT_EXECUTION_V15_CALLER = '''#include <pineforge/native_host.hpp>
 #include <type_traits>
 #include <variant>
-using H = pineforge::engine_script_run_v15::NativeStrategyHost;
-using C = pineforge::engine_script_run_v15::NativeCurrentExecution;
-using P = pineforge::engine_script_run_v15::NativeCurrentExecutionPreview;
-using R = pineforge::engine_script_run_v15::NativeCurrentExecutionResult;
+using H = pineforge::engine_script_run_v16::NativeStrategyHost;
+using C = pineforge::engine_script_run_v16::NativeCurrentExecution;
+using P = pineforge::engine_script_run_v16::NativeCurrentExecutionPreview;
+using R = pineforge::engine_script_run_v16::NativeCurrentExecutionResult;
 static_assert(std::variant_size_v<R> == 5, "R4B_CURRENT_RESULT_ALTERNATIVES");
 static_assert(std::is_same_v<std::variant_alternative_t<4, R>,
     pineforge::native_order::CancelledEvent>);
@@ -212,9 +215,9 @@ int main(int argc, char** argv) {
 NATIVE_FX_CURVE_CALLER = '''#include <pineforge/native_fx_curve.hpp>
 #include <pineforge/native_host.hpp>
 #include <type_traits>
-using H = pineforge::engine_script_run_v15::NativeStrategyHost;
+using H = pineforge::engine_script_run_v16::NativeStrategyHost;
 using V = pineforge::NativeFxCurveValidation;
-using S = pineforge::engine_script_run_v15::NativeFxCurveSetupResult;
+using S = pineforge::engine_script_run_v16::NativeFxCurveSetupResult;
 static_assert(std::is_same_v<V, pineforge::native_fx_curve_v1::NativeFxCurveValidation>);
 static_assert(std::is_same_v<decltype(V::error), pineforge::NativeFxCurveError>);
 static_assert(std::is_same_v<decltype(V::index), std::size_t>);
@@ -274,7 +277,7 @@ def current_order_namespace(text: str) -> str:
 
 
 def render_current_execution_caller(epoch: str) -> str:
-    if epoch not in (V14_ENGINE_EPOCH, "engine_script_run_v15"):
+    if epoch not in (V14_ENGINE_EPOCH, "engine_script_run_v16"):
         raise RuntimeError("current-execution caller requires a current-execution provider")
     return CURRENT_EXECUTION_CALLER.replace("ENGINE_EPOCH", epoch)
 
@@ -286,12 +289,16 @@ def control_applicability(ready: bool | None = None) -> list[dict]:
     controls = (
         ("v14_current_execution_shape_agnostic_compile", "compile", True,
          "CURRENT_EXECUTION_CALLER", V14_ENGINE_EPOCH),
-        ("v15_current_execution_surface_compile", "compile", ready,
-         "CURRENT_EXECUTION_V15_CALLER", "engine_script_run_v15"),
-        ("v15_current_result_missing_cancelled_compile_reject", "compile_rejection", ready,
-         "CURRENT_EXECUTION_V15_CALLER", "engine_script_run_v15"),
-        ("v15_native_fx_curve_surface_compile", "compile", ready,
-         "NATIVE_FX_CURVE_CALLER", "engine_script_run_v15"),
+        ("v16_current_execution_surface_compile", "compile", ready,
+         "CURRENT_EXECUTION_V15_CALLER", "engine_script_run_v16"),
+        ("v16_current_result_missing_cancelled_compile_reject", "compile_rejection", ready,
+         "CURRENT_EXECUTION_V15_CALLER", "engine_script_run_v16"),
+        ("v16_native_fx_curve_surface_compile", "compile", ready,
+         "NATIVE_FX_CURVE_CALLER", "engine_script_run_v16"),
+        ("v16_to_v15_frozen_current_execution_compile_reject", "compile_rejection", ready,
+         "CURRENT_EXECUTION_V15_CALLER", V15_FROZEN_ENGINE_EPOCH),
+        ("v16_to_v15_frozen_native_fx_curve_compile_reject", "compile_rejection", ready,
+         "NATIVE_FX_CURVE_CALLER", V15_FROZEN_ENGINE_EPOCH),
     )
     return [{"name": name, "kind": kind, "applicable": bool(applicable),
              "status": "required" if applicable else "pending_surface",
@@ -299,21 +306,34 @@ def control_applicability(ready: bool | None = None) -> list[dict]:
             for name, kind, applicable, template, epoch in controls]
 
 
-def authenticate_v14_fixture(fixture: Path, destination: Path) -> dict:
-    """Authenticate the pinned tar closure independently of gzip-JSON fixtures."""
+def authenticate_host_fixture(fixture: Path, destination: Path, *, archive_sha256: str,
+                              commit: str, tree: str, epoch: str, label: str) -> dict:
+    """Authenticate a pinned host tar closure independently of gzip-JSON fixtures."""
     archive = (fixture / "headers.tar").read_bytes()
-    if sha256(archive) != V14_HEADERS_SHA256:
-        raise RuntimeError("frozen v14 header archive digest mismatch")
+    if sha256(archive) != archive_sha256:
+        raise RuntimeError("frozen " + label + " header archive digest mismatch")
     extract_tar(archive, destination)
-    manifest = authenticate_headers(destination, fixture / "manifest.json",
-                                    commit=V14_COMMIT, tree=V14_TREE)
+    manifest = authenticate_headers(destination, fixture / "manifest.json", commit=commit, tree=tree)
     for name in ("engine.hpp", "native_host.hpp"):
         text = (destination / "include/pineforge" / name).read_text()
         epochs = set(re.findall(r"\binline\s+namespace\s+(engine_script_run_v\d+)\s*\{",
                                 clean(text)))
-        if epochs != {V14_ENGINE_EPOCH}:
-            raise RuntimeError("frozen v14 header owner mismatch: " + name)
+        if epochs != {epoch}:
+            raise RuntimeError("frozen " + label + " header owner mismatch: " + name)
     return manifest
+
+
+def authenticate_v14_fixture(fixture: Path, destination: Path) -> dict:
+    return authenticate_host_fixture(
+        fixture, destination, archive_sha256=V14_HEADERS_SHA256,
+        commit=V14_COMMIT, tree=V14_TREE, epoch=V14_ENGINE_EPOCH, label="v14")
+
+
+def authenticate_v15_frozen_fixture(fixture: Path, destination: Path) -> dict:
+    return authenticate_host_fixture(
+        fixture, destination, archive_sha256=V15_FROZEN_HEADERS_SHA256,
+        commit=V15_FROZEN_COMMIT, tree=V15_FROZEN_TREE,
+        epoch=V15_FROZEN_ENGINE_EPOCH, label="v15")
 
 
 def remove_current_result_cancelled(text: str) -> str:
@@ -554,7 +574,7 @@ def main() -> int:
         ("abi_accept_coordinate(pineforge::NativeCoordinate",
          "abi_accept_coordinate(pineforge::native_driver_v4::NativeCoordinate"),
         ("pineforge::engine_script_run_v12::NativeStrategyHost::native_events(",
-         "pineforge::engine_script_run_v15::NativeStrategyHost::native_events("),
+         "pineforge::engine_script_run_v16::NativeStrategyHost::native_events("),
     )
     for old, new in controls:
         if old in new:
@@ -576,7 +596,7 @@ def main() -> int:
             "native_calendar": "pineforge::native_calendar::native_calendar_v2",
             "native_run_spec": "pineforge::native_run_spec_v1",
             "native_driver": "pineforge::native_driver_v4",
-            "native_host": "pineforge::engine_script_run_v15",
+            "native_host": "pineforge::engine_script_run_v16",
         },
         "executable_runs": 0,
         "compiles": [],
@@ -659,6 +679,19 @@ def main() -> int:
             "archive_sha256": V14_HEADERS_SHA256,
             "manifest_sha256": sha256((FIXTURE / v14_name / "manifest.json").read_bytes()),
             "files": v14_manifest["files"], "provider_epoch": V14_ENGINE_EPOCH,
+        }
+        v15_frozen_name = "host-e7cdf05"
+        v15_frozen_destination = root / v15_frozen_name
+        v15_frozen_manifest = authenticate_v15_frozen_fixture(
+            FIXTURE / v15_frozen_name, v15_frozen_destination)
+        v15_frozen_include = v15_frozen_destination / "include"
+        receipt["fixtures"][v15_frozen_name] = {
+            "source_commit": v15_frozen_manifest["commit"],
+            "source_tree": v15_frozen_manifest["tree"],
+            "archive_sha256": V15_FROZEN_HEADERS_SHA256,
+            "manifest_sha256": sha256((FIXTURE / v15_frozen_name / "manifest.json").read_bytes()),
+            "files": v15_frozen_manifest["files"],
+            "provider_epoch": V15_FROZEN_ENGINE_EPOCH,
         }
 
         def compile_object(name, source, include_path, extra_source_dir=None):
@@ -769,23 +802,43 @@ def main() -> int:
         current_host = compile_object("current_host_caller", HOST_CALLER, include)
         current_host_events = compile_object("current_host_events_caller", HOST_EVENTS_CALLER, include)
         current_execution = compile_object("current_execution_caller",
-                                           render_current_execution_caller("engine_script_run_v15"), include)
+                                           render_current_execution_caller("engine_script_run_v16"), include)
         compile_object("v14_current_execution_shape_agnostic_compile",
                        render_current_execution_caller(V14_ENGINE_EPOCH), v14_include)
         current_surface = current_fx_curve = None
         if CURRENT_TERMS_SURFACE_READY:
-            current_surface = compile_object("v15_current_execution_surface_compile",
+            current_surface = compile_object("v16_current_execution_surface_compile",
                                              CURRENT_EXECUTION_V15_CALLER, include)
-            current_fx_curve = compile_object("v15_native_fx_curve_surface_compile",
+            current_fx_curve = compile_object("v16_native_fx_curve_surface_compile",
                                               NATIVE_FX_CURVE_CALLER, include)
-            # The unmodified V15 probe above must compile before this mutation is meaningful.
+            for name, source in (
+                ("v16_to_v15_frozen_current_execution_compile_reject",
+                 CURRENT_EXECUTION_V15_CALLER),
+                ("v16_to_v15_frozen_native_fx_curve_compile_reject",
+                 NATIVE_FX_CURVE_CALLER),
+            ):
+                path = root / (name + ".cpp")
+                path.write_text(source)
+                compiled = subprocess.run(
+                    [*common, "-I", str(v15_frozen_include), "-I", args.generated_include,
+                     "-c", str(path), "-o", str(root / (name + ".o"))],
+                    capture_output=True, text=True, timeout=90)
+                diagnostic = diagnostic_text(compiled)
+                if compiled.returncode == 0 or "engine_script_run_v16" not in diagnostic:
+                    raise RuntimeError(name + " did not reject the v15-frozen provider:\n" + diagnostic)
+                receipt["compile_rejections"].append({
+                    "name": name, "outcome": "expected_compile_rejection",
+                    "exit": compiled.returncode, "diagnostics": diagnostic,
+                    "not_executed": True,
+                })
+            # The unmodified v16 probe above must compile before this mutation is meaningful.
             mutated_include = root / "missing-cancelled-include"
             shutil.copytree(include, mutated_include)
             mutated_host = mutated_include / "pineforge/native_host.hpp"
             original_header = mutated_host.read_bytes()
             mutated_host.write_bytes(remove_current_result_cancelled(original_header.decode()).encode())
             receipt["compile_rejections"].append(expect_compile_rejection(
-                "v15_current_result_missing_cancelled_compile_reject",
+                "v16_current_result_missing_cancelled_compile_reject",
                 CURRENT_EXECUTION_V15_CALLER, mutated_include, compiler_flags=common,
                 generated_include=args.generated_include, scratch=root,
                 original_header_sha256=sha256(original_header)))
@@ -888,8 +941,8 @@ def main() -> int:
         link("current_host_events_to_current_library", [current_host_events], library)
         link("current_execution_to_current_library", [current_execution], library)
         if CURRENT_TERMS_SURFACE_READY:
-            link("v15_current_execution_surface_to_current_library", [current_surface], library)
-            link("v15_native_fx_curve_to_current_library", [current_fx_curve], library)
+            link("v16_current_execution_surface_to_current_library", [current_surface], library)
+            link("v16_native_fx_curve_to_current_library", [current_fx_curve], library)
         link("current_coordinate_to_current_provider",
              [current_coordinate], current_coordinate_provider)
 
@@ -935,7 +988,7 @@ def main() -> int:
         link("current_spec_to_old_symbol_control", [current_spec], old_spec_symbols,
              "pineforge::native_run_spec_v1::validate_native_run_spec(")
         link("current_host_events_to_old_symbols", [current_host_events], old_host_events_symbols,
-             "pineforge::engine_script_run_v15::NativeStrategyHost::native_events(")
+             "pineforge::engine_script_run_v16::NativeStrategyHost::native_events(")
         link("current_bar_to_old_object", [current_bar], old_bar_obj,
              "pineforge::native_driver_v4::native_bar_structurally_valid(")
         link("current_coordinate_to_old_provider", [current_coordinate], old_coordinate_provider,

@@ -24,17 +24,13 @@
 #include "execution_close_selection.hpp"
 #include "execution_projection.hpp"
 #include "execution_reverse_to.hpp"
+#include "position_close_obligation.hpp"
 #include "market_admission.hpp"
 #include "reservation_expansion.hpp"
 #include "order_cancellation.hpp"
-#include "compat/pine/frozen_market_instruction.hpp"
 #include "leg_activation.hpp"
 #include "exit_leg_lifecycle.hpp"
-#include "compat/pine/exit_activation.hpp"
 #include "order_birth.hpp"
-#include "compat/pine/order_birth.hpp"
-#include "compat/pine/intraday_cap.hpp"
-#include "compat/pine/order_priority.hpp"
 #include "series.hpp"
 #include "timeframe.hpp"
 #include "magnifier.hpp"
@@ -49,27 +45,11 @@
 // Angle-bracket form is the installed public path (deliberate).
 #include <pineforge/pineforge.h>
 
-// The public C mirror needs the engine's admission journal to derive
-// source-bound placement facts. The context-free form refuses a bound priced
-// entry whose original history is needed; other orders have no predecessor.
-namespace pineforge {
-void fill_pending_order_mirror(const PendingOrder&,
-                               const MarketAdmissionJournal*,
-                               pf_pending_order_v1_t*);
-void fill_pending_order_mirror(const PendingOrder&, pf_pending_order_v1_t*);
-}
-
 // Generated modules using the full script lifecycle reset must be rebuilt
 // against a runtime providing this hook. This is an internal C++ capability;
 // it does not change any public C POD or exported C function signature.
 #define PINEFORGE_HAS_SCRIPT_RUN_PREPARE_V1 1
 #define PINEFORGE_HAS_NATIVE_LIVE_V1 1
-// Generated constructors can explicitly select Pine cap compatibility before
-// any host metadata setter. Older engines keep their legacy default behavior.
-#define PINEFORGE_HAS_EXPLICIT_PINE_CAP_V1 1
-// Explicitly selects cap and retained-parent priority compatibility only.
-#define PINEFORGE_HAS_EXPLICIT_PINE_EXECUTION_ADAPTER_V1 1
-
 namespace pineforge {
 
 enum class PositionSide { FLAT, LONG, SHORT };
@@ -190,13 +170,6 @@ struct StreamOrderAction {
 // its result with a tick-built price at the ulp, so a floor(x/u+0.5)*u
 // construction (n x fl(1e-9), 6.7e-17 above the decimal) would decide the
 // ties wrongly — 100/507 on the famr3 sweeps.
-inline double tv_money_round(double value) {
-    if (!std::isfinite(value) || value == 0.0) return value;
-    const double magnitude = std::floor(std::log10(std::abs(value)));
-    const double scale = std::pow(10.0, 9.0 - magnitude);
-    const double rounded = std::floor(std::abs(value) * scale + 0.5) / scale;
-    return value < 0.0 ? -rounded : rounded;
-}
 // The broker's lot floor on ten-digit money (rule 1): the RAW double floor
 // of the scaled quantity, no representation nudge — a nudge would promote
 // the 918062.29999999992 quotient above to918062.30, one lot more than TV.
@@ -205,16 +178,6 @@ inline double tv_money_round(double value) {
 // reconstructed grid quantity does not exceed the input. The 1.169 pin
 // keeps8595.81; the older 1.085 pin still floors918062.29999999993 to918062.29
 // because the next grid point is above that input. Other scales stay unchanged.
-inline double tv_money_floor_lot(double qty, double step) {
-    if (!(step > 0.0) || !std::isfinite(qty) || qty <= 0.0) return qty;
-    double floored = std::floor(qty / step) * step;
-    if (step == 0.01) {
-        const double cent_candidate = std::floor(qty * 100.0) * step;
-        if (cent_candidate > floored && cent_candidate <= qty)
-            floored = cent_candidate;
-    }
-    return floored < qty ? floored : qty;
-}
 
 // Forward declaration of an internal enum used by some BacktestEngine
 // method signatures. The full definition lives in src/engine_internal.hpp
@@ -429,538 +392,11 @@ enum class ShortSeedCollisionRole : uint8_t {
     FINAL_SHORT,
 };
 
-// PendingOrder crosses out-of-line helper boundaries independently of the
-// engine class, so its changed layout must carry the same internal epoch.
 using ExitLegLifecycle = exit_legs::Lifecycle;
-inline namespace engine_script_run_v15 {
-struct PendingOrder {
-    std::string id;
-    std::string from_entry;    // for exit orders
-    OrderType type;
-    bool is_long;
-    ExitLegLifecycle legs; // canonical trigger definition and exit lifecycle
-    double qty;                // NaN = use default sizing, else explicit qty
-    int qty_type;              // -1 = qty is fixed contracts, else QtyType override
-    double qty_percent;        // 100 = full position
-    std::string oca_name;      // OCA group name
-    int oca_type;              // 0=none, 1=cancel, 2=reduce
-    int created_bar;           // bar_index when order was created
-    int64_t created_seq = 0;
-    // Fresh identity for this exact pending-order object. Unlike created_seq,
-    // which intentionally survives same-id replacement to keep broker ordering
-    // stable, incarnation is never copied or reused by a replacement.
-    uint64_t incarnation = 0;
-    // Exact live object whose priority slot this newly accepted order replaces.
-    // Fresh and cancel-then-recreate orders carry zero. This is causal identity,
-    // not a Boolean source-shape label: every entry, RAW and primary exit path
-    // records its immediate predecessor before that object is erased. Reissued
-    // extra exit legs are fresh objects and do not share the primary receipt.
-    uint64_t replaced_order_incarnation = 0;
-    // Exact default MARKET replaced on this source bar. A priced order or
-    // a prior-bar carry with the same id does not prove this call topology.
-    uint64_t replaced_default_market_incarnation = 0;
-    // Broker cancellation receipt. Pine compatibility selects the causal
-    // cancellation at its adapter boundary; the core retains one generic
-    // source-bound result for every affected order and owns the once-only
-    // close-claim release transition.
-    OrderCancellationReceipt cancellation;
-    // Incarnation of the live priced ENTRY removed by strategy.cancel(id)
-    // earlier in the same source evaluation, copied only onto the first fresh
-    // same-id strategy.entry call and then consumed. Zero means there is no
-    // exact named-cancel -> fresh-recreate provenance.
-    uint64_t recreated_after_named_cancelled_entry_incarnation = 0;
-    // Incarnation of the unique attached EXIT child that was still live when
-    // the parent above was named-cancelled. Copied with the parent cancel
-    // token and consumed by the same fresh recreate call.
-    uint64_t named_cancel_surviving_exit_incarnation = 0;
-    // Entry stop-limit activation is durable broker state. Once the stop leg
-    // fires, later bars—and later COOF scheduler segments on the same bar—
-    // evaluate only the live limit leg until the order fills or is replaced.
-    bool stop_limit_activated = false;
-    // Concrete activation bounds belong to the currently bound exposure cycle.
-    // Pine placement evidence is retained separately for explicit rebinding.
-    ExitLegActivation leg_activation;
-    PineExitActivationPolicy pine_exit_activation;
-    // Immutable evaluation/fill origin, captured once for this incarnation.
-    // Historical extreme-only/trailing permissions live in compat::pine.
-    OrderBirth birth;
-    // Disclosed Pine historical fill permission. Trigger fields can be
-    // neutralized before deferred compaction; those mutations must not
-    // rewrite a birth-time permission or masquerade as a different origin.
-    PineHistoricalBirthReach pine_birth_reach = PineHistoricalBirthReach::Standard;
-    // KI-67 exit cascade (Model S). Set at birth for a Pine historical-cascade
-    // strategy.exit order: the historical-path LEG index (0 = O->W1, 1 = W1->W2,
-    // 2 = W2->C) the triggering intrabar fill (coof_cursor_price_ "ap") landed
-    // on — the "in-flight" leg. -1 when the order is not a mid-bar cascade exit,
-    // or ap is off-path (roll). The gate holds the order on that leg's remainder,
-    // lets it EXACT-level fill on every SUBSEQUENT leg, and (when
-    // coof_cascade_inflight_fires) gap-fills it at the in-flight leg-end waypoint.
-    int8_t coof_cascade_seg_i = -1;
-    // KI-67 exit cascade: true when the exit may gap-fill at the in-flight
-    // leg-end waypoint. Normally its level lies inside the in-flight remainder
-    // in the trigger direction (Model S clause 1). The one scoped extension is
-    // a marketable LIMIT born after a later same-O fill: it is held through leg
-    // 0 and gets its gap attempt at W1. Marketable STOP never uses that extension.
-    // Otherwise subsequent legs exact-fill, while a terminal/off-path order rolls.
-    bool coof_cascade_inflight_fires = false;
-    // Placement exposure used by this order. ENTRY/RAW capture the physical
-    // side; Pine EXIT captures the exposure after earlier same-evaluation
-    // close claims. This is not a universal physical-position snapshot.
-    PositionSide created_position_side = PositionSide::FLAT;
-    // Monotonic identity of the live position instance at placement. Side
-    // alone is insufficient: a resting order can survive LONG -> SHORT ->
-    // LONG and must not be mistaken for an order born in the later LONG
-    // cycle. Zero means the order was created while broker-flat.
-    int64_t created_position_cycle_seq = 0;
-    // Call-bar provenance for the one deferred close_all whose post-fill
-    // cleanup may preserve this order. Set only on a PRIOR-bar, pure-STOP
-    // strategy.entry that was under the pyramiding cap and reused the id of a
-    // physically-live same-side pyramid lot when close_all was called. The
-    // cleanup requires both this value AND the paired incarnation below to
-    // equal the ACTUAL order that flattened, so a same-call-bar earlier RAW or
-    // close(id) fill cannot impersonate close_all. -1/0 means no provenance.
-    int same_id_stop_deferred_close_all_bar = -1;
-    uint64_t same_id_stop_deferred_close_all_incarnation = 0;
-    // KI-65 priced-entry precedence uses the derived
-    // placement_has_opposite_market_predecessor journal query. An accepted
-    // flat-born priced ENTRY retains full reversal when its original book
-    // contained an earlier opposite MARKET on the same source bar. Removed
-    // same-id predecessors and placement-rejected calls do not contribute.
-    // No independently writable predecessor result is stored on the order.
-    // KI-65 MARKET/MARKET follow-up candidate. Every own-affordable explicit
-    // MARKET call in the pinned broker scope carries this snapshot until the
-    // next broker-processing boundary, where the complete source-bar set is
-    // known. Only a set of exactly two distinct-id opposite calls is finalized
-    // as a pair; larger sets remain ordinary source-ordered entries.
-
-    MarketAdmissionDraft market_admission;
-    double paired_flat_market_own_qty =
-        std::numeric_limits<double>::quiet_NaN();
-    double paired_flat_market_signal_close =
-        std::numeric_limits<double>::quiet_NaN();
-    double paired_flat_market_signal_equity =
-        std::numeric_limits<double>::quiet_NaN();
-    double paired_flat_market_signal_margin_pct =
-        std::numeric_limits<double>::quiet_NaN();
-    double paired_flat_market_signal_pointvalue =
-        std::numeric_limits<double>::quiet_NaN();
-    double paired_flat_market_signal_fx =
-        std::numeric_limits<double>::quiet_NaN();
-    // Finalized exact peer relation. Each side stores the other order's
-    // created_seq; zero means unpaired. The mutual relation lets fill sorting
-    // swap only this exact pair into TV's
-    // buy-before-sell broker priority without reordering unrelated MARKET calls.
-    int64_t paired_flat_market_peer_seq = 0;
-    // Finalization-frozen broker transaction quantity for the paired order. The
-    // earlier call carries its own qty; the later call carries
-    // own + earlier-pending-own. This is deliberately separate from ``qty``:
-    // ``qty`` remains the Pine call's own/target quantity and continues to drive
-    // explicit-qty provenance, exit reservations, and every unpaired path.
-    // NaN means ordinary strategy.entry reversal semantics.
-    double paired_flat_market_transaction_qty =
-        std::numeric_limits<double>::quiet_NaN();
-    // Candidate provenance for the narrow omitted-qty, PoE=100, true-flat
-    // MARKET/MARKET admission rule. Finalization waits for the complete source-
-    // bar book and considers exactly two fresh, consecutive, distinct-id,
-    // opposite entries. Without an over-equity gross transaction this remains
-    // metadata only and does not change dispatch.
-
-    // Snapshot of the position's quantity at the moment this order was
-    // PLACED (0 if placed from flat). Used by execute_market_entry's
-    // flat branch to apply TradingView's deferred-flip growth rule:
-    // when a priced entry was placed against a position that was later
-    // closed (by strategy.close, close_all, or any other path) and the
-    // entry now fires from flat in the opposite direction, TV opens the
-    // new position at ``qty + tv_carry_qty`` rather than ``qty``.
-    // Verified empirically with probe 92's 20 deferred flips that fire
-    // after the daily ``strategy.close_all`` cleanup, hours after the
-    // closing bar — so this MUST persist across bars rather than being
-    // a per-bar transient state.
-    //
-    // ``strategy.entry`` with the same id REPLACES the pending order
-    // entirely — including a fresh ``tv_carry_qty = position_qty_``
-    // snapshot. This is critical for probes 52 / 63 / 95 / 96 where
-    // SE/LE is re-placed every bar a cross condition holds: once
-    // ``strategy.close`` flushes the position to 0, subsequent
-    // re-placements capture carry=0, so when the priced entry finally
-    // fires the chain resets to qty=1 (matching TV's behaviour at
-    // probe 52 trade 113). Preserving the largest observed carry
-    // across re-placements would over-extend chains.
-    //
-    // The same placement snapshot also pins the equality-only M2 rule for a
-    // priced explicit-FIXED same-cycle reversal: frozen broker transaction =
-    // this held qty + the order's own quantized qty. If later same-direction
-    // adds grow the live opposite position to exactly that transaction, the
-    // fill closes to flat and opens no new leg. Other size relations retain
-    // legacy reversal semantics; see apply_entry_order_fill.
-    double tv_carry_qty = 0.0;
-    // Quantity frozen at PLACEMENT (signal) time for a DEFAULT-sized (qty=na)
-    // market order whose default sizing is price-dependent (percent_of_equity
-    // / cash) — see frozen_default_market_qty. NaN = not frozen.
-    //
-    // Deliberately NOT stored in ``qty``: that field doubles as the "an
-    // explicit qty was provided" flag, and several sites branch on
-    // ``std::isnan(o.qty)`` to recover "was this order default-sized?" —
-    // reduce_oca_group's default-sized cancel (engine_orders.cpp), the
-    // pending-reversal-entry binding (engine_strategy_commands.cpp), the OCA
-    // fully-filled heuristic and the partial-vs-full exit classification
-    // (engine_fills.cpp). Writing a frozen quantity into ``qty`` silently
-    // flips every one of them. Keep ``qty`` NaN; read this field only where a
-    // quantity is actually computed.
-    double frozen_default_qty = std::numeric_limits<double>::quiet_NaN();
-    // Placement snapshot of a DEFAULT percent_of_equity <= 100 pure STOP
-    // entry (round 7, family K default-percent stop-entry sizing; ledger note
-    // log-20260905t084529z-c7b22df1, lab tv tapes scratchpad/r7/pins/
-    // f15-stopsize-{pct100,pct50,short-only,short-m50}, NYSE:F 15
-    // 2025-08-11..23). TradingView sizes the order when strategy.entry is
-    // called, at the TICK-SNAPPED STOP LEVEL (buy stop ceil, sell stop floor):
-    //
-    //   qty = floor_step(equity(B) * pct/100 / (tick(level) + slippage))
-    //
-    // (pct100: 858 = floor(10,000 / 11.65) on the 08-19 13:30Z touch, 854 =
-    // floor(10,000 / 11.70) on 08-22; 873 / 869 at the 11.45 / 11.50 closes
-    // would be wrong; pct50: 450 / 444 / 441 = floor(0.5 eq / L) on the short
-    // touches; margin 50: 901 / 886 / 880 = floor(eq / L)), then runs the
-    // family-E placement check on that quantity at the tick-rounded CLOSE of
-    // the call bar (qty * tick(close) * pv * fx * margin%/100 <= equity), so
-    // an all-in sell stop BELOW the close is never placed (floor(eq/L) * C >
-    // eq: 0 short fills over 3 touches in pct100, 0 fills in short-only —
-    // not an opposite-order effect) while a buy stop above the close always
-    // is. A stop whose level is already at or beyond the close is TV's
-    // market-at-next-open order and is sized like one, at tick(close) +
-    // slippage (frozen_sizing_price; ahtisham F@15 2025-04-04: the 13:30Z
-    // close 9.335 -> 9.34 sizes 1,043 = 88 + 955 filled 13:45Z @9.34).
-    // The quantity is fixed here — a resting order is never re-sized, only
-    // the script's next call re-issues it — and is consumed by the fill-time
-    // admission (stop_entry_margin_admission_declines: qty * tick(fill) <=
-    // realized equity, the level on a touch, the rounded open on a
-    // gap-through) and by dispatch. Explicit-qty / FIXED / CASH / >100%
-    // stops carry no snapshot (family E). NaN means no snapshot: ordinary
-    // fill-time sizing. Kept separate from frozen_default_qty so generic
-    // MARKET consumers never see it.
-    double default_stop_placement_qty =
-        std::numeric_limits<double>::quiet_NaN();
-    // strategy.equity as the script read it on the call bar (the placement
-    // check's right-hand side), the tick-rounded call-bar close (its price
-    // basis) and the sizing basis the quantity was divided at — tick(level)
-    // (+/- slippage) or, for a beyond-level stop, tick(close) (+/- slippage).
-    double default_stop_placement_equity =
-        std::numeric_limits<double>::quiet_NaN();
-    double default_stop_placement_signal_close =
-        std::numeric_limits<double>::quiet_NaN();
-    double default_stop_sizing_price =
-        std::numeric_limits<double>::quiet_NaN();
-    // TV margin-admission snapshot for a FROZEN default-sized market order
-    // (KI-54). Captured at the same placement point as frozen_default_qty:
-    //   sizing_equity = current_equity() + open_profit(tick(close(S)))
-    //                   - paid commission on surviving open lots [account ccy]
-    //   sizing_price  = tick(close(S)) + slippage*mintick*(+1 buy/-1 sell)
-    // where tick(x) = round_to_mintick(x): the broker's sizing basis is the
-    // mintick-ROUNDED signal close, never the raw feed print — see
-    // frozen_sizing_price for the tape census behind that. sizing_mark is
-    // the same tick(close(S)).
-    // At fill time the broker re-checks (see the gate in
-    // apply_filled_order_to_state for the full evidence trail)
-    //   |qty| * admit_price * pointvalue * fx * margin_pct/100
-    //     <= free_funds = sizing_equity - (same-direction held margin)
-    // where admit_price is the SIZING price for flat opens and adds but the
-    // FILL price for a true reversal (opposite position still open when the
-    // order processes), and silently drops the order when it fails (no
-    // trade row). The floor in apply_qty_step guarantees
-    // qty*sizing_price*pv*fx <= sizing_equity ONLY for percent-of-equity
-    // sizing with pct <= 100, margin <= 100, and sizing_equity > 0 — under
-    // that invariant THIS KI-54 gate never declines a flat open no matter how
-    // the bar gaps. (The percent==100 true-flat gap whose cost exceeds equity
-    // — commission excluded from the test — that TV DOES decline on the FILL
-    // notional is handled by a separate gap-reject carve-out that runs before
-    // this admit; see the gate.)
-    // It fails for CASH default sizing (no equity term), for pct > 100, for
-    // margin > 100 (required scales past equity), and on a bankrupt account
-    // (apply_qty_step returns qty UNFLOORED for qty <= 0, so |qty|*price ==
-    // |sizing_equity| while free_funds < 0 — every order, flat opens
-    // included, would be declined forever). The re-check is restricted
-    // accordingly; orders outside it carry the snapshot and are admitted
-    // here — CASH and pct > 100 MARKET entries by the unified
-    // design-market-entry-affordability gate instead (affordability_* below).
-    // NaN = no snapshot, no re-check.
-    double sizing_equity = std::numeric_limits<double>::quiet_NaN();
-    double sizing_price = std::numeric_limits<double>::quiet_NaN();
-    // Quote->account FX observed at the same placement boundary as the
-    // frozen quantity/equity/price tuple. A daily provider can roll between
-    // the signal bar and next-bar fill; fill admission must adjudicate the
-    // frozen signal snapshot, then the post-fill affordability pass applies
-    // the fill-time rate and emits any required broker margin trim.
-    double sizing_fx = std::numeric_limits<double>::quiet_NaN();
-    // The bar close sizing_equity was marked at. free_funds subtracts the
-    // margin the OPEN position ties up, and that must be marked at the same
-    // price the equity was, or the two sides of the comparison mix a
-    // mark-to-market total against a cost-basis deduction and the admission
-    // threshold drifts with unrealized PnL in the wrong direction.
-    double sizing_mark = std::numeric_limits<double>::quiet_NaN();
-    // Direction-neutral placement-time provenance for the two fill-time
-    // consumers of a frozen 100%-of-equity true-flat MARKET entry. True only
-    // for a high-level MARKET call (either side) with omitted qty, a frozen
-    // 100%-of-equity snapshot, direction-appropriate margin == 100, true-flat
-    // placement, and no earlier paired close in this on_bar. Consumers:
-    //   1. KI-61 entry-bar affordability EXEMPTION (engine_fills.cpp): the
-    //      fill-time code independently re-checks the direction-appropriate
-    //      margin (long_full_margin_after_fill / the default short shapes)
-    //      and must additionally prove true-flat fill, sizing-price
-    //      admission, success, and zero actual opening commission before
-    //      treating either side as exempt (round 7 family M queues the
-    //      default-sized short event with or without a commission).
-    //   2. gap-reject (design-cntvxiao-gap-reject, engine_fills.cpp):
-    //      direction-symmetric — silently drops the entry at fill when the
-    //      frozen-qty notional at the slipped fill price exceeds sizing_equity
-    //      at all (float guard only), commission EXCLUDED from the test
-    //      (round-7 market-entry-admission pin); a fee-only shortfall still
-    //      fills and takes the KI-61 trim.
-
-    // design-explicit-qty-fill-admission: fill-time TV admission re-check for an
-    // EXPLICIT-qty (the caller passed a finite qty) true-flat MARKET entry — the
-    // explicit-qty sibling of the frozen gap-reject above, which the shipped
-    // frozen fix deliberately left alone. Set at PLACEMENT in strategy_entry's
-    // explicit-qty MARKET branch (the branch that does NOT freeze default
-    // sizing). True only for a high-level MARKET strategy.entry with a finite
-    // explicit qty, created TRUE-FLAT (created_position_side==FLAT &&
-    // !created_after_position_close_in_bar), direction-appropriate margin_pct>0,
-    // and finite snapshots. Fill-time consumer: the disjoint explicit-qty
-    // decline branch in apply_filled_order_to_state silently drops the entry (no
-    // trade row) when, at a still-FLAT fill, its notional at the SLIPPED FILL
-    // price overshoots the placement equity snapshot with zero structural slack.
-    // Commission is EXCLUDED from that predicate. Priced (limit/stop) entries
-    // carry no snapshot (type==ENTRY, not MARKET); RAW strategy.order never sets
-    // the flag. Evidence: probe-68 (data/probes/pf-probe-allin-floor-comm0,
-    // 4,740 from-flat attempts, decline iff fill notional > equity, zero slack,
-    // 99.94%); mdfe3757 306/306.
-
-    // Placement-time equity snapshot (account ccy) for the explicit-qty gate:
-    //   percent_commission_live_equity(close(S)) == realized equity when flat
-    // Captured at the explicit-qty MARKET placement point. NaN = no snapshot.
-    double explicit_placement_equity = std::numeric_limits<double>::quiet_NaN();
-    // Slipped signal close at placement (frozen_sizing_price convention:
-    // round_to_mintick(close(S)) + slippage*mintick*(+1 buy / -1 sell) — the
-    // tick basis, so a POOC fill at the rounded close is an exact no-op on a
-    // sub-tick feed too). Its |qty|-scaled notional
-    // floors the fill-time decline threshold, so a fill AT/BELOW the slipped
-    // signal close — POOC (fill == close(S)+slip both sides), a no-gap open, or a
-    // favorable gap — is a structural no-op even with slippage != 0; only an
-    // ADVERSE gap beyond the slip can decline. NaN = no snapshot.
-    double explicit_slipped_signal_close =
-        std::numeric_limits<double>::quiet_NaN();
-    // design-market-entry-affordability: TradingView's broker admission for a
-    // MARKET entry, pinned 2026-09-03 with `lab tv` on CME_MINI:NQ1! 15
-    // (default fixed qty 1, margin 100: 10,212 flat-entry + reversal
-    // decisions, 0 mismatches — pin-afford-{flat,reverse,gapup,gapdown,
-    // gapup-ctl}) and on OANDA:XAUUSD 15 / NYSE:F 15 (explicit
-    // qty = strategy.equity / close, commission 0.05% — pin-admit-allin-{xau,f},
-    // 1279/1279 and 352/352 exact):
-    //
-    //   admit iff lot_floored(resulting_position_qty)
-    //               * max(tick(close(S)), tick(fill)) * pv * fx * margin/100
-    //             <= placement_equity + max(1e-9, |placement_equity| * 1e-12)
-    //
-    // evaluated TWICE: at placement on tick(close(S)) against MARK-TO-MARKET
-    // equity (initial + net_profit + open_profit at close(S) — the NQ short
-    // reversal at 2025-05-06 14:15Z filled with realized 396,625 < cost 397,995
-    // but MTM 398,455 >= cost), and again at fill on tick(fill) against the
-    // SAME placement snapshot (capital 380,000: signal close 18,820.50 =
-    // 376,410 admitted, fill 19,225 = 384,500 -> NOT filled; capital 345,000:
-    // signal close 17,483.25 = 349,665 -> rejected at placement although the
-    // 17,100 fill would have cost 342,000; control capital 1e6 fills). The
-    // "resulting position" is the new side's quantity on a reversal (the
-    // closing leg's notional is not counted) and held + add on a
-    // same-direction add (masayanfx NQ1 2025-07-30 20:15Z: 2 * 23,667.75 * 20
-    // = 946,710 > MTM 945,225 -> TV dropped the add), with "held" frozen AT
-    // PLACEMENT: a same-source-bar sibling that fills first does not enter
-    // the later order's fill check (thula INR non-POOC short pair, TV rows
-    // pinned in test_margin_call: both 2-lot shorts fill from flat and the
-    // over-notional 4-lot position is then margin-called 2.6088, not
-    // declined). Commission is NOT in
-    // the notional and there is no max(equity, signal_notional) admission
-    // floor: the rounded signal close is only a second decline trigger
-    // (NYSE:F half-cent close 10.225 -> fill 10.23: floor(E/10.225) * 10.23 > E
-    // declines; XAUUSD 2025-04-08 13:30Z: 662.968 -> 662.96 lots * 3013.75 <=
-    // 1,998,000.02 admits where the raw 662.968 * 3013.745 would not).
-    // A rejected reversal drops the ENTRY leg only — its closing leg still
-    // executes (rampatel BTC 2025-05-12 07:15Z: TV closed the short by "Buy"
-    // @105,600 and opened no long, equity 103,572 < 105,600; the engine used
-    // to open it and cascade 4x-shortfall margin calls, 23,605 trades vs 1,486).
-    //
-    // Scope: high-level MARKET strategy.entry with an explicit qty OR default
-    // FIXED / CASH sizing OR default percent_of_equity sizing ABOVE 100%
-    // (round 6, pin-pct-afford 2026-09-04: NYSE:F 15, percent_of_equity 200
-    // on 10,000 at margin 100 -> TV filled 0 entries, the same tape shape as
-    // strategy.cash 20,000 — pin-cash-afford-m100 0 entries, -m50 filled).
-    // Default percent_of_equity entries at or below 100% keep their own
-    // pinned KI-54 / gap-reject / gross-admission family (not provably the
-    // same rule: their reversal decline is atomic and holds the position);
-    // the >100% regime had no admission at all (KI-54 requires pct <= 100).
-    // NaN = no snapshot (out of scope, margin_pct == 0, non-finite close).
-    //
-    // Round 7 (design-stop-entry-placement-admission, ledger note
-    // log-20260905t053924z-15615295): a pure STOP strategy.entry on the same
-    // sizing partition takes the PLACEMENT half of this rule in
-    // strategy_entry — lot_floored(qty) * tick(close(B)) * pv * fx * margin%
-    // <= strategy.equity(B) (post-exit realized equity on a flattening bar,
-    // new side only on a reversal); a rejected stop is dropped, never rests
-    // or re-evaluates, and a rejected same-id re-issue cancels the resting
-    // order of an earlier accepted issue. No snapshot is stored on a stop
-    // (these three fields stay NaN/0): its fill-time half is
-    // stop_entry_margin_admission_declines — the same floored qty at the
-    // tick-rounded FILL price (the level on a touch, the rounded open on a
-    // gap-through) against realized equity; only affordability_close_only
-    // carries over, for a reversal whose entry leg was rejected. A DEFAULT
-    // percent_of_equity <= 100 stop is outside both halves: no placement
-    // check, and its fill-time gate keeps KI-62's bar-OPEN basis (the
-    // ahtisham regression, engine_fills.cpp).
-    double affordability_placement_equity =
-        std::numeric_limits<double>::quiet_NaN();
-    // tick(close(S)): the on-tick signal close the placement check costed,
-    // and the floor of the fill-time admission price (max with tick(fill)).
-    // Slippage ticks are NOT in either basis — the pinned rule is stated on
-    // the rounded bar prices (all pins at slippage 0; the KI-65 explicit pair
-    // and the percent_of_equity family keep their own slipped conventions).
-    double affordability_signal_price =
-        std::numeric_limits<double>::quiet_NaN();
-    // The same-direction quantity held when the order was placed (net of a
-    // strategy.close issued earlier in the same on_bar); 0 for a flat open or
-    // a reversal. The fill check costs held + own with THIS value.
-    double affordability_held_qty = 0.0;
-    // The entry leg was declined (at placement or at fill) while an OPPOSITE
-    // position was live: the order survives only as the reversal's closing
-    // leg — apply_market_order_fill (MARKET) / apply_entry_order_fill (pure
-    // STOP, round 7) closes the opposite position and opens nothing. Inert
-    // (consumed, no broker effect) when the account is flat or same-side at
-    // the fill.
-    bool affordability_close_only = false;
-    // Round14: only rule-2's rounded signal-cost decline can consume the
-    // pending reversal's closing carry after a same-signal close-point MC.
-    // These are order-owned receipts, not a last-margin-call heuristic.
-    bool rounded_signal_cost_close_only = false;
-    int signal_close_mc_bar = -1;
-    uint64_t signal_close_mc_entry_incarnation = 0;
-    uint64_t signal_close_mc_fill_seq = 0;
-    double signal_close_mc_remaining_qty =
-        std::numeric_limits<double>::quiet_NaN();
-    std::string comment;       // order comment for trade reporting
-    // Original exit amount and its latest resolved reservation basis. qty and
-    // qty_percent remain the executable/reserved values used by existing Pine
-    // reservation rules; their later reduction cannot rewrite caller intent.
-    QuantityRequest quantity_request;
-    // EXIT-owned exposure capture and source-owned exact receiver receipt.
-    // The public legacy flags are one-way projections of these causal facts.
-    ReservationExpansion reservation_expansion;
-    ReservationGrowthSource reservation_growth_source;
-    // round 8 family S — TradingView's same-bar MARKET transaction (ledger
-    // note log-20260905t143024z-76025577; 15 lab tv sensor tapes famS-dbl-*,
-    // famS-rev-plus-close, famS-adm-{es,nq}-{1e6,500k} on CME_MINI:ES1!/NQ1!
-    // 15m 2025-04-01..15, every 8-bar cycle identical x115). Scope:
-    // same_bar_market_tx_scope_is_live() — non-POOC, no COOF/magnifier,
-    // pyramiding 0 (one admitted entry), FIXED default sizing, no risk policy.
-    // Rules:
-    //   (1) a MARKET entry's size is frozen at PLACEMENT and never re-sized
-    //       at fill: own qty + the opposite position's qty at placement, net
-    //       of the lots an EARLIER same-bar strategy.close already released
-    //       (dbl-short-closefirst: Long buys 1, not 2), + the OPEN leg (own
-    //       qty) of every opposite same-bar MARKET entry still pending at the
-    //       call (dbl-short-q1-entry2: Short qty 2 sells 3; the KI-65 rule
-    //       extended from flat to in-position).
-    //   (2) a same-direction entry OVER the pyramiding cap is dropped at the
-    //       call when no opposite same-bar MARKET entry is pending (dbl-short-
-    //       swapped, dbl-long-full) and KEPT, sized by (1), when one was
-    //       placed earlier in the bar (dbl-short-full: Short after Long sells
-    //       2; dbl-long-mirror-closefirst: Long after Short buys 2 -> long 3
-    //       before the sells). It is never re-roled at fill into a reversal
-    //       sized on the fill-time position.
-    //   (3) fill order = every BUY market order, then every SELL market
-    //       order, each phase in placement order.
-    //   (4) strategy.close(id) is created only if id holds a lot at the call,
-    //       sized to that lot; at fill it exits what remains of that side
-    //       (min(frozen, live)); when the side is gone it fills as a NEW lot
-    //       in its own direction (TV's "Close entry(s) order X" entry row)
-    //       iff an entry with the same id is still pending on the bar, and
-    //       is cancelled otherwise (rev-plus-close, dbl-short-swapped).
-    //   (5) strategy.close(id) with no lot of id at the call places nothing.
-    // Admission (famS-adm-*): the kept over-cap entry is costed at placement
-    // as held + own + the opposite pending open leg (3 lots: ES 1e6 admits
-    // 3 x 5,627 x 50, NQ 1e6 declines 3 x 19,339 x 20 and admits the three
-    // 04-07 cycles at <= 16,679; 500k declines both) — a declined entry is
-    // dropped, so its same-id close finds no pending entry and is cancelled
-    // (LONG 1, no artifact row). The generalized form of the short-seed
-    // collision kernel (finding 272), with which it agrees on that book.
-    // One typed source instruction. Transaction quantities live here; a
-    // targeted close consumes quantity_request's resolved original Units.
-    // Cap and closing-side facts remain the existing immutable placement
-    // snapshots, rather than separately writable coordination booleans.
-    PineFrozenMarketInstruction pine_frozen_market_instruction;
-    // The cancellation receipt owns the placement-frozen close claim and its
-    // once-only release state. The old scalar projections remain in the
-    // public mirror, derived from cancellation.close_claim_*().
-    ShortSeedCollisionRole short_seed_collision_role =
-        ShortSeedCollisionRole::NONE;
-};
-
-// These views derive historical placement facts from the original command.
-// No current position, current configuration or mutable sizing participates.
-// The close fact describes previously accepted close claims, not physical
-// flatness; even an immediate close can leave that source-time fact positive.
-// The capacity view uses the original direction/count/cap (including cap0),
-// which remains meaningful after fills or a later configuration change.
-// Missing observations retain the historical default false for manual orders.
-// The comparison matches the broker's existing quantity tolerance exactly.
-inline bool placement_has_prior_close(const PendingOrder& order) {
-    const auto& observation = order.market_admission.observation();
-    return observation && observation->prior_close_quantity > 1e-10;
-}
-inline bool placement_at_entry_capacity(const PendingOrder& order) {
-    const auto& observation = order.market_admission.observation();
-    if (!observation) return false;
-    const auto requested_side = observation->buy ? PositionSide::LONG : PositionSide::SHORT;
-    return observation->placement_side != static_cast<int>(PositionSide::FLAT)
-        && observation->placement_side == static_cast<int>(requested_side)
-        && observation->held_entries >= observation->configuration.pyramiding;
-}
-
-// Reconstruct the one source-order dependency that is not part of the
-// PendingOrder object. The producer scanned the physical book immediately
-// before accepting this priced entry. The journal's immutable before/removed
-// records preserve that exact scan, including a peer that remains physically
-// resident after a cancellation. Direction is a raw book fact, independent
-// of the peer's source Draft.
-inline bool placement_has_opposite_market_predecessor(
-        const MarketAdmissionJournal& journal, const PendingOrder& current) {
-    const auto& origin = current.market_admission.observation();
-    if (!origin || origin->kind != admission::CommandKind::Entry
-        || current.type != OrderType::ENTRY
-        || origin->placement_side != static_cast<int>(PositionSide::FLAT)
-        || (std::isnan(origin->prices.limit) && std::isnan(origin->prices.stop)))
-        return false;
-
-    const admission::CommandEvent* accepted = nullptr;
-    for (const auto& event : journal.events()) {
-        const auto* command = std::get_if<admission::CommandEvent>(&event);
-        if (!command || !command->observation
-            || command->observation->command != origin->command
-            || command->admitted_incarnation != current.incarnation) continue;
-        if (accepted) return false; // refuse duplicate source identity
-        accepted = command;
-    }
-    if (!accepted) return false; // pruned or unaccepted source
-    const auto removed = [&](uint64_t incarnation) {
-        return std::find(accepted->removed.begin(), accepted->removed.end(), incarnation)
-            != accepted->removed.end();
-    };
-    for (const auto& peer : accepted->before) {
-        if (removed(peer.incarnation) || peer.type != static_cast<int>(OrderType::MARKET)
-            || peer.bar != origin->bar || peer.priority >= current.created_seq)
-            continue;
-        if (peer.buy != origin->buy) return true;
-    }
-    return false;
-}
-
- } // inline namespace engine_script_run_v15 (PendingOrder)
+namespace source {
+struct PendingOrder;
+struct StrategyOverrides;
+} // namespace source
 
 // default_qty_type constants (matches TradingView)
 enum class QtyType { FIXED = 0, PERCENT_OF_EQUITY = 1, CASH = 2 };
@@ -970,15 +406,6 @@ enum class CommissionType { PERCENT = 0, CASH_PER_ORDER = 1, CASH_PER_CONTRACT =
 
 // Pine user enum → str.tostring (field payloads). Transpiler enforces enum decl before
 // input.enum; this clamps the index so bad values never read past the table.
-inline const std::string& pine_enum_str_at(const std::string* table, std::size_t n,
-                                           int idx) {
-    static const std::string kEmpty;
-    if (n == 0 || table == nullptr) return kEmpty;
-    std::size_t u = static_cast<std::size_t>(idx);
-    if (u >= n) u = n - 1;
-    return table[u];
-}
-
 struct SymInfo {
     std::string ticker = "UNKNOWN";
     std::string tickerid = "UNKNOWN";
@@ -1000,36 +427,23 @@ struct SymInfo {
     double qty_step = 0.0;
 };
 
-struct StrategyOverrides {
-    double initial_capital = std::numeric_limits<double>::quiet_NaN();
-    double commission_value = std::numeric_limits<double>::quiet_NaN();
-    double default_qty_value = std::numeric_limits<double>::quiet_NaN();
-    int pyramiding = -1;
-    int slippage = -1;
-    int commission_type = -1;
-    int default_qty_type = -1;
-    int process_orders_on_close = -1;
-    int calc_on_order_fills = -1;
-    int close_entries_rule = -1;
-};
-
 // The C++ subclass contract is internal, unlike pineforge.h's stable C ABI.
 // Changing its layout or vtable requires all generated/native C++ objects to be rebuilt.
 // v6 adds explicit owner-bound exit-leg activation and Pine placement evidence.
 // Version the mangled class name so older headers' member offsets/vtable cannot
 // silently bind out-of-line members of this different object layout.
-inline namespace engine_script_run_v15 {
+inline namespace engine_script_run_v16 {
+class BrokerStateHashSink;
 class BacktestEngine {
 protected:
     friend class LegacyCompatibilityConsumer;
     friend class NativeExecutionConsumer;
     friend class NativeStrategyHost;
     struct NativeConsumerBindTag { explicit NativeConsumerBindTag() = default; };
-    explicit BacktestEngine(NativeConsumerBindTag,
-                            compat::pine::CapAttachment cap_attachment =
-                                compat::pine::CapAttachment::None);
+    explicit BacktestEngine(NativeConsumerBindTag);
     IExecutionConsumer& execution_consumer();
     const IExecutionConsumer& execution_consumer() const;
+    virtual void hash_source_extension(BrokerStateHashSink&) const;
     // --- Position state ---
     // @broker-state begin
     PositionSide position_side_ = PositionSide::FLAT;
@@ -1063,7 +477,6 @@ protected:
     // life of its own entry leg: once the leg's units are FIFO-consumed by a
     // sibling bracket, the leg still fires against the remaining position
     // (thulashimohanr 06-17/10-14/01-14: Short's T2 closes a ShortAdd unit).
-    std::set<std::string> cycle_filled_entry_ids_;
     // Per-entry-id UNCLOSED quantity ledger, used ONLY by strategy.close(id)
     // under the default FIFO close-entries rule to decide how much to close.
     //
@@ -1080,7 +493,6 @@ protected:
     // id", so close(id) closes exactly the right amount (the whole position
     // for a same-id DCA pyramid; one slot for a grid cycle). It is never read
     // under the ANY rule (which closes id-matched physical lots directly).
-    std::unordered_map<std::string, double> id_unclosed_qty_;
 
     // ── Same-bar strategy.close batching ──
     // Within one syntactic strategy.close callsite, TradingView keeps one
@@ -1106,99 +518,23 @@ protected:
     // Calls whose target resolves to zero cannot replace a live instruction.
     // Fills execute at the end-of-bar order-processing point; full-close order
     // cancels/purges retain their established CALL-time timing.
-    bool sb_close_active_ = false;
-    int sb_close_bar_ = -1;
-    int sb_close_calls_ = 0;          // effective distinct nonzero-target calls
-    std::string sb_close_first_id_;   // first call, provisionally consumed at call 2
-    double sb_close_first_target_ = 0.0;
-    bool sb_close_first_carry_valid_ = false;
-    double sb_close_first_carry_qty_ = 0.0;
-    std::string sb_close_id_;         // surviving order's id
-    std::string sb_close_comment_;    // surviving order's comment
-    std::unordered_map<std::string, double> close_reserved_qty_;
     // Live exact-two-call replacement provenance. A survivor id maps to the
     // prior batch's FIRST target and remains valid only while its reservation
     // is live.
-    std::unordered_map<std::string, double> close_two_call_first_qty_;
 
     // Nonzero compiler-token path. Every syntactic strategy.close site owns an
     // independent copy of the accepted replacement batch. Distinct sites all
     // flush; repeated runtime evaluations of one site replace only that batch.
-    int callsite_close_bar_ = -1;
-    uint64_t callsite_close_queue_seq_ = 0;
-    struct SameBarCloseCallsite {
-        uint64_t token = 0;
-        bool active = false;
-        int calls = 0;
-        std::string first_id;
-        double first_target = 0.0;
-        bool first_ledger_consumed = false;
-        bool first_carry_valid = false;
-        double first_carry_qty = 0.0;
-        std::string id;
-        std::string comment;
-        // Quantity admitted at call time. Distinct callsites reserve physical
-        // capacity in source order; a later zero-capacity evaluation cannot
-        // replace this pending instruction.
-        double target = 0.0;
-        // Persistent-reservation-blocked calls retain token-0's stale-ledger
-        // cleanup, but only as a site-local overlay during Pine evaluation.
-        // Shared mutation is deferred until every site's broker flush.
-        std::vector<std::string> deferred_cleanup_ids;
-        uint64_t queue_seq = 0;
-        // round-4b F1: whether a sole-call flush retires id's ledger WHOLE.
-        // True when the admitted target was capped by the position or by a
-        // PRIOR-BAR (persistent) reservation (unclosed > persistent_avail)
-        // — the pinned xlm/nvdax rule. False when it was not capped by
-        // those, i.e. either uncapped (the debit then empties the ledger
-        // anyway) or short SOLELY because of this bar's other pending
-        // callsites (pending_reserved): that case is unpinned against TV,
-        // and its zero-target sibling (the fresh A/A->B oracle in
-        // enqueue_same_bar_close) performs no cleanup, so a partial
-        // same-bar cap keeps the pre-F1 debit-by-target rule.
-        bool retire_ledger_whole = true;
-    };
     // Per-source-bar only. Cross-bar reservation/provenance is stored in the
     // owner-aware maps below, so a one-callsite generated strategy remains
     // behavior-identical to token 0 while distinct sites coexist.
-    std::unordered_map<uint64_t, SameBarCloseCallsite> callsite_close_callsites_;
     // Net physical capacity claimed by the currently surviving nonzero-site
     // instructions on this source bar. This is distinct from
     // pending_close_qty_in_bar_, which records cumulative accepted logical
     // evaluations for the established later-entry carry rule.
-    double callsite_close_admitted_total_ = 0.0;
     // Cross-bar replacement reservations/provenance belong to the syntactic
     // source site that created them. Token 0 continues to use the historical
     // id-only maps above without any behavior change.
-    std::unordered_map<
-        uint64_t, std::unordered_map<std::string, double>>
-        callsite_close_reserved_qty_;
-    std::unordered_map<
-        uint64_t, std::unordered_map<std::string, double>>
-        callsite_close_two_call_first_qty_;
-
-    // --- KI-64: POOC script-visible position freeze ---
-    // Under process_orders_on_close, a strategy.close/close_all that fills
-    // IN-LINE (execute_immediate_close) mutates the broker position mid-on_bar,
-    // but TradingView keeps the SCRIPT position accessor
-    // ``strategy.position_size`` (signed_position_size(), and the
-    // opentrades/position_avg_price na-guards derived from it) reporting the
-    // PRE-close position until the NEXT bar. While ``pos_view_freeze_bar_ ==
-    // bar_index_`` the script-facing signed_position_size() returns this frozen
-    // snapshot. Ordinary POOC strategy.close(qty_percent) also sizes against
-    // the snapshot's per-id quantities (round 12 AG-D); other broker/order
-    // sizing and internal position_qty_ / position_side_ reads are unaffected.
-    // Armed in strategy_close on the ordinary POOC
-    // immediate-close path (NOT immediately=true, which is defined to reflect
-    // its fill at once); cleared at the top of flush_same_bar_close() — the
-    // first thing after every POOC on_bar — so step-4 and post-run reads see
-    // the real position. The bar_index_ scoping is a defensive backstop: the
-    // snapshot auto-expires when the script advances a bar even if a clear site
-    // is ever missed.
-    int pos_view_freeze_bar_ = -1;
-    PositionSide pos_view_frozen_side_ = PositionSide::FLAT;
-    double pos_view_frozen_qty_ = 0.0;
-    std::unordered_map<std::string, double> pos_view_frozen_entry_qty_;
 
     // --- Strategy parameters (set from strategy() declaration) ---
     double initial_capital_ = 1000000.0;
@@ -1208,10 +544,6 @@ protected:
     bool calc_on_order_fills_ = false;
     // Detached on bare native construction. Only the explicit Pine frontend
     // attachment can select its source-shape priority interpretation.
-    compat::pine::OrderPriority pine_order_priority_;
-    QtyType default_qty_type_ = QtyType::FIXED;
-    double default_qty_value_ = 1.0;
-    int pyramiding_ = 1;            // max additional entries in same direction
     CommissionType commission_type_ = CommissionType::PERCENT;
     double commission_value_ = 0.0;
     int slippage_ = 0;              // slippage in ticks
@@ -1227,13 +559,10 @@ protected:
     // default makes progress by one quantity step; selected historical exports
     // instead close the whole residual.  Keep that alternative default-off so
     // it cannot rewrite otherwise matching trade tapes.
-    bool margin_zero_cover_full_liquidation_ = false;
     // Temporary Pine source facade: this value IS the sole compatibility
     // owner, not a mirrored limit/proxy. Existing generated statement-time
     // assignments explicitly opt in; generated constructors attach before
     // host metadata. Bare native construction leaves this policy unselected.
-    compat::pine::IntradayCap max_intraday_filled_orders_;
-    bool close_entries_rule_any_ = false; // true = "ANY", false = "FIFO" (default)
     // Percentage of margin required to open a long/short position. Default
     // 100 = 1x leverage (no leverage). TradingView's strategy() takes these
     // as ``margin_long`` / ``margin_short``; when the implied position value
@@ -1380,8 +709,7 @@ protected:
     // series) when the key is absent OR the override string is non-native —
     // the analyzer hard-rejects non-native defvals, so a non-native override
     // can only arrive from an operator-supplied input value; never crash on it.
-    const Series<double>& get_input_source(const std::string& key,
-                                           const Series<double>& default_series) const;
+
 
     // syminfo.* fundamental/exchange metadata that has no OHLCV source.
     // Returns the value injected via ``set_syminfo_metadata`` for ``key``,
@@ -1392,81 +720,9 @@ protected:
         return it != syminfo_metadata_.end() ? it->second : na<double>();
     }
 
-    // --- Native source-series history (input.source) ---
-    // input.source supports runtime override of WHICH price series feeds an
-    // indicator. The generated subclass only materializes ``_s_<field>`` for
-    // fields whose history it subscripts, so those cannot back a runtime
-    // override to an arbitrary native source. These base-class series are the
-    // canonical, always-resolvable backing store. They are advanced exactly
-    // once per script bar (same cadence as the subclass ``_s_<field>``) by
-    // ``_push_source_series()`` and only when ``_src_series_active_`` — the
-    // generated ctor sets it true iff the script uses at least one
-    // input.source, so scripts that don't pay nothing but the (small) member
-    // footprint.
-    bool _src_series_active_ = false;
-    Series<double> _src_open_;
-    Series<double> _src_high_;
-    Series<double> _src_low_;
-    Series<double> _src_close_;
-    Series<double> _src_volume_;
-    Series<double> _src_hl2_;
-    Series<double> _src_hlc3_;
-    Series<double> _src_ohlc4_;
-    Series<double> _src_hlcc4_;
-
-    // Advance every native source series by the current bar. Mirrors the
-    // subclass ``_s_<field>`` idiom: push on the first tick, update intrabar
-    // (magnifier). Called at each on_bar dispatch point; no-op when inactive.
-    // A historical post-C fill recalculation remains barstate.isnew, but the
-    // completed ordinary close execution already owns this bar's history
-    // slot. Generated history/TA code uses the same predicate so that such an
-    // execution recomputes the slot instead of appending a duplicate bar.
-    bool history_advances_new_bar() const {
-        return is_first_tick_ && history_slot_is_new_;
-    }
-
-    // issue #178: the previous CHART bar's close, tracked at every on_bar
-    // dispatch regardless of _src_series_active_ (it costs two doubles).
-    // A ta.atr / ta.tr call site inside a block that does not execute every
-    // bar must read its true range against THIS value (TradingView pin,
-    // 2026-09-06: 398/398 sparse executions on BINANCE:BTCUSDT 60), not
-    // against the close of the site's previous execution. Advances once
-    // per history slot (history_advances_new_bar()); intrabar ticks and a
-    // fill recalculation of an owned slot refresh last_chart_close_ only.
-    double prev_chart_close_ = std::numeric_limits<double>::quiet_NaN();
-    double last_chart_close_ = std::numeric_limits<double>::quiet_NaN();
-    double prev_chart_close() const { return prev_chart_close_; }
-
-    void _push_source_series() {
-        if (history_advances_new_bar()) prev_chart_close_ = last_chart_close_;
-        last_chart_close_ = current_bar_.close;
-        if (!_src_series_active_) return;
-        const double o = current_bar_.open;
-        const double h = current_bar_.high;
-        const double l = current_bar_.low;
-        const double c = current_bar_.close;
-        const double v = current_bar_.volume;
-        const double hl2   = (h + l) / 2.0;
-        const double hlc3  = (h + l + c) / 3.0;
-        const double ohlc4 = (o + h + l + c) / 4.0;
-        const double hlcc4 = (h + l + c + c) / 4.0;
-        if (history_advances_new_bar()) {
-            _src_open_.push(o);   _src_high_.push(h);   _src_low_.push(l);
-            _src_close_.push(c);  _src_volume_.push(v);
-            _src_hl2_.push(hl2);  _src_hlc3_.push(hlc3);
-            _src_ohlc4_.push(ohlc4); _src_hlcc4_.push(hlcc4);
-        } else {
-            _src_open_.update(o);   _src_high_.update(h);   _src_low_.update(l);
-            _src_close_.update(c);  _src_volume_.update(v);
-            _src_hl2_.update(hl2);  _src_hlc3_.update(hlc3);
-            _src_ohlc4_.update(ohlc4); _src_hlcc4_.update(hlcc4);
-        }
-    }
-
     // --- Runtime state ---
     Bar current_bar_;
     int bar_index_ = 0;
-    int bar_index_offset_ = 0;
     // Opt-in KI-55 chart warmup parity (see set_syminfo_metadata,
     // "chart_ema_na_warmup"). When enabled, chart-timeframe ta.ema instances
     // first used by on_bar na-warm per TV built-in semantics. This selector is
@@ -1533,14 +789,10 @@ protected:
     // selector so future data can never leak into a live continuation.
     bool historical_security_lookahead_projection_ = false;
     bool historical_security_lookahead_projection_active_ = false;
-    int64_t next_order_seq_ = 1;
     uint64_t next_order_incarnation_ = 1;
-    uint64_t exit_leg_event_seq_ = 0;
     // TV: at most one priced ENTRY "open" event per bar; persists across
     // multiple process_pending_orders calls (bar magnifier) and dual-pass
     // opposing-stop resolution (see engine_fills.cpp).
-    int priced_entry_activity_bar_ = -1;
-    bool priced_entry_filled_this_bar_ = false;
 
     // Transient: true only while applying a priced (stop/limit/trail) fill
     // (apply_filled_order_to_state). emit_close_trade reads it to fold the
@@ -1558,7 +810,6 @@ protected:
     // Set by evaluate_fill_price: the just-evaluated exit fill fired on the
     // TRAIL leg (vs stop/limit/gap). Consumed by apply_filled_order_to_state
     // to reconstruct the trail peak above.
-    bool last_exit_fill_was_trail_ = false;
     // Transient: true only while dispatching a LIMIT-triggered fill
     // (apply_filled_order_to_state). apply_fill_slippage reads it to route
     // limit fills onto the unslipped limit-or-better path (apply_limit_fill)
@@ -1574,26 +825,17 @@ protected:
     // merged behind trades_ by fill_trades_section and never enter trades_,
     // the realized sums, or the live position (a stream continues it).
     std::vector<Trade> range_end_trades_;
-    std::vector<PendingOrder> pending_orders_;
     // A rejected strategy.entry call leaves no PendingOrder behind. The exact
     // collision gate can consume only the immediately preceding source bar, so
     // one scalar tombstone is sufficient and cannot grow with feed length.
 
     // Actual command/review/sizing causes; policy history is a transient fold.
-    MarketAdmissionJournal market_admission_journal_;
     // Evaluation-scoped tombstones for live priced ENTRY objects actually
     // removed by strategy.cancel(id). invoke_chart_on_bar clears the map
     // before each script execution; the first fresh same-id strategy.entry
     // consumes the unique cancelled incarnation.
-    struct NamedEntryCancelContext {
-        uint64_t entry_incarnation = 0;
-        uint64_t surviving_exit_incarnation = 0;
-    };
-    std::unordered_map<std::string, NamedEntryCancelContext>
-        named_entry_cancelled_incarnation_in_current_eval_;
 
     // strategy.exit partial orders are one-shot per open position for a given id
-    std::unordered_set<std::string> consumed_partial_exit_ids_;
 
     // Reusable scratchpad for the per-call opposing-stop deferral set in
     // process_pending_orders. Holds the ids of flat-issued entry stops that
@@ -1601,13 +843,11 @@ protected:
     // Cleared at the start of each process_pending_orders call; the retained
     // capacity avoids a fresh heap allocation 2-4x per bar. Typically tiny
     // (0-1 entries). Not state — must be empty across calls.
-    std::unordered_set<std::string> scratch_skip_ids_;
 
     // Reusable scratch for process_pending_orders (capacity persists across
     // calls, mirroring scratch_skip_ids_). Incarnations survive OCA erasure;
     // vector indices and retained replacement priorities do not identify an
     // object. Always cleared before use; never persistent cancellation state.
-    std::vector<uint64_t> scratch_filled_incarnations_;
 
     // Per-PASS dual-entry-stop arbitration winner (a flat position resting
     // one long stop-only ENTRY + one short stop-only ENTRY, both touched
@@ -1626,7 +866,6 @@ protected:
     // updates this; the COOF scheduler's process_next_pending_order keeps
     // its own unrelated local of the same computation and does not persist
     // it here.
-    internal::DualEntryStopPathWinner dual_entry_path_{};
     // Per-BAR snapshot of the above: the last non-None value
     // dual_entry_path_ took during this bar, surviving whatever
     // dual_entry_path_ itself does afterward (a fill, a declined admission
@@ -1641,11 +880,9 @@ protected:
     // not) reads the bar's real arbitration even if the winning order later
     // filled, was declined, or the working state otherwise moved on. Same
     // calc_on_order_fills_ caveat as dual_entry_path_ above.
-    internal::DualEntryStopPathWinner last_bar_dual_entry_decision_{};
 
     // --- Trailing stop state ---
     // Best favorable price since position entry (for trailing stop computation)
-    double trail_best_price_ = std::numeric_limits<double>::quiet_NaN();
     // The script bar on which a strategy.exit re-issue restarted
     // trail_best_price_ from the bar's CLOSE under process_orders_on_close
     // (round 9 family Z's restart rule, round 10 family Y's bar rule). The
@@ -1653,58 +890,27 @@ protected:
     // the next bar's open: the same bar's high/low must not be folded into
     // it by the close-time process_pending_orders that follows the script
     // body (update_trail_best_for_bar_open skips this bar). -1 = none.
-    int trail_close_restart_bar_ = -1;
     // The position's running extreme as it stood BEFORE the current bar's
     // high / low were folded in (update_trail_best_for_bar_open), and the
     // bar it was captured on: a trail leg killed by a declined reversal on
     // this bar restarts from it (round 10 family AE,
     // PendingOrder::dormant_trail_best).
-    double trail_best_before_bar_ = std::numeric_limits<double>::quiet_NaN();
-    int trail_best_before_bar_index_ = -1;
     // The ordinary POOC close scan may revisit a retained trail with that
     // same pre-bar extreme only while the carried position is unchanged.
     // A new cycle, add, reduction or close-time trail restart keeps its own
     // established path state instead of inheriting an earlier position's.
-    int64_t trail_best_before_bar_position_cycle_ = 0;
-    uint64_t trail_best_before_bar_fill_seq_ = 0;
+
+    // Best favorable price is updated by the physical open/add helpers for
+    // every host. Source policy may consume the same value through
+    // inheritance, while the public C observer uses the virtual projection.
+    double trail_best_price_ = std::numeric_limits<double>::quiet_NaN();
+    int trail_close_restart_bar_ = -1;
 
     // Generic synchronous close obligation. Pine quota/cause/beneficiary
     // state remains exclusively in the compatibility facade above.
     broker::PositionCloseObligation position_close_obligation_;
 
     // Temporary legacy adapter: only value facts cross into Pine policy.
-    compat::pine::CapClock pine_cap_clock() const {
-        if (!max_intraday_filled_orders_.needs_clock()) return {};
-        const BarTime bt = compat::pine::IntradayCap::uses_chart_clock(syminfo_.session)
-            ? _decompose_bar_time_chart_tz() : BarTime{};
-        return {current_bar_.timestamp, syminfo_.session, syminfo_.timezone,
-                bt.dayofmonth, bt.month};
-    }
-    compat::pine::Calculation pine_cap_calculation() const {
-        return {process_orders_on_close_, calc_on_order_fills_, coof_scheduler_active_,
-                bar_magnifier_enabled_, stream_warmup_mode_,
-                (stream_phase_ == StreamPhase::IDLE), !close_entries_rule_any_, bar_index_};
-    }
-    static compat::pine::Side pine_cap_side(PositionSide side) {
-        return side == PositionSide::FLAT ? compat::pine::Side::Flat
-            : side == PositionSide::LONG ? compat::pine::Side::Long
-                                         : compat::pine::Side::Short;
-    }
-    static compat::pine::OrderKind pine_cap_kind(OrderType type) {
-        return type == OrderType::MARKET ? compat::pine::OrderKind::Market
-            : type == OrderType::ENTRY ? compat::pine::OrderKind::Entry
-                                       : compat::pine::OrderKind::Other;
-    }
-    compat::pine::MatchedAttempt pine_cap_attempt(const PendingOrder& order) const {
-        return {pine_cap_kind(order.type), order.incarnation, order.created_bar,
-                order.is_long, pine_cap_side(position_side_), position_entry_count_, pyramiding_};
-    }
-    // Source facade retained for existing native fixtures. RAW placement does
-    // not call this gate; extraction must not add one to that path.
-    bool _intraday_cap_currently_latched() {
-        return max_intraday_filled_orders_.placement(pine_cap_clock())
-            == compat::pine::Placement::Deny;
-    }
 
     // --- Cached trade metrics (updated incrementally in execute_market_exit) ---
     double net_profit_sum_ = 0.0;
@@ -1749,21 +955,8 @@ protected:
     int eventrades_count_ = 0;
 
     // --- Risk management (strategy.risk.*) ---
-    enum class RiskDirection { BOTH, LONG_ONLY, SHORT_ONLY };
-    RiskDirection risk_direction_ = RiskDirection::BOTH;
-    int risk_max_cons_loss_days_ = 0;       // 0 = unlimited
-    double risk_max_drawdown_ = 0.0;        // 0 = unlimited
-    bool risk_max_drawdown_is_pct_ = false; // true = percent_of_equity mode
-    double risk_max_intraday_loss_ = 0.0;   // 0 = unlimited
-    bool risk_max_intraday_loss_is_pct_ = false; // true = percent_of_equity mode
-    double risk_max_position_size_ = 0.0;   // 0 = unlimited
 
     // Risk state tracking
-    int cons_loss_day_count_ = 0;
-    int last_loss_day_ = -1;
-    bool risk_halted_ = false;
-    double intraday_pnl_ = 0.0;
-    int intraday_pnl_day_ = -1;
 
     // TradingView's strategy.risk.max_intraday_loss (round 7 family M
     // mechanism 5b, pinned 2026-09-05 by lab tv m45-risk-t1/t6/t9/t3b on
@@ -1784,29 +977,11 @@ protected:
     // order of the fired day is dropped, the next day's fills). The rule
     // never latches risk_halted_ (that stays with max_drawdown /
     // max_cons_loss_days).
-    double intraday_loss_day_start_equity_ =
-        std::numeric_limits<double>::quiet_NaN();
-    int intraday_loss_day_ = -1;         // chart-tz day key of E_ds
-    int intraday_loss_block_day_ = -1;   // chart-tz day key while orders are blocked
-    bool intraday_loss_evaluating_ = false;
     // A fire inside a fill loop defers the pending-order cancel to the
     // loop's safe point (finish_intraday_loss_cancel); the loop itself
     // removes every order it has not yet applied.
-    bool intraday_loss_cancel_pending_ = false;
     // @broker-state end
-    int intraday_loss_day_key() const;
-    void intraday_loss_begin_bar(const Bar& bar);
-    bool intraday_loss_orders_blocked() const;
-    bool evaluate_max_intraday_loss(double mark_price, double excluded_realized);
-    void evaluate_max_intraday_loss_over_path(const Bar& bar);
-    void finish_intraday_loss_cancel();
-
-    bool check_risk_allow_entry(bool is_long) const;
-    void update_risk_state();
-
     // --- Per-trade extreme tracking ---
-    void update_per_trade_extremes();
-
     // Source compatibility extension: settle an already resolved execution
     // using the current chart context and source-day preflight/observation.
     // This does not place an order, perform admission/slippage, or provide
@@ -1820,7 +995,7 @@ protected:
     // Source coordinator for one execution plus lifecycle effects and source days.
     // Pre-close operations, then close observations and old-cycle unbind, then
     // the listed pending removals, then the quoted opening path which binds
-    // only remaining exits. Native settlement does not call compat::pine
+    // only remaining exits. Native settlement does not call source-layer
     // selectors; the effects value is not retained.
     execution::Result settle_execution_with_lifecycle(
         const execution::Action& action, const execution::Fill& fill,
@@ -1905,84 +1080,36 @@ protected:
     // and every closed-transpiler call site passed `current_bar_.close`
     // verbatim. Parameter dropped to match TradingView's `strategy.entry()`
     // surface. Consumer codegen must be regenerated alongside this commit.
-    void strategy_entry(const std::string& id, bool is_long,
-                        double limit_price = std::numeric_limits<double>::quiet_NaN(),
-                        double stop_price = std::numeric_limits<double>::quiet_NaN(),
-                        double qty = std::numeric_limits<double>::quiet_NaN(),
-                        const std::string& comment = "",
-                        const std::string& oca_name = "",
-                        int oca_type = 0,
-                        int qty_type = -1);
-    void strategy_close(const std::string& id, const std::string& comment = "",
-                        double qty = std::numeric_limits<double>::quiet_NaN(),
-                        double qty_percent = std::numeric_limits<double>::quiet_NaN(),
-                        bool immediately = false);
+
+
     // Keep the historical five-argument symbol above; regenerated legacy
     // sources continue to bind token 0. This does not promise that arbitrary
     // objects compiled against an older BacktestEngine class layout can be
     // relinked without rebuilding. New codegen supplies a stable nonzero token
     // for the syntactic strategy.close source site.
-    void strategy_close(const std::string& id, const std::string& comment,
-                        double qty, double qty_percent, bool immediately,
-                        uint64_t callsite_token);
-    void strategy_close_all();
-    void strategy_exit(const std::string& id, const std::string& from_entry,
-                       double limit_price, double stop_price,
-                       double trail_points = std::numeric_limits<double>::quiet_NaN(),
-                       double trail_offset = std::numeric_limits<double>::quiet_NaN(),
-                       double trail_price = std::numeric_limits<double>::quiet_NaN(),
-                       double qty_percent = 100.0,
-                       const std::string& comment = "",
-                       double qty = std::numeric_limits<double>::quiet_NaN(),
-                       const std::string& oca_name = "",
-                       double profit_ticks = std::numeric_limits<double>::quiet_NaN(),
-                       double loss_ticks = std::numeric_limits<double>::quiet_NaN());
-    void strategy_cancel(const std::string& id);
-    void strategy_cancel_all();
-    void strategy_order(const std::string& id, bool is_long, double qty,
-                        double limit_price = std::numeric_limits<double>::quiet_NaN(),
-                        double stop_price = std::numeric_limits<double>::quiet_NaN(),
-                        const std::string& oca_name = "",
-                        int oca_type = 0);
 
-    void process_pending_orders(const Bar& bar, bool before_pooc_script = false);
-    struct CoofFillResult {
-        bool filled = false;
-        double fill_price = std::numeric_limits<double>::quiet_NaN();
-        uint64_t fill_events = 0;
-        // A chart-extreme tick touch books at the tick print, but the path
-        // advances from the raw H/L it actually reached. Never walk back from
-        // an outward-rounded fill price into an already-consumed segment.
-        double chart_waypoint_price = std::numeric_limits<double>::quiet_NaN();
-        // A pinned group of resting stop siblings settles on one historical
-        // adverse leg before one script recalculation. Broker fills remain
-        // individually counted by fill_events and broker_fill_event_seq_.
-        bool grouped_stop_recalc = false;
-        // Physical lot opened by this actual fresh COOF MARKET fill. Only
-        // its first callback may use this provenance; direct later fills do not.
-        uint64_t market_entry_incarnation = 0;
-    };
-    CoofFillResult process_next_pending_order(const Bar& bar,
-                                              bool allow_market_orders,
-                                              int& exit_closed_from_bar,
-                                              uint64_t& exit_closed_from_incarnation,
-                                              bool& exit_closed_was_long,
-                                              const Bar* chart_bar = nullptr);
+
+
+
+
+
+
+
 
     // TradingView forced-liquidation (margin call). Finite-price liquidation
     // paths use the bar's adverse extreme. A 100%-margin long instead uses
     // opening affordability and the separately scoped rounded-money checks.
-    void process_margin_call(const Bar& bar);
+
     // Settle an opening money restore before a later eligible owned exit,
     // retaining the actual chart bar for financial-class eligibility.
-    void process_carried_long_money_before_priced_orders(const Bar& bar);
+
     // Ordinary subcontract shorts and integer MARKET lots expose completed
     // liquidation to the close-time script (R23/R25/R28 TV controls).
-    void process_short_margin_before_script(const Bar& bar);
+
     // An unchanged carried POOC short finishes its adverse-path margin event
     // before the close script observes or reverses it. The caller proves no
     // resting order filled earlier on this bar.
-    void process_carried_pooc_short_margin_before_script(const Bar& bar);
+
     // finding-308: chronological pre-exit forced-liquidation slice. Called
     // from the process_pending_orders fill loop immediately BEFORE a priced
     // exit of the live position is applied. Fires only when (a) no margin
@@ -1994,9 +1121,7 @@ protected:
     // trigger/slice arithmetic of process_margin_call byte-for-byte.
     // Returns true when a "Margin call" row was booked; the triggering exit
     // then fills the reduced remainder.
-    bool margin_call_slice_before_priced_exit(const Bar& bar,
-                                              double exit_fill_price,
-                                              double exit_path_position);
+
     // finding-325 (1x-long entry-fill affordability chronology): TV runs the
     // 1x-long (margin_long=100) opening-affordability check AT THE ENTRY
     // FILL, chronologically before the same bar's intrabar exits. When a
@@ -2007,12 +1132,12 @@ protected:
     // fallback), filled at the RAW matched entry base, tagged "Margin call"
     // — and the exit then closes the reduced remainder. Consumes the
     // pending opening event; returns true when a slice was booked.
-    bool margin_call_1x_long_opening_slice_before_priced_exit(const Bar& bar);
+
     // A timestamped FX rollover is a broker-open event, not an end-of-bar
     // adverse-price check.  Cell A1 supports carried 1x full-margin long and
     // short in ordinary historical dispatch; leveraged shapes stay fail-closed.
     // Returns true when it emits a broker liquidation row.
-    bool process_carried_position_fx_rollover(const Bar& bar);
+
     // finding-430: forced liquidation at the bar OPEN. A carried position
     // with a finite liquidation price that already breaches the margin
     // requirement at the open is sliced AT THE OPEN (quantity computed at
@@ -2020,7 +1145,7 @@ protected:
     // survivor keeps its ordinary adverse-extreme check, so one bar can book
     // an open slice AND an extreme slice. Bars whose open does not breach
     // are untouched. Returns true when a "Margin call" row was booked.
-    bool margin_call_slice_at_bar_open(const Bar& bar);
+
     // Round 7 family H residual (NYSE:F 1D short admission tape 2025-04-23 /
     // 2026-04-08): a strategy.close / close_all MARKET order for the WHOLE
     // position resting for this bar's open fills before the open's margin
@@ -2035,7 +1160,7 @@ protected:
     // hexatrades AAPL@15 2025-07-29 13:30Z). margin_call_slice_at_bar_open
     // then stands down only for the unconditional close. A partial close or
     // a priced exit the open gapped through keeps the open slice (unpinned).
-    bool whole_position_market_close_rests_for_open() const;
+
     // Round 7 family L (campaign pin log-20260905t093952z-0c4938cb; lab tv
     // tapes scratchpad/r7/pins/xau15-mcpath-{a,b}, fresh-touch-once): on the
     // bar a position OPENS, TradingView marks the forced liquidation only
@@ -2055,13 +1180,12 @@ protected:
     // first_touch_position's units). An unrouted fill coordinate (market /
     // open fills, stop-limit, raw orders) reads as the open, i.e. the whole
     // bar as before; a fill at the close has no suffix (false).
-    bool entry_bar_post_fill_adverse(const Bar& bar, double* out_mark,
-                                     double* out_pos) const;
+
     // The dispatch shapes the entry-bar path rule is pinned for: the position
     // opened on this bar under ordinary historical dispatch (no
     // process_orders_on_close, calc_on_order_fills, bar magnifier or
     // streaming). Everything else keeps the whole-bar extreme.
-    bool entry_bar_margin_path_scope() const;
+
 
     // --- Fill rounding helpers ---
     // Nearest-tick rounding: TradingView's exact double-precision function
@@ -2093,118 +1217,12 @@ protected:
     // On integer-lot instruments (F, AAPL, ES, NQ, NIFTY: a lot is 10..250k)
     // and on the corpus' continuous qty_step 0 the exact arithmetic stays:
     // there the rounding could only ever bite on a synthetic exact tie.
-    bool tv_money_scope(double price) const {
-        if (!(qty_step_ > 0.0) || !std::isfinite(price) || price <= 0.0) return false;
-        const double lot_value = qty_step_ * price * syminfo_.pointvalue
-                                 * active_account_currency_fx();
-        return std::isfinite(lot_value) && lot_value < 1.0;
-    }
     // POOC flat-parent controls: cost rounding also precedes admission at the
     // terminal close. Named child brackets created after the sole pending
     // parent have no live owner yet; they cannot compete for its opening cash.
-    bool rounded_pooc_flat_signal_cost_scope(const PendingOrder& order) const {
-        if (!process_orders_on_close_ || calc_on_order_fills_
-            || bar_magnifier_enabled_ || coof_scheduler_active_
-            || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
-            || order.type != OrderType::MARKET || order.incarnation == 0
-            || order.created_bar != bar_index_
-            || order.created_position_side != PositionSide::FLAT
-            || placement_has_prior_close(order)
-            || (order.replaced_order_incarnation != 0)
-            || order.oca_type != 0 || !order.oca_name.empty()
-            || position_side_ != PositionSide::FLAT
-            || position_entry_count_ != 0 || !pyramid_entries_.empty()
-            || !(qty_step_ > 0.0 && qty_step_ < 1.0)
-            || !std::isfinite(order.sizing_price) || order.sizing_price <= 0.0
-            || order.sizing_fx != 1.0 || active_account_currency_fx() != 1.0
-            || !account_currency_fx_timestamps_.empty()
-            || syminfo_.pointvalue != 1.0 || commission_value_ != 0.0
-            || slippage_ != 0 || pyramiding_ < 0 || pyramiding_ > 1
-            || max_intraday_filled_orders_.active()
-            || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
-            || risk_max_cons_loss_days_ > 0 || pending_orders_.size() > 3) {
-            return false;
-        }
-        for (const auto& other : pending_orders_) {
-            if (other.incarnation == order.incarnation) continue;
-            const bool priced = std::isfinite(other.legs.prices().limit_price)
-                || std::isfinite(other.legs.prices().stop_price);
-            const bool trailing = std::isfinite(other.legs.prices().trail_offset)
-                && (std::isfinite(other.legs.prices().trail_points) || std::isfinite(other.legs.prices().trail_price));
-            if (other.type != OrderType::EXIT || other.from_entry.empty()
-                || other.created_bar != order.created_bar
-                || other.created_seq <= order.created_seq
-                || other.legs.dormant() || other.legs.pending_replacement()
-                || (!priced && !trailing)) {
-                return false;
-            }
-            // Matching from_entry attaches only if this parent is admitted.
-            // A different named from_entry has neither a live lot (flat) nor
-            // another pending parent (every other object is an EXIT).
-        }
-        return true;
-    }
     // Same-bar POOC money admission for one true-flat long MARKET parent.
     // Quantity sizing keeps its existing slipped divisor. The money checks
     // use the recorded signal mark and a tick-built slipped price instead.
-    bool pooc_flat_money_admission_scope(const PendingOrder& order,
-                                         double fill_price) const {
-        if (!process_orders_on_close_ || order.type != OrderType::MARKET
-            || !order.is_long || order.incarnation == 0
-            || order.created_bar != bar_index_
-            || order.created_position_side != PositionSide::FLAT
-            || placement_has_prior_close(order)
-            || order.birth.from_fill() || (order.replaced_order_incarnation != 0)
-            || !order.oca_name.empty() || order.oca_type != 0
-            || position_side_ != PositionSide::FLAT || position_entry_count_ != 0
-            || !pyramid_entries_.empty() || pyramiding_ < 0 || pyramiding_ > 1
-            || margin_long_ != 100.0 || commission_value_ != 0.0
-            || slippage_ < 0 || !(syminfo_mintick_ > 0.0)
-            || !(qty_step_ > 0.0 && qty_step_ < 1.0)
-            || syminfo_.pointvalue != 1.0 || account_currency_fx_ != 1.0
-            || active_account_currency_fx() != 1.0
-            || !account_currency_fx_timestamps_.empty()
-            || bar_magnifier_enabled_ || stream_warmup_mode_
-            || stream_phase_ != StreamPhase::IDLE
-            || max_intraday_filled_orders_.active() || risk_max_intraday_loss_ != 0.0
-            || risk_max_drawdown_ != 0.0 || risk_max_cons_loss_days_ > 0
-            || !std::isfinite(fill_price) || !(fill_price > 0.0)) return false;
-        if (calc_on_order_fills_) {
-            if (!coof_scheduler_active_ || !coof_cursor_is_bar_close_
-                || coof_fill_recalc_active_ || coof_evaluating_path_segment_) return false;
-        } else if (coof_scheduler_active_) return false;
-        for (const auto& other : pending_orders_)
-            if (other.incarnation != order.incarnation) return false;
-
-        const bool default_all_in = std::isnan(order.qty)
-            && default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-            && default_qty_value_ == 100.0
-            && opening_admission_eligible(order.market_admission)
-            && std::isfinite(order.frozen_default_qty) && order.frozen_default_qty > 0.0
-            && std::isfinite(order.sizing_equity) && order.sizing_equity > 0.0
-            && order.sizing_fx == 1.0;
-        const bool explicit_fixed = std::isfinite(order.qty) && order.qty > 0.0
-            && (order.qty_type < 0 || order.qty_type == static_cast<int>(QtyType::FIXED))
-            && std::isfinite(order.affordability_placement_equity)
-            && order.affordability_placement_equity > 0.0
-            && order.affordability_held_qty == 0.0
-            && (!order.pine_frozen_market_instruction.active()
-                || (order.pine_frozen_market_instruction.transaction()
-                    && order.pine_frozen_market_instruction.transaction()->transaction_units
-                        == order.pine_frozen_market_instruction.transaction()->own_units
-                    && !placement_at_entry_capacity(order)));
-        if (!default_all_in && !explicit_fixed) return false;
-        const double mark = default_all_in ? order.sizing_mark
-                                          : order.affordability_signal_price;
-        const double price = default_all_in ? order.sizing_price
-            : mark + slippage_ * syminfo_mintick_;
-        if (!std::isfinite(mark) || !(mark > 0.0) || !std::isfinite(price)
-            || !(price > 0.0) || !tv_money_scope(price)
-            || fill_price != mark) return false;
-        const double booked = apply_fill_slippage(fill_price, true);
-        return slippage_ == 0 ? booked == price
-            : round_to_mintick(booked) == round_to_mintick(price);
-    }
 
     // R24 signal-cost controls: a fractional lot worth >=1 account unit can
     // still cross the rounded-money admission boundary. BTC Q9.36259 at
@@ -2215,66 +1233,17 @@ protected:
     // R39 BTC/XAU controls also pin the independent price-scale check for
     // this ordinary market book. Share its scope while keeping the separately
     // pinned POOC signal-cost extension out of the price-scale extension.
-    bool ordinary_fractional_market_admission_scope(const PendingOrder& order) const {
-        if (!(qty_step_ > 0.0 && qty_step_ < 1.0)
-            || !std::isfinite(order.sizing_price) || order.sizing_price <= 0.0
-            || !std::isfinite(order.sizing_equity)
-            || !std::isfinite(order.frozen_default_qty)
-            || order.sizing_fx != 1.0 || active_account_currency_fx() != 1.0
-            || !account_currency_fx_timestamps_.empty()
-            || syminfo_.pointvalue != 1.0
-            || commission_value_ != 0.0 || slippage_ != 0
-            || process_orders_on_close_ || calc_on_order_fills_
-            || bar_magnifier_enabled_ || coof_scheduler_active_
-            || stream_warmup_mode_ || stream_phase_ != StreamPhase::IDLE
-            || pyramiding_ < 0 || pyramiding_ > 1
-            || position_entry_count_ > 1 || pyramid_entries_.size() > 1
-            || max_intraday_filled_orders_.active()
-            || risk_max_intraday_loss_ != 0.0 || risk_max_drawdown_ != 0.0
-            || risk_max_cons_loss_days_ > 0 || order.incarnation == 0) {
-            return false;
-        }
-        for (const auto& other : pending_orders_) {
-            if (other.incarnation == order.incarnation) continue;
-            // Coqueued unpriced strategy.close legs are part of the pins.
-            // Competing entries and priced/trailing brackets retain their
-            // existing admission and transaction-ordering paths.
-            if (other.type != OrderType::EXIT
-                || !std::isnan(other.legs.prices().limit_price) || !std::isnan(other.legs.prices().stop_price)
-                || !std::isnan(other.legs.prices().trail_points) || !std::isnan(other.legs.prices().trail_price)
-                || !std::isnan(other.legs.prices().profit_ticks) || !std::isnan(other.legs.prices().loss_ticks)) {
-                return false;
-            }
-        }
-        return true;
-    }
-    bool rounded_signal_cost_scope(const PendingOrder& order) const {
-        return tv_money_scope(order.sizing_price)
-            || rounded_pooc_flat_signal_cost_scope(order)
-            || ordinary_fractional_market_admission_scope(order);
-    }
-    bool rounded_price_admission_scope(const PendingOrder& order) const {
-        return tv_money_scope(order.sizing_price)
-            || ordinary_fractional_market_admission_scope(order);
-    }
     // Rule 1's scope (round 10 family AE): the ten-digit equity and the raw
     // lot floor size EVERY lot-stepped instrument — integer shares included
     // (NASDAQ:AAPL 2025-09-05 16:15Z: 1094521.68 / 238.77 floors to 4583 on
     // TradingView, 4584 from the float-accumulated ledger or a nudged
     // floor). Only a continuous qty_step 0 keeps the exact arithmetic.
-    bool tv_money_lot_sizing() const { return qty_step_ > 0.0; }
     // The broker's required margin at a mark is money at ten significant
     // digits where that can move a lot (famr-adm-rev-01000: the 4x trim of
     // the fill bar's short is 3900.60 from the ROUNDED 1000527.321 required
     // margin, 3900.56 from the exact 1000527.3207023 — one lot of restore
     // quantity across the 0.01 floor; rev-00800 / -01079 / revb / S3 keep
     // their trims either way). Exact outside the scope.
-    double tv_money_required_margin(double required, double mark) const {
-        // Same-currency ledgers only (a converted ledger is cent-rounded in
-        // TradingView's export; no tape pins the 10-digit form there).
-        return tv_money_scope(mark) && account_currency_fx_timestamps_.empty()
-            ? tv_money_round(required) : required;
-    }
 
     // A fill taken AT A RAW BAR PRICE — a market order at the bar close
     // (process_orders_on_close) or at the next open, a resting stop/limit
@@ -2415,13 +1384,6 @@ protected:
     // KI-67 cascade waypoint bar — is a slice of an already-decided path and
     // is compared raw, exactly as before; a real chart / lower-TF bar is
     // quantized.
-    Bar broker_trigger_bar(const Bar& bar) const {
-        if ((calc_on_order_fills_ && coof_scheduler_active_)
-            || coof_cascade_force_wp_gap_) {
-            return bar;
-        }
-        return broker_tick_bar(bar);
-    }
 
     // TradingView fills stop entries directionally to mintick rather than
     // rounding to nearest: long stops snap UP (ceil), short stops snap DOWN
@@ -2693,11 +1655,6 @@ protected:
     // census above is default percent_of_equity sizing, and no strategy.cash
     // tape discriminating round(close) from close has been replayed. A
     // future CASH mismatch on a sub-tick feed is traced here first.
-    double calc_qty(double fill_price) const {
-        const double equity = default_qty_type_ == QtyType::PERCENT_OF_EQUITY
-            ? percent_commission_live_equity(round_to_mintick(current_bar_.close)) : 0.0;
-        return calc_default_qty_from_equity(fill_price, equity);
-    }
 
     // TradingView freezes DEFAULT (qty=na) market-order sizing at the SIGNAL
     // bar — the bar whose on_bar issued the strategy.entry/strategy.order
@@ -2747,17 +1704,7 @@ protected:
     // for decimal ticks — the measurement is in calc_qty's comment), and
     // that ulp is absorbed by apply_qty_step's 1e-6 nudge and by the
     // admission arms' float guards.
-    double frozen_sizing_price(bool is_buy) const {
-        double sizing_price = round_to_mintick(current_bar_.close);
-        if (slippage_ != 0 && syminfo_mintick_ > 0.0) {
-            sizing_price += (is_buy ? 1.0 : -1.0) * slippage_ * syminfo_mintick_;
-        }
-        return sizing_price;
-    }
 
-    double frozen_default_market_qty(bool is_buy) const {
-        return calc_qty(frozen_sizing_price(is_buy));
-    }
 
     // round 7 (family M, JOAT BTC@1D; campaign note log-20260905t121513z-
     // 50167cb8, CORRECTING the m1d-coof-ctx pin): a DEFAULT-sized
@@ -2794,10 +1741,6 @@ protected:
     // (stop/limit) entries keep their own paths. Ordinary close executions
     // (coof_fill_recalc_active_ false) freeze exactly as before, so a script
     // without calc_on_order_fills is byte-identical.
-    bool coof_default_market_sizes_at_fill() const {
-        return calc_on_order_fills_ && coof_scheduler_active_
-            && coof_fill_recalc_active_;
-    }
 
     // KI-54 defect fix: the frozen sizing snapshot must see POST-liquidation
     // equity. TradingView liquidates intrabar, BEFORE the bar-close script
@@ -2814,76 +1757,9 @@ protected:
     // default-sized market order placed on THIS bar is re-frozen on the
     // post-liquidation state. Strict no-op on bars without a margin call
     // (the caller checks), and bit-identical recompute for untouched state.
-    void refresh_frozen_default_sizing_after_margin_call() {
-        for (auto& o : pending_orders_) {
-            if (std::isnan(o.frozen_default_qty)) continue;
-            if (o.type != OrderType::MARKET && o.type != OrderType::RAW_ORDER)
-                continue;
-            if (o.created_bar != bar_index_) continue;
-            const admission::SizingObservation before{
-                o.frozen_default_qty,o.sizing_equity,o.sizing_price,o.sizing_mark,o.sizing_fx};
-            const double affordability_before=o.affordability_placement_equity;
-            o.frozen_default_qty = calc_qty(o.sizing_price);
-            if (!std::isnan(o.sizing_equity)) {
-                // Same on-tick mark the placement sites took
-                // (engine_strategy_commands.cpp): the re-freeze must land on
-                // the number placement would have produced post-liquidation.
-                o.sizing_equity = percent_commission_live_equity(
-                    round_to_mintick(current_bar_.close));
-            }
-            o.sizing_fx = active_account_currency_fx();
-            record_market_sizing_revision(o,before,affordability_before);
-        }
-        // design-market-entry-affordability: the placement-equity snapshot of
-        // THIS bar's affordability-gated market entries must see the same
-        // post-liquidation state.
-        for (auto& o : pending_orders_) {
-            if (o.type != OrderType::MARKET) continue;
-            if (o.created_bar != bar_index_) continue;
-            if (!std::isfinite(o.affordability_placement_equity)) continue;
-            const admission::SizingObservation before{
-                o.frozen_default_qty,o.sizing_equity,o.sizing_price,o.sizing_mark,o.sizing_fx};
-            const double affordability_before=o.affordability_placement_equity;
-            o.affordability_placement_equity =
-                current_equity() + open_profit(current_bar_.close);
-            record_market_sizing_revision(o,before,affordability_before);
-        }
-        // round 7 (family K): a default percent_of_equity <= 100 STOP placed
-        // by this bar's on_bar was sized on pre-liquidation equity too.
-        // Re-size it at its sizing basis on the post-liquidation state, the
-        // same re-freeze the market orders above get. The placement verdict
-        // is not revisited (this runs inside process_pending_orders on the
-        // finding-308 path, where the book must not be mutated); the
-        // fill-time admission still costs the re-sized quantity at the fill.
-        for (auto& o : pending_orders_) {
-            if (o.type != OrderType::ENTRY) continue;
-            if (o.created_bar != bar_index_) continue;
-            if (!std::isfinite(o.default_stop_placement_qty)) continue;
-            if (!std::isfinite(o.default_stop_sizing_price)) continue;
-            o.default_stop_placement_qty =
-                calc_qty(o.default_stop_sizing_price);
-            o.default_stop_placement_equity =
-                current_equity() + open_profit(current_bar_.close);
-            o.default_stop_placement_signal_close =
-                round_to_mintick(current_bar_.close);
-        }
-    }
 
     // --- Strategy variable accessors ---
-    double signed_position_size() const {
-        // KI-64: while a POOC same-bar in-line close is frozen for this bar,
-        // the SCRIPT sees the pre-close position (TV defers close visibility to
-        // the next bar). Broker/internal reads use position_side_/position_qty_
-        // directly and are unaffected.
-        if (pos_view_freeze_bar_ == bar_index_) {
-            if (pos_view_frozen_side_ == PositionSide::LONG) return pos_view_frozen_qty_;
-            if (pos_view_frozen_side_ == PositionSide::SHORT) return -pos_view_frozen_qty_;
-            return 0.0;
-        }
-        if (position_side_ == PositionSide::LONG) return position_qty_;
-        if (position_side_ == PositionSide::SHORT) return -position_qty_;
-        return 0.0;
-    }
+
 
     // KI-64: freeze the pre-close position for the script-visible position
     // accessor before an ordinary POOC strategy.close/close_all fills in-line
@@ -2891,20 +1767,11 @@ protected:
     // FIRST pre-close snapshot). Caller guards process_orders_on_close_ &&
     // !immediately; this reads position_side_/position_qty_ while they still
     // hold the pre-close values (execute_immediate_close has not run yet).
-    void freeze_script_position_view() {
-        if (pos_view_freeze_bar_ == bar_index_) return;
-        pos_view_freeze_bar_ = bar_index_;
-        pos_view_frozen_side_ = position_side_;
-        pos_view_frozen_qty_ = position_qty_;
-        pos_view_frozen_entry_qty_.clear();
-        for (const auto& entry : pyramid_entries_) {
-            pos_view_frozen_entry_qty_[entry.entry_id] += entry.qty;
-        }
-    }
+
     // KI-64: release the freeze so the next script-visible read returns the real
     // (post-close) position. Called at the top of flush_same_bar_close(), i.e.
     // immediately after every POOC on_bar returns.
-    void clear_script_position_view() { pos_view_freeze_bar_ = -1; }
+
 
     double net_profit() const { return net_profit_sum_; }
     double gross_profit() const { return gross_profit_sum_; }
@@ -3073,7 +1940,7 @@ protected:
     // Chart-timezone-aware decomposition for the existing loss-day clocks
     // and the continuous/unconfigured-session order-counter fallback. The
     // order counter on an explicitly timed session instead consumes
-    // compat::pine::IntradayCap::risk_day(), which follows the symbol's trading day.
+    // source-layer intraday-cap risk-day policy, which follows the symbol's trading day.
     //
     // Falls back to plain ``_decompose_bar_time()`` (UTC) when no chart
     // timezone has been set, preserving the legacy fast path for
@@ -3082,8 +1949,6 @@ protected:
     // Defined out-of-line in src/engine_risk.cpp so we can use the
     // private ``ScopedTimezone`` helper without leaking its header into
     // the public engine.hpp surface.
-    BarTime _decompose_bar_time_chart_tz() const;
-
     int _bar_hour() const { return _decompose_bar_time().hour; }
     int _bar_minute() const { return _decompose_bar_time().minute; }
     int _bar_second() const { return _decompose_bar_time().second; }
@@ -3095,13 +1960,10 @@ protected:
 
     // --- Bar magnifier state ---
     bool bar_magnifier_enabled_ = false;
-    bool is_first_tick_ = true;
-    bool is_last_tick_ = true;
     bool barstate_islast_ = false;
     // Independent from barstate.isnew. False only when a COOF execution
     // restores a completed ordinary-close checkpoint that already contains
     // the current bar's one committed history slot.
-    bool history_slot_is_new_ = true;
     int magnifier_samples_ = 4;
     MagnifierDistribution magnifier_dist_ = MagnifierDistribution::ENDPOINTS;
     // When true, run_magnified_bar scales per-sub-bar sample count by
@@ -3112,38 +1974,28 @@ protected:
     // KI-60 scheduler transients. Script executions see the complete
     // historical bar, while direct POOC/immediate market closes use the
     // monotonic broker cursor price held here.
-    bool coof_scheduler_active_ = false;
-    bool coof_fill_recalc_active_ = false;
-    bool coof_cursor_is_bar_close_ = false;
     // finding-446: true when coof_cursor_price_ is a RAW OHLC path point /
     // magnifier tick (a broker-price fill there is nearest-tick rounded via
     // bar_fill_price); false when it is a resolved fill price (a bar-point
     // fill is already rounded, a level fill keeps its directional snap).
-    bool coof_cursor_is_bar_point_ = false;
-    bool coof_evaluating_path_segment_ = false;
     // KI-67: true only while the active fill recalc owns the FIRST fill event
     // at the bar-open tick (O). Orders placed while this holds keep STANDARD
     // exact-level semantics. Later fills at that same O, like fills at every
     // other path point, are MID-BAR cascades (the Pine historical cascade permission).
-    bool coof_recalc_at_bar_open_ = false;
     // True only while executing a fill recalc triggered by a later fill event
     // at O, after the first O fill has already consumed bar-open provenance.
     // Such a recalc is mid-bar for KI-67 and resumes on leg 0 (O->W1). This bit
     // lets strategy.exit apply the one pinned exception: a marketable LIMIT may
     // resume at W1, while marketable STOP suppression remains whole-entry-bar.
-    bool coof_recalc_after_first_open_fill_ = false;
     // Round15: identify the MARKET opening whose first callback is active.
     // A direct close/partial/reentry in that body changes the serial and must
     // not inherit the original fill's permission to arm a recrossing limit.
-    uint64_t coof_market_entry_recalc_incarnation_ = 0;
-    uint64_t coof_market_entry_recalc_fill_seq_ = 0;
     // KI-67: true only during a point-bar evaluation that sits AT an extreme
     // waypoint (W1 or W2) of the historical 4-tick path. Cascade orders born
     // this bar may fill only while this holds; on segments, at O, at C, and on
     // the ordinary-close / POOC-C / margin passes it is false so cascade orders
     // are held (they convert to ordinary resting orders at bar end). Set only by
     // the historical dispatch; the magnifier path never sets it.
-    bool coof_at_extreme_waypoint_ = false;
     // KI-67 exit cascade: the historical dispatch publishes its current path
     // position here for the strategy.exit cascade gate. coof_hist_is_segment_
     // marks a segment (vs point) evaluation; coof_hist_path_index_ is the LEG
@@ -3151,8 +2003,6 @@ protected:
     // path[index]) on a point. Meaningful only while coof_scheduler_active_ on
     // the non-magnifier historical path; the POOC-C / margin passes publish the
     // C waypoint (index 3) so cascade exits are held there.
-    bool coof_hist_is_segment_ = false;
-    int coof_hist_path_index_ = -1;
     // KI-67 exit cascade: the in-flight leg index (0..2) the CURRENT fill recalc
     // was triggered on — the leg the dispatch cursor traverses next after the
     // triggering fill. Published by the loop right before each recalc so a
@@ -3160,19 +2010,14 @@ protected:
     // position ("a fill AT a waypoint starts the NEXT leg"), rather than
     // re-deriving it from the fill price (ambiguous exactly at waypoints). -1 (or
     // >=3) outside a mid-bar historical recalc / at the terminal C tick.
-    int coof_cascade_recalc_leg_ = -1;
     // KI-67 exit cascade: set by the gate immediately before evaluate_fill_price
     // so resolve_exit_path_fill runs its open-gap shortcut on the in-flight
     // leg-end waypoint POINT even when is_entry_bar (entry + exit share a bar).
     // Reset right after that evaluation; never set on the magnifier path.
-    bool coof_cascade_force_wp_gap_ = false;
-    bool coof_checkpoint_contains_current_bar_ = false;
-    double coof_cursor_price_ = std::numeric_limits<double>::quiet_NaN();
     // Direct strategy.close / POOC fills can occur inside on_bar rather than
     // through process_next_pending_order. The scheduler refreshes this budget
     // before every speculative execution so those fills consume the same
     // finite historical/magnifier event budget as every other broker fill.
-    uint64_t coof_direct_fill_events_remaining_ = 0;
     // @broker-state begin
     // Monotonic cross-bar fill sequence counter; compared against
     // trail_best_before_bar_fill_seq_ (hashed above) and against
@@ -3180,27 +2025,6 @@ protected:
     // gates that cross the bar boundary (engine_fills.cpp).
     uint64_t broker_fill_event_seq_ = 0;
     // @broker-state end
-
-    // input.source histories are base-owned script state and must roll back
-    // with generated state between historical fill recalculations.
-    Series<double> coof_checkpoint_src_open_;
-    Series<double> coof_checkpoint_src_high_;
-    Series<double> coof_checkpoint_src_low_;
-    Series<double> coof_checkpoint_src_close_;
-    Series<double> coof_checkpoint_src_volume_;
-    Series<double> coof_checkpoint_src_hl2_;
-    Series<double> coof_checkpoint_src_hlc3_;
-    Series<double> coof_checkpoint_src_ohlc4_;
-    Series<double> coof_checkpoint_src_hlcc4_;
-    // issue #178 (JOAT aureate, round 9): the chart-close tracker
-    // (prev_chart_close_ / last_chart_close_) is base-owned script state
-    // too. Every historical fill recalculation and the ordinary close
-    // execution start from this checkpoint and push the bar's slot again
-    // (history_slot_is_new_), so without rolling the tracker back the close
-    // execution of a bar whose open filled an order read prev_chart_close_
-    // = the recalc's own close: its true range lost the gap to close[1].
-    double coof_checkpoint_prev_chart_close_ = std::numeric_limits<double>::quiet_NaN();
-    double coof_checkpoint_last_chart_close_ = std::numeric_limits<double>::quiet_NaN();
 
     // --- Session predicate bar-state tracking ---
     // Tracks whether the previous bar was inside the regular session.
@@ -3225,34 +2049,7 @@ protected:
     // the bar IS the whole session — its own first and last bar — so
     // session.isfirstbar and session.islastbar both equal in_session there
     // and the prev/next bookkeeping does not apply.
-    void set_session_bar_state(bool in_session, bool intraday_islastbar);
 
-    // The session.is* market-state variables as the generated strategy
-    // evaluates them. Codegen lowers session.ismarket / ispremarket /
-    // ispostmarket to the unqualified call
-    //   pine_session_is*(syminfo_.session, syminfo_.timezone, current_bar_.timestamp)
-    // inside the generated class, and class-scope lookup resolves it to these
-    // members (a member hides the namespace-scope function of the same name
-    // and suppresses ADL), so the chart timeframe joins the predicate with
-    // the emitted code unchanged. TradingView: on "1D" and above
-    // session.ismarket is always true, ispremarket / ispostmarket always
-    // false — OANDA:XAUUSD @1D (1800-1700, bars stamped 17:00 ET) took 0
-    // trades against TradingView's 57 while the time-of-day test decided.
-    // Every BacktestEngine member resolves here too; the one caller that
-    // wants the raw time-of-day test (the streaming clock's closed-interval
-    // skip) qualifies pineforge:: explicitly.
-    bool pine_session_ismarket(const std::string& session,
-                               const std::string& tz, int64_t bar_ms) const {
-        return pineforge::pine_session_ismarket(session, tz, bar_ms, script_tf_);
-    }
-    bool pine_session_ispremarket(const std::string& session,
-                                  const std::string& tz, int64_t bar_ms) const {
-        return pineforge::pine_session_ispremarket(session, tz, bar_ms, script_tf_);
-    }
-    bool pine_session_ispostmarket(const std::string& session,
-                                   const std::string& tz, int64_t bar_ms) const {
-        return pineforge::pine_session_ispostmarket(session, tz, bar_ms, script_tf_);
-    }
 
     // --- Timeframe state ---
     std::string input_tf_;
@@ -3515,15 +2312,6 @@ protected:
     // BacktestEngine offsets.
     bool security_history_publication_replay_ = false;
 
-#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
-    // Optional immutable finer feed for request.security. Native chart bars
-    // remain the sole source for current_bar_, broker execution and
-    // bar_index_. Per-run ranges map each chart bar to its auxiliary slice.
-    std::vector<Bar> aux_security_bars_;
-    std::string aux_security_input_tf_;
-    std::vector<std::size_t> aux_security_chart_begin_;
-    std::vector<std::size_t> aux_security_chart_end_;
-#endif
     // The raw feed used by security aggregators in the active run. This is the
     // chart input TF on the legacy path and the auxiliary TF on the split path.
     std::string security_input_tf_;
@@ -3698,12 +2486,8 @@ protected:
     virtual void commit_script_state() {}
 
     // Magnifier helpers
-    void run_magnified_bar(
-        const std::vector<Bar>& sub_bars, int64_t script_bar_ts,
-        bool caller_completed_on_boundary = false);
-    void run_magnified_bar_calc_on_order_fills(const std::vector<Bar>& sub_bars,
-                                               int64_t script_bar_ts,
-                                               bool caller_completed_on_boundary = false);
+
+
     virtual void finalize_bar() {}
 
     // --- Equity extremes update (called after each on_bar) ---
@@ -3876,16 +2660,10 @@ protected:
         return (initial_capital_ > 0.0) ? (max_drawdown_ / initial_capital_) * 100.0 : 0.0;
     }
 
-    int64_t time_close() const {
-        return pine_time_close(current_bar_.timestamp, script_tf_, syminfo_.session, syminfo_.timezone, script_tf_);
-    }
-
     // Internal sizing helper; protected (alongside calc_qty) so the sizing-guard
     // test can exercise the fill_price<=0 / NaN rejection path directly. See
     // tests/test_adversarial_ohlcv.cpp.
-    double calc_qty_for_type(double fill_price, double qty_value, int qty_type) const;
-
-private:
+protected:
     execution::Result settle_with_context_scoped(
         const execution::Action& action, const execution::Fill& fill,
         const execution::LifecycleEffects& lifecycle,
@@ -3979,19 +2757,8 @@ private:
         MARGIN_CALL,
     };
 
-    void execute_market_entry(const std::string& id, bool is_long, double fill_price,
-                              double explicit_qty,
-                              int explicit_qty_type,
-                              PositionSide created_position_side,
-                              bool close_only_opposite,
-                              bool is_priced_entry,
-                              double tv_carry_qty,
-                              int created_bar,
-                              bool later_same_tick_entry,
-                              bool paired_flat_market_transaction,
-                              bool explicit_qty_prequantized,
-                              uint64_t entry_incarnation);
-    void execute_market_exit(double fill_price);
+
+
     void append_same_side_fill(PyramidEntry lot);
     void append_quoted_lot(PyramidEntry lot, double total_qty, double average_price);
     // Allocates the new position cycle, lots and observations, then binds
@@ -4006,80 +2773,56 @@ private:
     // a stream warmup replay. Reporting only: the live position is kept; the
     // last equity point is re-marked to the flat account and the scalar
     // drawdown / run-up extremes re-folded from the curve to match.
-    void record_range_end_close_trades();
-    void execute_partial_exit_qty(
-        double fill_price, double qty_to_close,
-        PositionReductionCause cause = PositionReductionCause::SCRIPT_ORDER);
-    void execute_partial_exit(
-        double fill_price, double qty_percent,
-        PositionReductionCause cause = PositionReductionCause::SCRIPT_ORDER);
-    void execute_partial_exit_by_entry(
-        double fill_price, const std::string& from_entry,
-        PositionReductionCause cause = PositionReductionCause::SCRIPT_ORDER);
-    void execute_partial_exit_by_entry_qty(
-        double fill_price,
-        const std::string& from_entry,
-        double qty_to_close,
-        PositionReductionCause cause = PositionReductionCause::SCRIPT_ORDER);
-    void execute_partial_exit_by_entry_percent(
-        double fill_price, const std::string& from_entry, double qty_percent,
-        PositionReductionCause cause = PositionReductionCause::SCRIPT_ORDER);
+
+
+
+
+
+
     // KI-62: scratch (close dur-0) any same-bar same-id MARKET pyramid-add
     // slices still open after a from_entry priced bracket exit fills — TV's
     // open-tick fill sequence covered them. Targets only flagged same-bar add
     // slices (never the frozen pre-add lot, never a prior-bar slice). Returns
     // the qty scratched (0 = no collision → strict no-op).
-    double cover_samebar_market_adds_on_exit(
-        const PendingOrder& order, double fill_price,
-        PositionReductionCause cause = PositionReductionCause::SCRIPT_ORDER);
-    void cancel_oca_group(std::string oca_name, std::string exclude_id);
+
+
     // Pine v6 oca.reduce: when one sibling fills qty Q, reduce remaining
     // siblings' qty by Q. Siblings whose qty becomes <= 0 are cancelled.
-    void reduce_oca_group(std::string oca_name, std::string exclude_id,
-                          double filled_qty);
-    void purge_exit_orders(bool retain_for_pending_entries = false);
+
+
 
     // process_pending_orders helpers (defined in engine_fills.cpp).
     // Decomposed during the function-decomposition refactor so the
     // bar-pump fill loop is reviewable rather than a 600-line monolith.
-    void update_trail_best_for_bar_open(const Bar& bar);
-    void sort_exit_siblings_by_path_fill(const Bar& bar);
-    admission::Configuration admission_configuration() const;
-    admission::CurrentPrices admission_current_prices(const PendingOrder& order) const;
-    admission::BookObservation admission_book_observation(const PendingOrder& order) const;
-    admission::CommandCapture begin_market_command(admission::CommandKind kind,
-        const std::string& id, bool buy, double qty, int qty_type,
-        double limit, double stop, const std::string& oca, int oca_type);
-    void bind_market_command(PendingOrder& order, admission::CommandCapture& command);
-    admission::ReviewCapture begin_market_review(admission::Checkpoint checkpoint);
-    void reclaim_market_admission();
+
+
+
+
+
+
+
+
+
     // The generic engine asks for an opening-admission decision through this
     // source-owned seam.  The Pine compatibility adapter is implemented in
     // engine_market_admission.cpp and is deliberately absent from this
     // public engine header.
-    bool opening_admission_eligible(const MarketAdmissionDraft& draft) const;
-    void record_market_sizing_revision(PendingOrder& order, admission::SizingObservation before,
-                                      double affordability_before);
-    bool pending_flat_market_pair_scope_is_live() const;
-    bool default_flat_market_gross_scope_is_live() const;
-    void finalize_default_flat_market_gross_admission();
-    void apply_pooc_coof_explicit_flat_market_gross_admission();
-    void finalize_pending_flat_market_pairs(const Bar& bar);
-    void sort_orders_by_fill_phase(const Bar& bar);
-    bool short_seed_collision_materialization_is_live(
-        const PendingOrder& order) const;
-    bool short_seed_collision_final_short_is_live(
-        const PendingOrder& order) const;
-    // round 8 family S (PendingOrder::pine_frozen_market_instruction): the same-bar MARKET
+
+
+
+
+
+
+
+
+
+    // round 8 family S (source::PendingOrder::pine_frozen_market_instruction): the same-bar MARKET
     // transaction's scope, the close-artifact predicate (rule 4) and the
     // frozen-transaction reversal kernel (rules 1/2).
-    bool same_bar_market_tx_scope_is_live() const;
-    void finalize_same_bar_market_tx_book();
-    bool same_bar_market_close_artifact_is_live(
-        const PendingOrder& order) const;
-    void apply_same_bar_market_tx_reversal(PendingOrder& order, double fill_price,
-                                           const Bar& bar,
-                                           double& trail_best_path_state);
+
+
+
+
     // TradingView binds a valid, single/full, non-trailing strategy.exit to a
     // co-queued high-level MARKET parent. If that parent fills at the next open
     // and exactly one bracket leg is already marketable there — the stop
@@ -4094,51 +2837,32 @@ private:
     // multi-child groups, and dual-marketable brackets.
     // limit_leg (optional out): set true iff the LIMIT leg is the marketable
     // one, so the fill site can take the unslipped limit-or-better path.
-    bool prearmed_market_parent_bracket_gaps_at_open(
-        const PendingOrder& order, const Bar& bar,
-        bool* limit_leg = nullptr) const;
-    bool pending_flat_market_pair_is_live(const PendingOrder& order) const;
-    void invalidate_pending_flat_market_pair(int64_t created_seq);
-    void compact_filled_pending_orders(std::vector<uint64_t>& retired_incarnations,
-                                       int exit_closed_from_bar,
-                                       uint64_t exit_closed_from_incarnation,
-                                       bool exit_closed_was_long);
+
+
+
+
     // Apply a fill to engine state: dispatches by order.type to the
     // per-type apply_*_order_fill helpers below, plus runs the risk
     // gate, intraday-fill cap, OCA cancellation, and bookkeeping that
     // is common to every fill kind. The caller resolves an incarnation to a
     // current index; admission borrows the book, then dispatch owns a value.
-    void apply_filled_order_to_state(size_t order_index,
-                                     double fill_price,
-                                     bool fill_is_limit,
-                                     const Bar& bar,
-                                     double& trail_best_path_state,
-                                     int& exit_closed_from_bar,
-                                     uint64_t& exit_closed_from_incarnation,
-                                     bool& exit_closed_was_long,
-                                     std::vector<uint64_t>& retired_incarnations,
-                                     bool flat_dual_stop_pair = false);
-    bool stop_entry_margin_admission_declines(
-        const PendingOrder& order, double fill_price, const Bar& bar,
-        bool flat_dual_stop_pair = false) const;
+
+
     // True iff `order` is a default percent_of_equity <= 100 pure STOP that
-    // carries its placement snapshot (PendingOrder::default_stop_placement_qty)
+    // carries its placement snapshot (source::PendingOrder::default_stop_placement_qty)
     // and the fill price is a usable positive print: the fill-time admission
     // and dispatch then consume the placement quantity instead of re-sizing
     // at the fill.
     // The pair context exists only inside the ordinary atomic two-stop scan.
     // No callback or stable-frame ABI read occurs between its two fills.
-    bool flat_dual_stop_opposite_is_live(
-        const PendingOrder& order, bool flat_dual_stop_pair) const;
-    bool use_default_stop_placement_qty(
-        const PendingOrder& order, double fill_price,
-        bool flat_dual_stop_pair = false) const;
+
+
     // design-declined-reversal-close-leg: called at the KI-54 reversal-decline
     // site with the just-declined MARKET reversal entry. Flags every pending
     // FULL close that was co-queued after it on the same bar against the held
-    // side (see PendingOrder::cancellation), releasing each close claim
+    // side (see source::PendingOrder::cancellation), releasing each close claim
     // exactly once.
-    void suppress_declined_reversal_close_legs(const PendingOrder& declined_entry);
+
     // round 8 family R / round 10 family AB: the 10-significant-digit
     // margin-call trigger on a margin-100 LONG (process_margin_call; rule
     // and pins on tv_money_long_margin_call in engine_fills.cpp).
@@ -4149,81 +2873,45 @@ private:
     // Opening-only callers retain the actual chart bar for all eligibility
     // checks while restricting valuation to its first path point. A scoped
     // old trailing exit can instead bound valuation strictly before its fill.
-    bool tv_money_long_margin_call(const Bar& bar,
-                                  bool carried_pooc_pre_close = false,
-                                  bool opening_only = false,
-                                  double before_exit_path_position =
-                                      std::numeric_limits<double>::quiet_NaN());
-    bool pooc_trail_money_pre_exit_scope(const Bar& bar,
-                                        const PendingOrder& order,
-                                        double exit_path_position) const;
+
     // Positive-slip, single terminal-C MARKET lot covered by the opening
     // money-event controls. Shared by post-entry deferral and next-O dispatch.
-    bool pooc_opening_money_scope(const Bar& bar) const;
+
     // finding-311: mark the live position's standing strategy.exit brackets
     // dormant when an in-position reversal entry is declined at fill.
-    void mark_position_brackets_dormant_on_declined_reversal(const Bar& bar);
+
     // Round 9 family X: the kill is leg-scoped — a dormant bracket's trail
     // leg (trail_points / trail_price) stays live; its stop / limit die. Not
     // on the decline bar itself (dormant_reversal_kill_bar): the flip attempt
     // holds the brackets for the rest of that bar.
-    bool dormant_bracket_trail_leg_live(const PendingOrder& o) const;
+
     // finding-311: a margin-call partial re-registers the surviving
     // position's exit brackets (revive with original prices). When the
     // margin-call event price makes a revived bracket marketable, the whole
     // remaining position closes at that price through the bracket's id.
-    void revive_position_brackets_after_margin_call_partial(
-        double margin_call_event_price);
+
     // Round 7 family M mechanism 2a: after the bar's process_margin_call, a
     // re-issued bracket that inherited its predecessor's dormancy and was not
     // revived by a margin-call partial goes live for the next bar (the
     // close-time re-issue takes effect once the bar's broker events are
     // done). Called right after every process_margin_call dispatch site.
-    void settle_dormant_bracket_reissues(exit_legs::Domain domain);
-    exit_legs::Frame next_leg_event(exit_legs::Phase phase = exit_legs::Phase::Observation);
-    exit_legs::Frame preview_next_leg_event(
-        exit_legs::Phase phase = exit_legs::Phase::Observation) const;
-    void apply_leg_action(PendingOrder& order, exit_legs::Operation operation,
-                          std::optional<exit_legs::Frame> cause = std::nullopt);
-    exit_legs::Domain current_exit_leg_domain() const;
-    enum class ExitLegTransitionResult {
-        Applied, Replay, StaleIdentity, BindRefused, ActionRefused, Exhausted,
-        RevisionExhausted
-    };
-    ExitLegTransitionResult transition_exit_leg(
-        exit_legs::Lifecycle& legs, uint64_t order_incarnation,
-        exit_legs::Operation operation, std::optional<exit_legs::Frame> supplied,
-        uint64_t& event_seq, int64_t position_cycle) const;
-    std::optional<execution::Status> validate_lifecycle_effects(
+
+    virtual std::optional<execution::Status> validate_source_lifecycle(
         const execution::LifecycleEffects& lifecycle) const;
-    std::optional<execution::Status> preflight_settlement_lifecycle(
+    virtual std::optional<execution::Status> preflight_source_lifecycle(
         const execution::LifecycleEffects& lifecycle,
         bool will_reset_to_flat, bool will_open_quoted);
-    void apply_pre_close_lifecycle_batch(const execution::LifecycleBatch& batch);
-    void apply_authorized_pending_removals(
+    virtual void apply_source_pre_close_lifecycle(
+        const execution::LifecycleBatch& batch);
+    virtual void apply_source_pending_removals(
         const std::vector<execution::PendingRemoval>& removals);
-    std::vector<execution::PendingRemoval> snapshot_exit_pending_removals() const;
-    std::optional<execution::LifecycleBatch> select_declined_reversal_pre_close(
-        const Bar& bar) const;
-    const PendingOrder* find_unique_pending(
-        uint64_t incarnation, int64_t created_seq) const;
-    PendingOrder* find_unique_pending(uint64_t incarnation, int64_t created_seq);
     // Per-OrderType fill kernels. Called only after risk + intraday
     // gates pass; each updates the engine's position/trade state and
     // any per-type out-parameters the post-fill bookkeeping needs.
-    bool replaced_percent_short_market_is_live(const PendingOrder& order) const;
-    void apply_market_order_fill(PendingOrder& order, double fill_price,
-                                 const Bar& bar,
-                                 double& trail_best_path_state,
-                                 bool later_same_tick_entry);
-    void apply_entry_order_fill(PendingOrder& order, double fill_price,
-                                const Bar& bar,
-                                double& trail_best_path_state,
-                                bool flat_dual_stop_pair = false);
-    void apply_exit_order_fill(PendingOrder& order, double fill_price,
-                               int& exit_closed_from_bar,
-                               uint64_t& exit_closed_from_incarnation,
-                               bool& exit_closed_was_long);
+
+
+
+
     // Freeze the reserved qty of LAYERED strategy.exit legs (a qty_percent<100
     // partial + a sibling default/100% leg) that were armed while the position
     // was FLAT (their entry still pending) and therefore stored qty=NaN. Called
@@ -4233,15 +2921,9 @@ private:
     // of the entry it attaches to. Only acts on multi-leg from_entry groups that
     // contain at least one partial leg; single brackets and pure 100% OCA pairs
     // are left untouched (qty=NaN → full remaining close, as before).
-    void reconcile_deferred_layered_exits(
-        const std::string& entry_id,
-        std::vector<uint64_t>& zero_reservation_incarnations);
-    void apply_raw_order_fill(PendingOrder& order, double fill_price,
-                              double& trail_best_path_state,
-                              int& exit_closed_from_bar,
-                              uint64_t& exit_closed_from_incarnation,
-                              bool& exit_closed_was_long);
-    void materialize_relative_exit_prices_for_live_position();
+
+
+
 
     // Inner-loop phase split for process_pending_orders.
     // The inner loop iterates `pending_orders_` and processes each via
@@ -4249,135 +2931,57 @@ private:
     // fill-price (if eligible, what price would it fill at?), and
     // apply (mutate engine state with the fill — see apply_*_order_fill
     // declarations above).
-    enum class OrderEligibility { Proceed, Skip, Remove };
-    double pooc_short_exit_trigger_close(const PendingOrder& order,
-                                         const Bar& bar) const;
-    OrderEligibility classify_order_eligibility(
-        PendingOrder& order, int opposing_pass,
-        internal::DualEntryStopPathWinner dual_entry_path,
-        const std::unordered_set<std::string>& pass0_opposing_skip_ids,
-        int exit_closed_from_bar, uint64_t exit_closed_from_incarnation,
-        bool exit_closed_was_long, const Bar& bar,
-        bool flat_dual_stop_pair = false);
-    struct FillEvaluation {
-        enum class Kind { Fill, NoFill, DeferredToOpposingPass };
-        Kind kind;
-        double fill_price;
-        // True when the LIMIT leg produced the fill (exit limit, entry
-        // limit, or the limit leg of an entry stop-limit) — routes the
-        // fill onto the unslipped limit-or-better price path.
-        bool is_limit_fill = false;
-        // True when the fill came from resolve_exit_path_fill's walk of the
-        // intrabar path for an exit-style order (stop, limit, gap-open or
-        // TRAIL leg — but not a market / same-bar-close-priced exit). Only
-        // such fills carry a chronological path position, which the
-        // finding-308 pre-exit margin-call slice requires.
-        bool exit_path_fill = false;
-        // The fill's position on the bar's 4-waypoint path, in
-        // first_touch_position units. Set whenever exit_path_fill is true.
-        double exit_path_position = std::numeric_limits<double>::quiet_NaN();
-    };
-    FillEvaluation evaluate_fill_price(
-        PendingOrder& order, size_t order_index, const Bar& bar,
-        int opposing_pass, double trail_best_path_state,
-        std::unordered_set<std::string>& pass0_opposing_skip_ids);
+
+
+
+
 
     // strategy_close / strategy_exit helpers (defined in
     // engine_strategy_commands.cpp).
     // retired_ledger_qty_out: the id_unclosed_qty_[id] balance the default-
     // FIFO branch retired beyond qty_to_close_out (0 on every other branch).
-    bool compute_close_target_qty(const std::string& id,
-                                  double qty,
-                                  double qty_percent,
-                                  bool use_script_position_view,
-                                  double& matching_qty_out,
-                                  double& qty_to_close_out,
-                                  bool& all_entries_match_out,
-                                  double& retired_ledger_qty_out);
-    void cancel_orders_for_full_close(const std::string& id, bool closing_long);
+
+
     // Round 7 family M mechanism 2a: a whole-position strategy.close(id)
     // co-queued with a same-bar opposite MARKET entry holds the id's
     // brackets dormant instead of cancelling them (see the definitions).
-    bool reversal_pair_close_keeps_brackets(const std::string& id) const;
-    void hold_brackets_dormant_for_reversal_pair_close(const std::string& id);
-    void cancel_same_bar_market_reentries_after_full_close(
-        bool closed_long, bool preserve_undercap_entries);
+
+
+
     // Same-bar default-FIFO close routing. Token 0 uses the accepted global
     // survivor; nonzero compiler tokens use source-callsite scoped orders.
-    void enqueue_same_bar_close(const std::string& id,
-                                const std::string& comment,
-                                uint64_t callsite_token);
-    void flush_same_bar_close();
+
+
     // retire_ledger_whole: see SameBarCloseCallsite::retire_ledger_whole.
     // Token 0 has no same-bar pending reservation, so it always retires whole.
-    void flush_active_same_bar_close(
-        double admitted_target = std::numeric_limits<double>::quiet_NaN(),
-        double pending_later_qty = 0.0,
-        bool defer_first_ledger_consume = false,
-        uint64_t callsite_token = 0,
-        bool retire_ledger_whole = true);
-    double close_reserved_other_qty(const std::string& id) const;
-    double callsite_close_reserved_other_qty(
-        uint64_t callsite_token, const std::string& id) const;
-    double callsite_close_physical_reserved_other_qty(
-        uint64_t callsite_token, const std::string& id) const;
-    double pending_same_bar_close_target() const;
-    void execute_immediate_close(const std::string& id,
-                                 const std::string& comment,
-                                 double qty_to_close,
-                                 double matching_qty,
-                                 bool closes_full_position,
-                                 bool closes_fifo_qty,
-                                 bool closes_any_qty,
-                                 bool use_script_position_view,
-                                 bool preserve_undercap_entries);
-    uint64_t queue_deferred_close_order(
-        const std::string& id,
-        const std::string& comment,
-        double qty_to_close,
-        double matching_qty,
-        bool closes_full_position,
-        bool closes_any_qty,
-        double consumed_ledger_qty =
-            std::numeric_limits<double>::quiet_NaN(),
-        double retired_ledger_qty = 0.0);
+
+
+
+
+
+
+
     // cleared_leg_count_out: how many live EXIT legs carried this
     // (id, from_entry) before the erase. TV re-issues MODIFY every live leg
     // (each keeping its own entry binding) rather than collapsing them into
     // one, so strategy_exit needs the census to re-arm the same multiplicity.
-    bool from_entry_holds_live_lot(const std::string& from_entry) const;
+
     // replaced_dormant_out / replaced_dormant_stop_out (optional): whether a
     // cleared leg was a dormant bracket (finding-311) and the stop it was
     // last armed with — the re-issue inherits both (round 7 family M
     // mechanism 2a, PendingOrder::dormant_reissue_pending).
-    void clear_existing_exit_order(const std::string& id,
-                                   const std::string& from_entry,
-                                   bool has_trail_request,
-                                   double trail_points,
-                                   double trail_offset,
-                                   double trail_price,
-                                   int64_t& preserved_seq_out,
-                                   uint64_t& replaced_incarnation_out,
-                                   double& preserved_reserved_qty_out,
-                                   int& cleared_leg_count_out,
-                                   std::optional<exit_legs::Definition>* replaced_definition_out = nullptr);
-    bool compute_exit_reserved_qty(const std::string& from_entry,
-                                   double preserved_reserved_qty,
-                                   double live_pos_qty,
-                                   double& qp_io,
-                                   bool& is_partial_io,
-                                   double& reserved_qty_out);
-    void close_reservation_capture_populations(uint64_t admitted_incarnation);
+
+
+
 
     // execute_market_entry / execute_partial_exit_* helpers (defined in
     // engine_orders.cpp).
-    void emit_close_trade(const PyramidEntry& pe, double close_qty,
-                          double fill_price, bool was_long);
+
     void record_close_trade(Trade trade);
     void validate_close_trade_counters(const Trade* rows, size_t count) const;
-    execution::Status preflight_source_close_observation(
+    virtual execution::Status on_source_close_preflight(
         const Trade* rows, size_t count, std::optional<int>& loss_day) const;
-    void observe_source_close_rows(
+    virtual void on_source_close_observed(
         const Trade* rows, size_t count, std::optional<int> loss_day);
     // Quote one resolved execution's current charges. Entry costs on the
     // closed rows are historical allocations. Returns close shares in FIFO
@@ -4390,8 +2994,7 @@ private:
     // current bar would record (pnl, pnl_pct, commission, excursions, bar
     // indexes). emit_close_trade builds and commits; the range-end close
     // builds only.
-    Trade build_close_trade(const PyramidEntry& pe, double close_qty,
-                            double fill_price, bool was_long) const;
+
     Trade build_close_trade_with_costs(const PyramidEntry& pe, double close_qty,
         double fill_price, bool was_long, double entry_commission,
         double exit_commission,
@@ -4415,81 +3018,42 @@ private:
     // are set before run() and must survive it. Called at the top of every
     // run() loop entrypoint. See tests/test_handle_reuse_reset.cpp.
     void reset_run_state();
+    virtual void reset_source_pending_book();
+    virtual void reset_source_order_and_close_state();
+    virtual void reset_source_risk_and_cap();
+    virtual void reset_source_margin_and_coof();
+    virtual void reset_source_bar_projections();
+    virtual void reset_source_language_series();
     double account_currency_fx_at(int64_t timestamp_ms) const;
     double active_account_currency_fx() const;
     void settle_position_after_partial_exit(
         PositionReductionCause cause);
-    void restore_source_partial_exit_slots(int pre_count, PositionReductionCause cause);
-    execution::Result settle_source_opening(
-        PositionSide requested, double fill_price, double qty,
-        const std::string& id, const std::string& comment, uint64_t incarnation);
-    void enter_market_from_flat(const std::string& id, bool is_long,
-                                double fill_price, double explicit_qty,
-                                int explicit_qty_type,
-                                PositionSide created_position_side,
-                                bool is_priced_entry, double tv_carry_qty,
-                                int created_bar,
-                                bool explicit_qty_prequantized,
-                                uint64_t entry_incarnation);
-    void add_to_pyramid_market(const std::string& id, bool is_long,
-                               double fill_price, double explicit_qty,
-                               int explicit_qty_type,
-                               PositionSide created_position_side,
-                               bool is_priced_entry,
-                               uint64_t entry_incarnation);
-    void add_to_pyramid_market_with_qty_provenance(
-        const std::string& id, bool is_long, double fill_price, double explicit_qty,
-        int explicit_qty_type, PositionSide created_position_side,
-        bool is_priced_entry, bool explicit_qty_prequantized,
-        uint64_t entry_incarnation);
+
+
+
+
+
     // `fill_price` is already resolved. Source sizing, direction and dust
     // selection stay here; purge_pending_exits is translated into exact
     // pending removals for the settlement coordinator. False does not
     // touch pending_orders_ storage.
-    void close_opposite_then_enter(const std::string& id, bool is_long,
-                                   double fill_price, double explicit_qty,
-                                   int explicit_qty_type,
-                                   bool purge_pending_exits,
-                                   bool explicit_qty_prequantized,
-                                   uint64_t entry_incarnation);
-    void apply_resolved_close_opposite_then_enter(
-        const std::string& id, bool is_long, double fill_price,
-        double explicit_qty, int explicit_qty_type,
-        bool explicit_qty_prequantized, uint64_t entry_incarnation,
-        execution::LifecycleEffects lifecycle);
-    void flip_market_position_to(const std::string& id, bool is_long,
-                                 double fill_price, double explicit_qty,
-                                 int explicit_qty_type,
-                                 bool explicit_qty_prequantized,
-                                 bool close_only,
-                                 uint64_t entry_incarnation);
-    void sequential_same_tick_reversal_fill(const std::string& id, bool is_long,
-                                            double fill_price, double explicit_qty,
-                                            int explicit_qty_type,
-                                            uint64_t entry_incarnation);
-    void sequential_same_tick_reversal_fill_with_qty_provenance(
-        const std::string& id, bool is_long, double fill_price, double explicit_qty,
-        int explicit_qty_type, bool explicit_qty_prequantized,
-        uint64_t entry_incarnation);
-    double calc_default_qty_from_equity(double fill_price, double equity) const;
-    double calc_qty_for_type_from_equity(
-        double fill_price, double qty_value, int qty_type, double equity) const;
-    double source_reversal_qty(double fill_price, double explicit_qty,
-                               int explicit_qty_type, bool prequantized) const;
-    void bind_exit_activation(PendingOrder& order);
-    void bind_retained_exit_activations();
-    void unbind_exit_activations();
-    void open_fresh_position(PositionSide requested, double fill_price,
-                             double qty, const std::string& id,
-                             uint64_t entry_incarnation);
-    void consume_tv_carry_from_siblings(const std::string& id,
-                                        PositionSide created_position_side,
-                                        int created_bar);
+
+
+
+
+
+    virtual void reset_source_exit_activations_before_flatten();
+    virtual void reset_source_position_ledgers_after_book_clear();
+    virtual void on_source_append_quoted_lot_after_book(const PyramidEntry& lot);
+    virtual void reset_source_open_position_ledgers_before_book(
+        const PyramidEntry& lot);
+    virtual void on_source_open_position_booked(const PyramidEntry& lot);
+
+
 
     // run() helpers (defined in engine_run.cpp).
-    int  count_expected_script_bars(const Bar* input_bars, int n_input,
-                                    bool needs_aggregation) const;
-    void init_security_eval_states_for_run(const std::string& effective_input_tf);
+
+
     // Native HTF feed routing (engine_aux_security.cpp): per-state label maps
     // built after the evaluators' aggregators exist for this run, and the
     // substitution a completed bucket applies. Returns whether `bar` was
@@ -4498,25 +3062,14 @@ private:
     void prepare_chart_day_partition(const Bar* input_bars, int n_input);
     bool substitute_native_security_bar(SecurityEvalState& state, Bar& bar,
                                         bool count_miss = true);
-    void prepare_historical_security_lookahead_projections(
-        const Bar* input_bars, int n_input,
-        const std::string& effective_input_tf);
-    void clear_historical_security_lookahead_projections();
+
+
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
-    bool aux_security_feed_enabled() const { return !aux_security_bars_.empty(); }
-    void prepare_aux_security_chart_ranges(const Bar* chart_bars, int n_chart,
-                                           const std::string& chart_tf);
-    void feed_aux_security_for_chart_bar(int chart_index);
-    // The calling chart bar's nominal close on the split-feed path (the
-    // value feed_aux_security_for_chart_bar installs as
-    // security_calling_close_ms_ while the slice is fed).
-    int64_t aux_security_calling_close_ms() const;
-    // After dispatch_bar: feed the auxiliary bars a first-bucket-latched
-    // evaluator (calling_open_latches_first) held back from this chart
-    // bar's slice, in feed order, with the same next-input / calling-close
-    // context the slice loop would have given them.
-    void feed_deferred_aux_security_for_chart_bar(int chart_index);
-    void clear_aux_security_chart_ranges();
+    virtual bool source_aux_security_feed_enabled() const;
+    virtual void source_aux_security_input_view(const Bar*& bars, int& n) const;
+    bool aux_security_feed_enabled() const {
+        return source_aux_security_feed_enabled();
+    }
 
     // Neutral capability bridge for independent factorial patches. The
     // two-argument feed exists in the base engine. A completion-aware factor
@@ -4554,33 +3107,10 @@ private:
     // Shared by run(), run_simple_bar_loop, and the no-magnifier aggregation
     // path. The magnifier tick loop does NOT use this — it gates the sequence
     // on is_last_tick_ and forces is_first_tick_ before on_bar.
-    OrderBirth capture_order_birth() const;
-    void invoke_chart_on_bar(const Bar& bar);
-    void dispatch_bar();
-    void dispatch_bar_calc_on_order_fills();
-    void snapshot_coof_script_state();
-    void restore_coof_script_state();
-    void commit_coof_script_state();
-    uint64_t execute_coof_script_body(const Bar& script_bar,
-                                      double broker_cursor_price,
-                                      bool cursor_is_bar_point,
-                                      const OrderBirth& evaluation_origin,
-                                      uint64_t direct_fill_event_budget,
-                                      bool opening_money_prefix = false);
-    uint64_t run_coof_recalc_chain(const Bar& script_bar,
-                                   double broker_cursor_price,
-                                   bool cursor_is_bar_point,
-                                   BirthCursor cursor,
-                                   uint64_t& evaluation_ordinal,
-                                   uint64_t triggering_events,
-                                   uint64_t max_events,
-                                   uint64_t events_already,
-                                   bool grouped_stop_recalc = false,
-                                   uint64_t market_entry_incarnation = 0,
-                                   bool opening_money_prefix = false);
-    void run_simple_bar_loop(const Bar* input_bars, int n_input);
-    void run_aggregation_bar_loop(const Bar* input_bars, int n_input,
-                                  bool bar_magnifier, int expected_script_bars);
+
+
+
+
     // Live-runtime tail (spec §3.1): once script_tf_seconds_ is known for
     // this run, freeze pine_last_bar_index()/last_bar_time_ at the horizon
     // bar instead of the fed array's actual last index. No-op unless
@@ -4612,18 +3142,14 @@ private:
     // silently wiped by a second, later clear.
     // The caller has already validated the complete chart bar array; do not
     // rescan here or clear an abort that arrived during preflight/setup.
-    void run_tf_impl(const Bar* input_bars, int n_input,
-                     const std::string& input_tf,
-                     const std::string& script_tf,
-                     bool bar_magnifier,
-                     int magnifier_samples,
-                     MagnifierDistribution magnifier_dist);
+
     void stream_observe_entry(const PyramidEntry& pe);
+    virtual void source_stream_entry_comment(const PyramidEntry&, std::string&) const;
     void stream_observe_exit(size_t trade_index);
     void stream_refresh_action_metadata(size_t first_action, size_t first_trade);
     bool stream_finalize_until(int64_t timestamp_ms);
     void stream_feed_input_bar(const Bar& bar, bool had_tick);
-    void stream_dispatch_script_bar(const Bar& bar, bool had_tick);
+    virtual void dispatch_source_stream_script_bar(const Bar& bar, bool had_tick);
 
     // fill_report helpers (defined in engine_report.cpp).
     void fill_trades_section(ReportC* out) const;
@@ -4632,30 +3158,31 @@ private:
     void fill_trace_section(ReportC* out) const;
 
     void guard_native_mutation(const char* operation);
-    void legacy_run_simple(const Bar* bars, int n);
-    void legacy_run_tf(const Bar* input_bars, int n_input,
+    [[noreturn]] void throw_native_only_route(const char* seam);
+    virtual void legacy_run_simple(const Bar* bars, int n);
+    virtual void legacy_run_tf(const Bar* input_bars, int n_input,
                        const std::string& input_tf,
                        const std::string& script_tf,
                        bool bar_magnifier,
                        int magnifier_samples,
                        MagnifierDistribution magnifier_dist);
-    void legacy_run_rich(const Bar* input_bars, int n_input,
+    virtual void legacy_run_rich(const Bar* input_bars, int n_input,
                          const std::string& input_tf,
                          const std::string& script_tf,
                          const std::unordered_map<std::string, std::string>& inputs,
                          const SymInfo& syminfo,
-                         const StrategyOverrides* overrides,
+                         const source::StrategyOverrides* overrides,
                          bool bar_magnifier,
                          int magnifier_samples,
                          MagnifierDistribution magnifier_dist);
-    bool legacy_stream_begin(const Bar* warmup_bars, int n_warmup,
+    virtual bool legacy_stream_begin(const Bar* warmup_bars, int n_warmup,
                              const std::string& input_tf,
                              const std::string& script_tf);
-    bool legacy_stream_push_bar(const Bar& bar);
-    bool legacy_stream_push_tick(const TradeTick& tick);
-    bool legacy_stream_push_ticks(const TradeTick* ticks, int n);
-    bool legacy_stream_advance_time(int64_t timestamp_ms);
-    bool legacy_stream_end(bool finalize_partial_input_bar);
+    virtual bool legacy_stream_push_bar(const Bar& bar);
+    virtual bool legacy_stream_push_tick(const TradeTick& tick);
+    virtual bool legacy_stream_push_ticks(const TradeTick* ticks, int n);
+    virtual bool legacy_stream_advance_time(int64_t timestamp_ms);
+    virtual bool legacy_stream_end(bool finalize_partial_input_bar);
 
     struct ExecutionConsumerSlot {
         bool native = false;
@@ -4685,22 +3212,7 @@ private:
     ExecutionConsumerSlot execution_consumer_slot_;
 
 public:
-    explicit BacktestEngine(compat::pine::CapAttachment cap_attachment =
-                                compat::pine::CapAttachment::None);
-    // Explicit frontend selection, not a generic native risk switch. This
-    // preserves any prior declaration values and does not reset quota/state.
-    void enable_pine_intraday_cap() {
-        guard_native_mutation("enable_pine_intraday_cap");
-        max_intraday_filled_orders_.attach();
-    }
-    // Current execution-adapter scope: intraday cap + retained-parent priority.
-    // Idempotent configuration attachment, not a reset or universal Pine mode.
-    // Generated constructors call this before any host metadata is forwarded.
-    void attach_pine_execution_adapter() {
-        guard_native_mutation("attach_pine_execution_adapter");
-        max_intraday_filled_orders_.attach();
-        pine_order_priority_.attach();
-    }
+    explicit BacktestEngine();
     virtual ~BacktestEngine();
     int execution_contract() const;
     bool native_bound() const;
@@ -4729,7 +3241,7 @@ public:
     // Copies a finer request.security-only feed for subsequent historical
     // runs. n == 0 clears it. Validation that depends on native chart bars is
     // intentionally deferred to run(), where failures reach last_error().
-    bool set_aux_security_feed(const Bar* bars, int n,
+    virtual bool set_aux_security_feed(const Bar* bars, int n,
                                const std::string& input_tf);
 #endif
 
@@ -4796,7 +3308,7 @@ public:
              const std::string& script_tf,
              const std::unordered_map<std::string, std::string>& inputs,
              const SymInfo& syminfo,
-             const StrategyOverrides* overrides = nullptr,
+             const source::StrategyOverrides* overrides = nullptr,
              bool bar_magnifier = false,
              int magnifier_samples = 4,
              MagnifierDistribution magnifier_dist = MagnifierDistribution::ENDPOINTS);
@@ -4900,8 +3412,8 @@ public:
     // predicates. They default to UTC / 24x7 (crypto); a data feed pushes
     // the real values via these setters before run().
     //
-    // max_intraday_filled_orders consumes a valid explicit session and this
-    // timezone through compat::pine::IntradayCap::risk_day(). Other risk-day rules keep
+    // The source-layer intraday cap consumes a valid explicit session and this
+    // timezone through its risk-day policy. Other risk-day rules keep
     // chart_timezone_, as do continuous/unconfigured order-counter clocks;
     // the existing crypto-on-shifted-chart contract therefore remains intact.
     void set_syminfo_timezone(const std::string& tz) {
@@ -4975,112 +3487,11 @@ public:
         margin_call_enabled_ = enabled;
     }
     bool margin_call_enabled() const { return margin_call_enabled_; }
-    void set_syminfo_metadata(const std::string& key, double value) {
-        guard_native_mutation("set_syminfo_metadata");
-        syminfo_metadata_[key] = value;
-        // Pine's public bar_index is chart-history relative. Validation feeds
-        // can start after TradingView's hidden first chart bar, while engine
-        // internals still need zero-based array indices for TA precalc and
-        // broker bookkeeping. This metadata key shifts only codegen-emitted
-        // Pine bar_index reads via pine_bar_index()/pine_last_bar_index().
-        if (key == "bar_index_offset") {
-            bar_index_offset_ = std::isfinite(value)
-                ? static_cast<int>(std::llround(value))
-                : 0;
-        }
-        // Opt-in KI-55 HTF warmup parity. The value is the TV deep-backtest
-        // range start in epoch-ms (exactly representable as a double for any
-        // realistic date — 2025 is ~1.7e12 << 2^53). A positive, finite value
-        // enables it; anything else (0 / NaN / negative) is the disabled
-        // default, so a run that never sets this key is byte-identical.
-        if (key == "security_range_start_na_warmup") {
-            if (std::isfinite(value) && value > 0.0) {
-                security_range_start_na_warmup_ = true;
-                security_range_start_ms_ =
-                    static_cast<int64_t>(std::llround(value));
-            } else {
-                security_range_start_na_warmup_ = false;
-                security_range_start_ms_ = 0;
-            }
-        }
-        // Opt-in KI-55 chart-timeframe EMA warmup parity. This is a boolean
-        // run configuration carried through the existing metadata channel:
-        // positive finite values enable it; 0 / NaN / negative disable it.
-        // Unlike security_range_start_na_warmup, it carries no timestamp and
-        // does not change request.security aggregation boundaries.
-        if (key == "chart_ema_na_warmup") {
-            chart_ema_na_warmup_ = std::isfinite(value) && value > 0.0;
-        }
-        // Historical batch-only lookahead projection. This is intentionally a
-        // default-off verifier candidate: regular execution and every stream
-        // path keep progressive HTF aggregation unless a caller explicitly
-        // supplies a positive finite metadata value.
-        if (key == "historical_security_lookahead_projection") {
-            historical_security_lookahead_projection_ =
-                std::isfinite(value) && value > 0.0;
-        }
-        // Default-off verifier candidate for a finite-price margin call whose
-        // lot-quantized restore quantity is zero.  Positive finite values close
-        // the residual; absent/zero/non-finite values preserve the established
-        // one-step progress fallback.
-        if (key == "margin_zero_cover_full_liquidation") {
-            margin_zero_cover_full_liquidation_ =
-                std::isfinite(value) && value > 0.0;
-        }
-        pine_order_priority_.metadata(key, value);
-        // Forward through the real base setter used by the C ABI. A selected
-        // frontend owns recognition and numeric validation; no derived shadow
-        // setter or cap-key interpretation belongs in this transport.
-        max_intraday_filled_orders_.metadata(key, value);
-        // "qty_step" is the per-instrument lot increment used by the forced-
-        // liquidation quantizer. Route it onto the dedicated member so the
-        // codegen run(const Bar*, int) path (which never overwrites it) keeps
-        // the value the data feed injected. A non-positive value disables it.
-        if (key == "qty_step") {
-            qty_step_ = (std::isfinite(value) && value > 0.0) ? value : 0.0;
-            syminfo_.qty_step = qty_step_;
-        }
-        // Account-currency FX rate (account-currency units per quote-currency
-        // unit). Scales the broker affordability gate's required_margin when
-        // the script's currency differs from the symbol quote currency. A
-        // non-positive / non-finite value resets to the 1.0 (no-op) default.
-        if (key == "account_currency_fx") {
-            account_currency_fx_ =
-                (std::isfinite(value) && value > 0.0) ? value : 1.0;
-        }
-        // Per-instrument margin/leverage DEFAULT (percent of position value
-        // required as collateral; 100 = fully collateralized / no leverage,
-        // matching Pine's own margin_long/margin_short default). This is a
-        // data-feed-level fallback for a script whose header OMITS
-        // margin_long/margin_short — without it, a leveraged futures/
-        // perpetual instrument has no way to reflect its real (non-100%)
-        // exchange margin requirement (see the tv-margin-call-gap project
-        // history). It must NOT override an EXPLICIT strategy(...,
-        // margin_long=X) header arg. Unlike qty_step/account_currency_fx,
-        // this can't rely on "whichever assignment runs last wins": the
-        // codegen-generated constructor assigns margin_long_/margin_short_
-        // from an explicit header arg in strategy_create(), which the C ABI
-        // / run_strategy.py call BEFORE strategy_set_syminfo_metadata — so a
-        // later injected default would silently clobber an explicit script
-        // value. Guard on "still at the class's own 100.0 default", i.e.
-        // apply only when the header did NOT already set it (the one
-        // imprecise edge case — a header that explicitly writes
-        // margin_long=100, matching the default value — is indistinguishable
-        // from "unset" here, but 100 is also the semantic no-override value,
-        // so this is a no-op in that case either way).
-        if (key == "margin_long" && margin_long_ == 100.0) {
-            margin_long_ = (std::isfinite(value) && value > 0.0) ? value : 100.0;
-        }
-        if (key == "margin_short" && margin_short_ == 100.0) {
-            margin_short_ = (std::isfinite(value) && value > 0.0) ? value : 100.0;
-        }
-    }
+    virtual void set_syminfo_metadata(const std::string& key, double value);
 
     // Returns the script's active timeframe string (e.g. "15" for 15-minute,
     // "D" for daily). Backs timeframe.main_period in generated Pine v6 code.
     const std::string& main_period() const { return script_tf_; }
-    int pine_bar_index() const { return bar_index_ + bar_index_offset_; }
-    int pine_last_bar_index() const { return last_bar_index_ + bar_index_offset_; }
 
     // Live-runtime tail semantics (spec §3.1, ABI v4): the caller's fed array
     // ends with a still-forming bar rather than the chart's rightmost
@@ -5165,9 +3576,6 @@ public:
     // no-op (stays at its last standard-path value) under the COOF
     // scheduler, mirroring set_probe_suppress_tail_logic's
     // dispatch-path-scope caveat.
-    int last_bar_dual_entry_path() const {
-        return static_cast<int>(last_bar_dual_entry_decision_);
-    }
 
     // Live runtime G1 (spec §3.4): a deterministic, order-independent
     // FNV-1a 64 hash over every piece of broker state that decides the next
@@ -5188,14 +3596,6 @@ public:
     // each order out through the generated POD mirror
     // (pf_pending_order_v1_t, include/pineforge/pending_order_mirror.hpp),
     // never by pointer. `i` must be in [0, pending_order_count()).
-    int pending_order_count() const { return static_cast<int>(pending_orders_.size()); }
-    const MarketAdmissionJournal& market_admission_journal() const {
-        return market_admission_journal_;
-    }
-    std::vector<admission::Field> market_admission_fields() const;
-    const PendingOrder& pending_order_at(int i) const {
-        return pending_orders_[static_cast<size_t>(i)];
-    }
 
     // ABI v4 live-runtime surface (task 8, spec 3.6): engine-computed
     // derived values of a resting order and the position scalars the live
@@ -5270,15 +3670,14 @@ public:
     // close_only 0, partition -1) when the order is an EXIT, whose fill
     // quantity is decided against the live position at the fill, not by a
     // sizing partition; -1 on a bad index or a null out-pointer.
-    int probe_fill_qty(int index, double fill_price, double* qty,
-                       int* close_only, int* partition) const;
+
     // 1 when the order's entry-relative offsets (profit_ticks / loss_ticks /
     // trail_points) resolve NOW: entries, plain orders and exits with an
     // empty from_entry always; an exit bound to from_entry only once that
     // id has filled in the CURRENT position cycle (cycle_filled_entry_ids_,
     // the gate materialize_relative_exit_prices_for_live_position and the
     // eligibility pass share). 0 otherwise, -1 on a bad index.
-    int pending_order_level_resolved(int index) const;
+
     // The price levels the order would fire at, as the fill path resolves
     // them: a set stop_price / limit_price / trail_price verbatim (they are
     // already on the price grid); an unset leg from its tick offset against
@@ -5291,8 +3690,7 @@ public:
     // entry +/- ceil(trail_points - 5e-5) * mintick); trail_points wins
     // over trail_price when both are set). NaN for a leg that is unset or
     // unresolvable. Returns 0, or -1 on a bad index / null out-pointer.
-    int pending_order_effective_levels(int index, double* stop, double* limit,
-                                       double* trail_activation) const;
+
     // The live position's volume-weighted average entry price
     // (position_entry_price_; 0 when flat -- the engine keeps 0 there, the
     // C ABI reports NaN when flat), its cycle id (position_cycle_seq_; 0
@@ -5312,7 +3710,21 @@ public:
     // strategy.equity, which adds open profit on top of this (see the
     // sizing_equity formula and the equity-curve remark below, both
     // current_equity() + open_profit(...)).
-    double live_position_size() const { return signed_position_size(); }
+    virtual double live_position_size() const {
+        if (position_side_ == PositionSide::LONG) return position_qty_;
+        if (position_side_ == PositionSide::SHORT) return -position_qty_;
+        return 0.0;
+    }
+    virtual int observe_last_bar_dual_entry_path_v1() const;
+    virtual int observe_pending_count_v1() const;
+    virtual int observe_pending_copy_v1(int index, pf_pending_order_v1_t* out) const;
+    virtual int observe_probe_fill_qty(int index, double fill_price, double* qty,
+                                       int* close_only, int* partition) const;
+    virtual int observe_pending_level_resolved(int index) const;
+    virtual int observe_pending_effective_levels(int index, double* stop,
+                                                 double* limit,
+                                                 double* trail_activation) const;
+    virtual double observe_trail_best_price_v1() const;
     double live_current_equity() const { return current_equity(); }
     // ABI v4 live-runtime surface (task 9): total SCRIPT bars dispatched by
     // the most recent run() (mirrors pf_report_t::script_bars_processed,
@@ -5382,5 +3794,5 @@ public:
     void trace(const std::string& name, int value)   { trace(name, static_cast<double>(value)); }
 };
 
-} // inline namespace engine_script_run_v15
+} // inline namespace engine_script_run_v16
 } // namespace pineforge

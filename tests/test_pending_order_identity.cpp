@@ -1,6 +1,7 @@
 // Native literal lifecycle fixtures. No Pine, market files, reference trades,
 // or generated expected results. RAW quantity/fee policy is deliberately fixed.
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <vector>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 namespace {
 bool pine_fixture_attachment = false;
 const double missing = std::numeric_limits<double>::quiet_NaN();
@@ -32,20 +34,28 @@ struct Cancel {
 #ifdef PF_IDENTITY_BASELINE
     using Type = void (BacktestEngine::*)(const std::string&, const std::string&);
 #else
-    using Type = void (BacktestEngine::*)(std::string, std::string);
+    using Type = void (pineforge::source::PineStrategyHost::*)(std::string, std::string);
 #endif
     friend Type access(Cancel);
 };
+#ifdef PF_IDENTITY_BASELINE
 template struct PrivateMember<Cancel, &BacktestEngine::cancel_oca_group>;
+#else
+template struct PrivateMember<Cancel, &pineforge::source::PineStrategyHost::cancel_oca_group>;
+#endif
 struct Reduce {
 #ifdef PF_IDENTITY_BASELINE
     using Type = void (BacktestEngine::*)(const std::string&, const std::string&, double);
 #else
-    using Type = void (BacktestEngine::*)(std::string, std::string, double);
+    using Type = void (pineforge::source::PineStrategyHost::*)(std::string, std::string, double);
 #endif
     friend Type access(Reduce);
 };
+#ifdef PF_IDENTITY_BASELINE
 template struct PrivateMember<Reduce, &BacktestEngine::reduce_oca_group>;
+#else
+template struct PrivateMember<Reduce, &pineforge::source::PineStrategyHost::reduce_oca_group>;
+#endif
 struct Refresh {
     using Type = void (BacktestEngine::*)(size_t, size_t);
     friend Type access(Refresh);
@@ -53,13 +63,13 @@ struct Refresh {
 template struct PrivateMember<Refresh, &BacktestEngine::stream_refresh_action_metadata>;
 #ifndef PF_IDENTITY_BASELINE
 struct Retire {
-    using Type = void (BacktestEngine::*)(std::vector<uint64_t>&, int, uint64_t, bool);
+    using Type = void (pineforge::source::PineStrategyHost::*)(std::vector<uint64_t>&, int, uint64_t, bool);
     friend Type access(Retire);
 };
-template struct PrivateMember<Retire, &BacktestEngine::compact_filled_pending_orders>;
+template struct PrivateMember<Retire, &pineforge::source::PineStrategyHost::compact_filled_pending_orders>;
 #endif
 
-class Book final : public BacktestEngine {
+class Book final : public pineforge::source::PineStrategyHost {
 public:
     using BacktestEngine::open_trade_entry_id;
     Book() {
@@ -74,7 +84,7 @@ public:
         current_bar_ = point(100, 0);
         bar_index_ = 0;
     }
-    void on_bar(const Bar&) override {}
+    void on_source_bar(const Bar&) override {}
     void seed(bool long_side, double qty = 2) {
         strategy_order("seed", long_side, qty);
         current_bar_ = point(100, 1);
@@ -186,7 +196,7 @@ public:
     }
     void cancel(const std::string& id) { strategy_cancel(id); }
     void set_capacity(int value) { pyramiding_ = value; }
-    void set_cap(int value) { max_intraday_filled_orders_ = value; }
+    void set_cap(int value) { adapter_.cap = value; }
     void observe() { stream_observe_actions_ = true; }
     void fee(CommissionType kind, double value) { commission_type_ = kind; commission_value_ = value; }
 #ifndef PF_IDENTITY_BASELINE
@@ -409,7 +419,7 @@ void fee_control(bool coof, CommissionType fee, double expected) {
     REQUIRE(b.closed()[0].exit_id == "A");
 }
 
-class CallbackBook final : public BacktestEngine {
+class CallbackBook final : public pineforge::source::PineStrategyHost {
 public:
     int observed_close_callbacks = 0;
     uint64_t replaced = 0, fresh = 0;
@@ -424,7 +434,7 @@ public:
         margin_long_ = margin_short_ = 0;
         calc_on_order_fills_ = true;
     }
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         if (coof_fill_recalc_active_) {
             if (trades_.size() == 1 && observed_close_callbacks == 0) {
                 REQUIRE(position_side_ == PositionSide::FLAT);

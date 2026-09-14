@@ -1,8 +1,10 @@
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_pending_intent.hpp>
 #include <pineforge/compat/pine/exit_lifecycle.hpp>
 #include <cstdio>
 #include <functional>
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 using namespace pineforge::exit_legs;
 namespace {
 int checks=0,failed=0;

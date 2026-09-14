@@ -1,3 +1,4 @@
+#include <pineforge/source/pine_strategy_host.hpp>
 #include "exit_lifecycle_reflection_access.hpp"
 #include <pineforge/pending_order_mirror.hpp>
 #include <cstddef>
@@ -10,10 +11,11 @@ namespace prior {
 #include "fixtures/exit_lifecycle/f60_pending_order_mirror.hpp"
 }
 namespace pineforge{
-void fill_pending_order_mirror(const PendingOrder&,pf_pending_order_v1_t*);
+void fill_pending_order_mirror(const source::PendingOrder&,pf_pending_order_v1_t*);
 const pf_field_desc_t* pending_order_layout(int*);
 }
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 using namespace reflection_fixture;
 #define F60_FIELD(n) static_assert(offsetof(pf_pending_order_v1_t,n)==offsetof(prior::pf_pending_order_v1_t,n),"f60 field offset"); \
  static_assert(std::is_same<decltype(pf_pending_order_v1_t::n),decltype(prior::pf_pending_order_v1_t::n)>::value,"f60 field type");
@@ -23,8 +25,8 @@ static_assert(offsetof(pf_pending_order_v1_t,legs_target_incarnation)==sizeof(pr
 namespace {
 int checks=0,failed=0,mutations=0;
 #define CHECK(x) do{++checks;if(!(x)){++failed;std::fprintf(stderr,"FAIL %d: %s\n",__LINE__,#x);}}while(0)
-class Probe:public BacktestEngine{
-public:void on_bar(const Bar&)override{}
+class Probe:public pineforge::source::PineStrategyHost{
+public:void on_source_bar(const Bar&)override{}
     void set(Lifecycle x){PendingOrder p{};p.type=OrderType::EXIT;p.incarnation=41;p.legs=std::move(x);pending_orders_={p};}
     pf_pending_order_v1_t mirror()const{pf_pending_order_v1_t m{};fill_pending_order_mirror(pending_orders_.front(),&m);return m;}
 };

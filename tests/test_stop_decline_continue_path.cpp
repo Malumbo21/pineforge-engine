@@ -35,11 +35,14 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/magnifier.hpp>
 
 #include "../src/engine_internal.hpp"
+#include "../src/source/pine_path_resolve_internal.hpp"
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -63,7 +66,7 @@ Bar bar(int64_t timestamp, double open, double high, double low,
     return {open, high, low, close, 1.0, timestamp};
 }
 
-class DualStopProbe : public BacktestEngine {
+class DualStopProbe : public pineforge::source::PineStrategyHost {
 public:
     DualStopProbe() {
         initial_capital_ = 10'000.0;
@@ -86,7 +89,7 @@ public:
     enum class MixedOrder { None, Market, Limit, Raw };
     MixedOrder mixed_order = MixedOrder::None;
 
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         if (bar_index_ != 0) return;
         const std::string oca = use_oca ? "PAIR" : "";
         const int oca_type = use_oca ? 1 : 0;

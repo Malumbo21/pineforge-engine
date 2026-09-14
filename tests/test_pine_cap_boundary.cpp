@@ -3,6 +3,7 @@
 // neither a Pine execution nor evidence of TradingView parity.
 #include <pineforge/pineforge.h>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -20,10 +21,10 @@ const char* keys[] = {"intraday_cap_skip_noop_market_fills",
                       "intraday_cap_count_pooc_full_close_fills"};
 const char* cap_comment = "Close Position (Max number of filled orders in one day)";
 
-class Probe : public BacktestEngine {
+class Probe : public pineforge::source::PineStrategyHost {
 public:
     Probe() { configure_fixture(); } // Exercise the real native default.
-    explicit Probe(CapAttachment attachment) : BacktestEngine(attachment) {
+    explicit Probe(CapAttachment attachment) : pineforge::source::PineStrategyHost(attachment) {
         configure_fixture();
     }
     void configure_fixture() {
@@ -35,24 +36,45 @@ public:
         commission_value_ = 0;
         slippage_ = 0;
     }
-    void on_bar(const Bar&) override {}
-    void limit(int value) { max_intraday_filled_orders_ = value; }
-    int limit() const { return max_intraday_filled_orders_.configuration().limit; }
+    void on_source_bar(const Bar&) override {}
+    void limit(int value) { adapter_.cap = value; }
+    int limit() const { return adapter_.cap.configuration().limit; }
     bool flag(int index) const {
-        const auto& c = max_intraday_filled_orders_.configuration();
+        const auto& c = adapter_.cap.configuration();
         return index == 0 ? c.skip_noop_market : index == 1 ? c.defer_pooc_close
                                                          : c.count_pooc_full_close;
     }
-    CapAttachment attachment() const { return max_intraday_filled_orders_.attachment(); }
-    int slots() const { return max_intraday_filled_orders_.budget().charged_slots(); }
-    bool latched() const { return max_intraday_filled_orders_.budget().latched(); }
+    CapAttachment attachment() const { return adapter_.cap.attachment(); }
+    int slots() const { return adapter_.cap.budget().charged_slots(); }
+    bool latched() const { return adapter_.cap.budget().latched(); }
     bool due() const { return position_close_obligation_.pending(); }
-    bool cause() const { return max_intraday_filled_orders_.due_cause().has_value(); }
-    uint64_t action() const { return max_intraday_filled_orders_.next_action(); }
+    bool cause() const { return adapter_.cap.due_cause().has_value(); }
+    uint64_t action() const { return adapter_.cap.next_action(); }
     uint64_t fills() const { return broker_fill_event_seq_; }
     double position() const { return signed_position_size(); }
     double metadata(const char* key) const { return get_syminfo_metadata(key); }
     void reset() { run(nullptr, 0); }
+};
+
+class GeneratedShapeMetadataOracle final : public pineforge::source::PineStrategyHost {
+public:
+    explicit GeneratedShapeMetadataOracle(double margin_long = 100.0,
+                                          double margin_short = 100.0) {
+        source::PineStrategyConfig config;
+        config.margin_long = margin_long;
+        config.margin_short = margin_short;
+        configure_pine_strategy(config);
+        // This is the generated-constructor ordering: attach both policy
+        // adapters before C metadata is transported through BacktestEngine*.
+        attach_pine_execution_adapter();
+    }
+
+    void on_source_bar(const Bar&) override {}
+    CapAttachment cap_attachment() const { return adapter_.cap.attachment(); }
+    bool priority_attached() const { return adapter_.priority.attached(); }
+    bool retained_parent_first() const { return adapter_.priority.retained_parent_first(); }
+    double margin_long() const { return margin_long_; }
+    double margin_short() const { return margin_short_; }
 };
 
 // This is the actual runtime export, whose handle dispatch is BacktestEngine*.
@@ -63,6 +85,37 @@ void metadata(Probe& engine, const char* key, double value) {
 void configure(Probe& engine, int mask) {
     for (int index = 0; index < 3; ++index)
         metadata(engine, keys[index], (mask & (1 << index)) ? 1.0 : 0.0);
+}
+
+void test_generated_shape_metadata_oracle() {
+    GeneratedShapeMetadataOracle defaults;
+    CHECK(defaults.cap_attachment() == CapAttachment::LegacySource);
+    CHECK(defaults.priority_attached());
+    CHECK(defaults.retained_parent_first());
+
+    // The real C export receives a BacktestEngine* and must dispatch to the
+    // source override, first carrying priority/cap metadata and then applying
+    // the default-100 margin fallback.
+    strategy_set_syminfo_metadata(static_cast<BacktestEngine*>(&defaults),
+                                  "flat_retained_child_fresh_parent_order", 0.0);
+    CHECK(!defaults.retained_parent_first());
+    strategy_set_syminfo_metadata(static_cast<BacktestEngine*>(&defaults),
+                                  "intraday_cap_skip_noop_market_fills", 1.0);
+    CHECK(defaults.cap_attachment() == CapAttachment::LegacySource);
+    strategy_set_syminfo_metadata(static_cast<BacktestEngine*>(&defaults),
+                                  "margin_long", 25.0);
+    strategy_set_syminfo_metadata(static_cast<BacktestEngine*>(&defaults),
+                                  "margin_short", 50.0);
+    CHECK(defaults.margin_long() == 25.0);
+    CHECK(defaults.margin_short() == 50.0);
+
+    GeneratedShapeMetadataOracle explicit_margins(75.0, 80.0);
+    strategy_set_syminfo_metadata(static_cast<BacktestEngine*>(&explicit_margins),
+                                  "margin_long", 25.0);
+    strategy_set_syminfo_metadata(static_cast<BacktestEngine*>(&explicit_margins),
+                                  "margin_short", 50.0);
+    CHECK(explicit_margins.margin_long() == 75.0);
+    CHECK(explicit_margins.margin_short() == 80.0);
 }
 
 void test_real_c_abi_metadata_and_native_attachment() {
@@ -113,7 +166,7 @@ public:
         : Probe(attachment), commands(commands), direction(direction) {}
     Commands commands;
     bool direction;
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         if (bar_index_ == 0) strategy_entry("FIRST", direction);
         if (bar_index_ == 1) {
             if (commands == Commands::Noop) strategy_entry("NOOP", direction);
@@ -172,9 +225,9 @@ void test_native_default_and_constructor_frontend_activation() {
             : Script(Commands::Noop, direction) {
             if (frontend) enable_pine_intraday_cap();
         }
-        void on_bar(const Bar& bar) override {
+        void on_source_bar(const Bar& bar) override {
             if (bar_index_ == 0) limit(2);
-            Script::on_bar(bar);
+            Script::on_source_bar(bar);
         }
     };
     for (bool direction : {false, true}) {
@@ -354,7 +407,7 @@ void test_due_next_open_precedes_resting_price_exit() {
             limit(due_close ? 1 : 0);
             set_syminfo_metadata("intraday_cap_defer_pooc_close", 1.0);
         }
-        void on_bar(const Bar&) override {
+        void on_source_bar(const Bar&) override {
             if (bar_index_ != 0) return;
             strategy_entry("FIRST", true);
             strategy_exit("RESTING", "FIRST", 140.0,
@@ -394,7 +447,7 @@ void test_statement_time_limit_changes_preserve_spent_day() {
         Changing() { pyramiding_ = 10; }
         int limits[7] = {};
         int slots_before[7] = {};
-        void on_bar(const Bar&) override {
+        void on_source_bar(const Bar&) override {
             if (bar_index_ == 0) limit(3);
             const bool execute_conditional_rule = bar_index_ == 2;
             if (execute_conditional_rule) { limit(4); limit(3); }
@@ -470,6 +523,7 @@ void test_copy_and_engine_reset_preserve_configuration_not_ownership() {
 } // namespace
 
 int main() {
+    test_generated_shape_metadata_oracle();
     test_real_c_abi_metadata_and_native_attachment();
     test_native_default_and_constructor_frontend_activation();
     test_all_eight_policy_combinations_on_engine_paths();

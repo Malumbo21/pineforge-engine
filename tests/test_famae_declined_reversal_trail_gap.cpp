@@ -65,8 +65,10 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -163,7 +165,7 @@ struct Signal {
     double trail_ticks;    // trail_points ticks (NaN: none); <0 = close * 0.02 / mintick
 };
 
-class Probe : public BacktestEngine {
+class Probe : public pineforge::source::PineStrategyHost {
 public:
     Probe() {
         initial_capital_ = 1000000.0;
@@ -181,7 +183,7 @@ public:
         margin_call_enabled_ = true;
     }
     std::vector<Signal> signals;
-    void on_bar(const Bar& bar) override {
+    void on_source_bar(const Bar& bar) override {
         for (const Signal& s : signals) {
             if (s.bar != bar_index_) continue;
             const std::string id = s.is_long ? "Long" : "Short";

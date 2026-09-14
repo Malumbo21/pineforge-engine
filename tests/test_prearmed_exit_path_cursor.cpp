@@ -18,10 +18,12 @@
 #include <pineforge/pineforge.h>
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 #include "../src/engine_internal.hpp"
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -44,7 +46,7 @@ static constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
 enum class Cell { LongPre, LongPost, ShortPre, ShortPost };
 
-class RestingBracketProbe final : public BacktestEngine {
+class RestingBracketProbe final : public pineforge::source::PineStrategyHost {
 public:
     explicit RestingBracketProbe(Cell cell) : cell_(cell) {
         initial_capital_ = 1'000'000.0;
@@ -57,7 +59,7 @@ public:
         calc_on_order_fills_ = false;
     }
 
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         if (bar_index_ != 0) return;
         const bool is_long = cell_ == Cell::LongPre || cell_ == Cell::LongPost;
         const double entry = is_long ? 110.0 : 90.0;
@@ -91,7 +93,7 @@ enum class BookVariant {
     MultipleChildren,
 };
 
-class FreshParentProbe final : public BacktestEngine {
+class FreshParentProbe final : public pineforge::source::PineStrategyHost {
 public:
     FreshParentProbe(Cell cell, int parent_first_factor,
                      BookVariant variant = BookVariant::ExactPair,
@@ -114,7 +116,7 @@ public:
         }
     }
 
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         const bool is_long =
             cell_ == Cell::LongPre || cell_ == Cell::LongPost;
         const double child_stop = is_long ? 90.0 : 110.0;
@@ -261,10 +263,10 @@ public:
         }
     }
 
-    bool priority_attached() const { return pine_order_priority_.attached(); }
-    bool priority_enabled() const { return pine_order_priority_.retained_parent_first(); }
+    bool priority_attached() const { return adapter_.priority.attached(); }
+    bool priority_enabled() const { return adapter_.priority.retained_parent_first(); }
     bool cap_attached() const {
-        return max_intraday_filled_orders_.attachment() != compat::pine::CapAttachment::None;
+        return adapter_.cap.attachment() != compat::pine::CapAttachment::None;
     }
     uint64_t fills() const { return broker_fill_event_seq_; }
     double position() const { return signed_position_size(); }
@@ -286,7 +288,7 @@ private:
     BookVariant variant_;
 };
 
-class CancelTokenScopeProbe final : public BacktestEngine {
+class CancelTokenScopeProbe final : public pineforge::source::PineStrategyHost {
 public:
     CancelTokenScopeProbe() {
         process_orders_on_close_ = true;
@@ -294,7 +296,7 @@ public:
         default_qty_value_ = 1.0;
     }
 
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         if (bar_index_ == 0) {
             strategy_entry("E", true, kNaN, 130.0, kNaN,
                            "cancelled parent");

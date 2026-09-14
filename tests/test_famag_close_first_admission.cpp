@@ -19,8 +19,12 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_policy_support.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 using namespace pineforge;
+using pineforge::source::tv_money_round;
+using pineforge::source::PendingOrder;
 
 static int passed = 0;
 static int failed = 0;
@@ -37,7 +41,7 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
 enum class Ordering { CloseFirst, EntryFirst };
 
-class CloseFirstProbe : public BacktestEngine {
+class CloseFirstProbe : public pineforge::source::PineStrategyHost {
 public:
     CloseFirstProbe(double capital, Ordering ordering = Ordering::CloseFirst,
                     bool seed_long = false)
@@ -64,7 +68,7 @@ public:
     double signal_price = kNaN;
     int margin_rows = 0;
 
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         if (bar_index_ == 0) {
             strategy_entry("Seed", seed_long_, kNaN, kNaN, 870000.0);
         } else if (bar_index_ == 1) {

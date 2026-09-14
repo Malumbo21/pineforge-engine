@@ -1,6 +1,7 @@
 // Native order-action integration seams. This test does not call Engine::run,
 // load a feed, compile Pine, or compare against a reference engine.
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <cstdio>
 #include <cmath>
 #include <limits>
@@ -8,6 +9,7 @@
 #include <utility>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 
 namespace {
 int checks = 0;
@@ -20,10 +22,10 @@ struct PartialExitAccess { friend auto access(PartialExitAccess); };
 struct SameSideAccess { friend auto access(SameSideAccess); };
 struct SameBarTransactionAccess { friend auto access(SameBarTransactionAccess); };
 struct MarketFillAccess { friend auto access(MarketFillAccess); };
-template struct Access<PartialExitAccess, &BacktestEngine::execute_partial_exit_qty>;
+template struct Access<PartialExitAccess, &pineforge::source::PineStrategyHost::execute_partial_exit_qty>;
 template struct Access<SameSideAccess, &BacktestEngine::append_same_side_fill>;
-template struct Access<SameBarTransactionAccess, &BacktestEngine::apply_same_bar_market_tx_reversal>;
-template struct Access<MarketFillAccess, &BacktestEngine::apply_market_order_fill>;
+template struct Access<SameBarTransactionAccess, &pineforge::source::PineStrategyHost::apply_same_bar_market_tx_reversal>;
+template struct Access<MarketFillAccess, &pineforge::source::PineStrategyHost::apply_market_order_fill>;
 
 template<class T> struct MemberArguments;
 template<class C, class R, class A, class B, class D>
@@ -31,7 +33,7 @@ struct MemberArguments<R (C::*)(A, B, D)> { using third = D; };
 using ReductionCause = typename MemberArguments<
     decltype(access(PartialExitAccess{}))>::third;
 
-class Book final : public BacktestEngine {
+class Book final : public pineforge::source::PineStrategyHost {
 public:
     Book() {
         initial_capital_ = 10000.0;
@@ -43,7 +45,7 @@ public:
         bar_index_ = 1;
     }
 
-    void on_bar(const Bar&) override {}
+    void on_source_bar(const Bar&) override {}
 
     void seed_two_lots() {
         position_side_ = PositionSide::LONG;

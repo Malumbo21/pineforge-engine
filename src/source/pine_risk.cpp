@@ -10,10 +10,10 @@
  *   update_per_trade_extremes - per-pyramid-entry MFE/MAE tracking from H/L/C
  *
  * All functions are BacktestEngine instance methods; they access the
- * engine's private state declared in <pineforge/engine.hpp>.
+ * engine's private state declared in <pineforge/source/pine_strategy_host.hpp>.
  */
 
-#include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -21,10 +21,11 @@
 #include <limits>
 #include <stdexcept>
 
-#include "engine_internal.hpp"
-#include "timezone.hpp"
+#include "../engine_internal.hpp"
+#include "../timezone.hpp"
 
 namespace pineforge {
+using namespace source;
 
 // See declaration in include/pineforge/engine.hpp. Used only by the
 // intraday-day rollover gates below and the analogous gates in
@@ -33,7 +34,7 @@ namespace pineforge {
 // ``ScopedTimezone`` + ``localtime_r`` so IANA names like "Asia/Taipei"
 // resolve correctly (POSIX-numeric offsets inside the same string syntax
 // would silently disagree with the rest of the engine's TZ handling).
-BacktestEngine::BarTime BacktestEngine::_decompose_bar_time_chart_tz() const {
+source::PineStrategyHost::BarTime source::PineStrategyHost::_decompose_bar_time_chart_tz() const {
     if (chart_timezone_.empty() || chart_timezone_ == "UTC" ||
         chart_timezone_ == "Etc/UTC") {
         return _decompose_bar_time();
@@ -56,7 +57,7 @@ BacktestEngine::BarTime BacktestEngine::_decompose_bar_time_chart_tz() const {
     return bt;
 }
 
-execution::Status BacktestEngine::preflight_source_close_observation(
+execution::Status source::PineStrategyHost::on_source_close_preflight(
         const Trade* rows, size_t count, std::optional<int>& loss_day) const {
     loss_day.reset();
     // Complete this pass before walking day counters: a later row can overflow
@@ -88,7 +89,7 @@ execution::Status BacktestEngine::preflight_source_close_observation(
     return execution::Status::Applied;
 }
 
-void BacktestEngine::observe_source_close_rows(
+void source::PineStrategyHost::on_source_close_observed(
         const Trade* rows, size_t count, std::optional<int> loss_day) {
     // The source coordinator preflighted these exact rows before committing
     // them. Only its newly committed slice is observed, using the day already
@@ -107,7 +108,7 @@ void BacktestEngine::observe_source_close_rows(
     }
 }
 
-bool BacktestEngine::check_risk_allow_entry(bool is_long) const {
+bool source::PineStrategyHost::check_risk_allow_entry(bool is_long) const {
     if (risk_halted_) return false;
     if (risk_direction_ == RiskDirection::LONG_ONLY && !is_long) return false;
     if (risk_direction_ == RiskDirection::SHORT_ONLY && is_long) return false;
@@ -115,7 +116,7 @@ bool BacktestEngine::check_risk_allow_entry(bool is_long) const {
     return true;
 }
 
-void BacktestEngine::update_risk_state() {
+void source::PineStrategyHost::update_risk_state() {
     if (risk_halted_) return;
 
     // Check max_drawdown
@@ -164,12 +165,12 @@ void BacktestEngine::update_risk_state() {
 // JOAT (officialjackofalltrades aureate BTC@1D, 1.5%): the 02-06 fire drops
 // the recalc-born short @60000 and the close-calc short (TV 7 is 02-08).
 
-int BacktestEngine::intraday_loss_day_key() const {
+int source::PineStrategyHost::intraday_loss_day_key() const {
     BarTime bt = _decompose_bar_time_chart_tz();
     return bt.dayofmonth * 100 + bt.month;
 }
 
-void BacktestEngine::intraday_loss_begin_bar(const Bar& bar) {
+void source::PineStrategyHost::intraday_loss_begin_bar(const Bar& bar) {
     if (risk_max_intraday_loss_ <= 0.0) return;
     const int cur_day = intraday_loss_day_key();
     if (cur_day == intraday_loss_day_) return;
@@ -179,14 +180,14 @@ void BacktestEngine::intraday_loss_begin_bar(const Bar& bar) {
     intraday_loss_day_start_equity_ = current_equity() + open_profit(bar.open);
 }
 
-bool BacktestEngine::intraday_loss_orders_blocked() const {
+bool source::PineStrategyHost::intraday_loss_orders_blocked() const {
     if (risk_max_intraday_loss_ <= 0.0 || intraday_loss_block_day_ < 0) {
         return false;
     }
     return intraday_loss_day_key() == intraday_loss_block_day_;
 }
 
-bool BacktestEngine::evaluate_max_intraday_loss(double mark_price,
+bool source::PineStrategyHost::evaluate_max_intraday_loss(double mark_price,
                                                 double excluded_realized) {
     if (risk_max_intraday_loss_ <= 0.0 || intraday_loss_evaluating_) {
         return false;
@@ -225,7 +226,7 @@ bool BacktestEngine::evaluate_max_intraday_loss(double mark_price,
 
 // Outside a fill loop the cancel is immediate; inside one the loop removes
 // the orders it has not applied and calls this at its safe point.
-void BacktestEngine::finish_intraday_loss_cancel() {
+void source::PineStrategyHost::finish_intraday_loss_cancel() {
     if (!intraday_loss_cancel_pending_) return;
     intraday_loss_cancel_pending_ = false;
     strategy_cancel_all();
@@ -234,7 +235,7 @@ void BacktestEngine::finish_intraday_loss_cancel() {
 // The bar's assumed OHLC path, tick by tick, for a broker pass that applied
 // its fills in one sweep (the non-calc_on_order_fills dispatch): the mark
 // is the path point, the position the one the sweep left.
-void BacktestEngine::evaluate_max_intraday_loss_over_path(const Bar& bar) {
+void source::PineStrategyHost::evaluate_max_intraday_loss_over_path(const Bar& bar) {
     if (risk_max_intraday_loss_ <= 0.0) return;
     double path[4];
     internal::fill_bar_path_points(bar, path);
@@ -252,7 +253,7 @@ void BacktestEngine::evaluate_max_intraday_loss_over_path(const Bar& bar) {
 // resolution. During bar magnifier the high/low are running_high/running_low
 // of the sampled path so no double-counting occurs, and close is the current
 // sampled price.
-void BacktestEngine::update_per_trade_extremes() {
+void source::PineStrategyHost::update_per_trade_extremes() {
     bool is_long = (position_side_ == PositionSide::LONG);
     double hi = current_bar_.high;
     double lo = current_bar_.low;

@@ -1,4 +1,5 @@
-#include "engine_internal.hpp"
+#include <pineforge/source/pine_strategy_host.hpp>
+#include "../engine_internal.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <vector>
 
 namespace pineforge {
+using namespace source;
 namespace {
 
 bool valid_lifecycle_phase(exit_legs::Phase phase) {
@@ -61,7 +63,7 @@ struct IdentityKeyHash {
 
 } // namespace
 
-exit_legs::Domain BacktestEngine::current_exit_leg_domain() const {
+exit_legs::Domain source::PineStrategyHost::current_exit_leg_domain() const {
     if (stream_phase_ != StreamPhase::IDLE) return exit_legs::Domain::RawTicks;
     if (bar_magnifier_enabled_) {
         return coof_scheduler_active_ ? exit_legs::Domain::MagnifierCoof
@@ -71,15 +73,15 @@ exit_legs::Domain BacktestEngine::current_exit_leg_domain() const {
                                   : exit_legs::Domain::Ordinary;
 }
 
-exit_legs::Frame BacktestEngine::preview_next_leg_event(exit_legs::Phase phase) const {
+exit_legs::Frame source::PineStrategyHost::preview_next_leg_event(exit_legs::Phase phase) const {
     if (exit_leg_event_seq_ == UINT64_MAX)
         throw std::overflow_error("exit lifecycle event exhausted");
     return {exit_leg_event_seq_ + 1, bar_index_, current_exit_leg_domain(), phase};
 }
 
-const PendingOrder* BacktestEngine::find_unique_pending(
+const source::PendingOrder* source::PineStrategyHost::find_unique_pending(
         uint64_t incarnation, int64_t created_seq) const {
-    const PendingOrder* found = nullptr;
+    const source::PendingOrder* found = nullptr;
     for (const auto& order : pending_orders_) {
         if (order.incarnation != incarnation || order.created_seq != created_seq)
             continue;
@@ -89,14 +91,14 @@ const PendingOrder* BacktestEngine::find_unique_pending(
     return found;
 }
 
-PendingOrder* BacktestEngine::find_unique_pending(
+source::PendingOrder* source::PineStrategyHost::find_unique_pending(
         uint64_t incarnation, int64_t created_seq) {
-    return const_cast<PendingOrder*>(
-        static_cast<const BacktestEngine*>(this)->find_unique_pending(
+    return const_cast<source::PendingOrder*>(
+        static_cast<const PineStrategyHost*>(this)->find_unique_pending(
             incarnation, created_seq));
 }
 
-BacktestEngine::ExitLegTransitionResult BacktestEngine::transition_exit_leg(
+source::PineStrategyHost::ExitLegTransitionResult source::PineStrategyHost::transition_exit_leg(
         exit_legs::Lifecycle& legs, uint64_t order_incarnation,
         exit_legs::Operation operation, std::optional<exit_legs::Frame> supplied,
         uint64_t& event_seq, int64_t position_cycle) const {
@@ -137,7 +139,9 @@ BacktestEngine::ExitLegTransitionResult BacktestEngine::transition_exit_leg(
     return ExitLegTransitionResult::ActionRefused;
 }
 
-std::optional<execution::Status> BacktestEngine::validate_lifecycle_effects(
+
+
+std::optional<execution::Status> source::PineStrategyHost::validate_source_lifecycle(
         const execution::LifecycleEffects& lifecycle) const {
     if (!lifecycle.pre_close && lifecycle.removals.empty()) return std::nullopt;
     std::unordered_set<IdentityKey, IdentityKeyHash> seen_intents;
@@ -152,7 +156,7 @@ std::optional<execution::Status> BacktestEngine::validate_lifecycle_effects(
                 if (bind->owner != position_cycle_seq_)
                     return execution::Status::InvalidLifecycle;
             }
-            const PendingOrder* order = find_unique_pending(
+            const source::PendingOrder* order = find_unique_pending(
                 intent.order_incarnation, intent.created_seq);
             if (!order) return execution::Status::InvalidLifecycle;
             if (!same_target(order->legs.target(), intent.target)
@@ -166,7 +170,7 @@ std::optional<execution::Status> BacktestEngine::validate_lifecycle_effects(
         const IdentityKey key{removal.incarnation, removal.created_seq};
         if (!seen_removals.insert(key).second)
             return execution::Status::InvalidLifecycle;
-        const PendingOrder* order = find_unique_pending(
+        const source::PendingOrder* order = find_unique_pending(
             removal.incarnation, removal.created_seq);
         if (!order || order->type != OrderType::EXIT)
             return execution::Status::InvalidLifecycle;
@@ -177,7 +181,7 @@ std::optional<execution::Status> BacktestEngine::validate_lifecycle_effects(
     return std::nullopt;
 }
 
-std::optional<execution::Status> BacktestEngine::preflight_settlement_lifecycle(
+std::optional<execution::Status> source::PineStrategyHost::preflight_source_lifecycle(
         const execution::LifecycleEffects& lifecycle,
         bool will_reset_to_flat, bool will_open_quoted) {
     if (!lifecycle.pre_close && !will_reset_to_flat && !will_open_quoted)
@@ -272,11 +276,11 @@ std::optional<execution::Status> BacktestEngine::preflight_settlement_lifecycle(
     return std::nullopt;
 }
 
-void BacktestEngine::apply_pre_close_lifecycle_batch(
+void source::PineStrategyHost::apply_source_pre_close_lifecycle(
         const execution::LifecycleBatch& batch) {
     const auto cause = next_leg_event(batch.phase);
     for (const auto& intent : batch.operations) {
-        PendingOrder* order = find_unique_pending(
+        source::PendingOrder* order = find_unique_pending(
             intent.order_incarnation, intent.created_seq);
         if (!order) throw std::logic_error("exit lifecycle pre-close target missing");
         const auto result = transition_exit_leg(
@@ -296,13 +300,13 @@ void BacktestEngine::apply_pre_close_lifecycle_batch(
     }
 }
 
-void BacktestEngine::apply_authorized_pending_removals(
+void source::PineStrategyHost::apply_source_pending_removals(
         const std::vector<execution::PendingRemoval>& removals) {
     if (removals.empty()) return;
     std::vector<execution::PendingRemoval> remaining = removals;
     pending_orders_.erase(
         std::remove_if(pending_orders_.begin(), pending_orders_.end(),
-            [&](const PendingOrder& order) {
+            [&](const source::PendingOrder& order) {
                 if (order.type != OrderType::EXIT) return false;
                 for (auto it = remaining.begin(); it != remaining.end(); ++it) {
                     if (it->incarnation == order.incarnation
@@ -317,5 +321,4 @@ void BacktestEngine::apply_authorized_pending_removals(
     if (!remaining.empty())
         throw std::logic_error("exit lifecycle removal target missing");
 }
-
 } // namespace pineforge

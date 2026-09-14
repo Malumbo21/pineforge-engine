@@ -261,7 +261,7 @@ void BacktestEngine::stage_native_settlement(
         return;
     }
     if (lifecycle) {
-        if (auto invalid = validate_lifecycle_effects(*lifecycle)) {
+        if (auto invalid = validate_source_lifecycle(*lifecycle)) {
             fail(*invalid);
             return;
         }
@@ -352,7 +352,7 @@ void BacktestEngine::stage_native_settlement(
         return;
     }
     if (lifecycle) {
-        if (auto invalid = validate_lifecycle_effects(*lifecycle)) {
+        if (auto invalid = validate_source_lifecycle(*lifecycle)) {
             fail(*invalid);
             return;
         }
@@ -453,6 +453,12 @@ execution::Result BacktestEngine::settle_native_reversal_at_v1(
     return commit_native_settlement_stage(stage, fill, lifecycle, context);
 }
 
+
+
+
+
+
+
 execution::Result BacktestEngine::settle_reversal_with_lifecycle_v1(
         const execution::ReverseTo& reversal, const execution::Fill& fill,
         const execution::LifecycleEffects& lifecycle) {
@@ -489,6 +495,24 @@ execution::Result BacktestEngine::settle_execution_with_lifecycle(
     return settle_source_staged_execution(stage, fill, lifecycle, context);
 }
 
+execution::Result BacktestEngine::settle_execution_selected_with_lifecycle(
+        const execution::Action& action, const execution::Fill& fill,
+        const execution::LifecycleEffects& lifecycle,
+        const execution::SelectedOpeningSet& selection) {
+    execution::PhysicalExecutionContext context;
+    context.effective_time_ms = current_bar_.timestamp;
+    context.interval_index = bar_index_;
+    context.preceding_exit_path_prefix = fold_exit_path_extremes_;
+    if (!std::isnan(fold_exit_trail_peak_)) {
+        context.preceding_exit_trail_peak = fold_exit_trail_peak_;
+    }
+    NativeSettlementStage stage;
+    stage_native_settlement(
+        stage, action, fill, execution::Book{}, &selection, &lifecycle);
+    return settle_source_staged_execution(stage, fill, lifecycle, context);
+}
+
+
 execution::Result BacktestEngine::settle_native_execution_at(
         const execution::Action& action, const execution::Fill& fill,
         const execution::PhysicalExecutionContext& context) {
@@ -516,22 +540,7 @@ execution::Result BacktestEngine::settle_native_execution_selected_at(
     return settle_with_context_selected(action, fill, {}, context, selection);
 }
 
-execution::Result BacktestEngine::settle_execution_selected_with_lifecycle(
-        const execution::Action& action, const execution::Fill& fill,
-        const execution::LifecycleEffects& lifecycle,
-        const execution::SelectedOpeningSet& selection) {
-    execution::PhysicalExecutionContext context;
-    context.effective_time_ms = current_bar_.timestamp;
-    context.interval_index = bar_index_;
-    context.preceding_exit_path_prefix = fold_exit_path_extremes_;
-    if (!std::isnan(fold_exit_trail_peak_)) {
-        context.preceding_exit_trail_peak = fold_exit_trail_peak_;
-    }
-    NativeSettlementStage stage;
-    stage_native_settlement(
-        stage, action, fill, execution::Book{}, &selection, &lifecycle);
-    return settle_source_staged_execution(stage, fill, lifecycle, context);
-}
+
 
 execution::Result BacktestEngine::settle_with_context_scoped(
         const execution::Action& action, const execution::Fill& fill,
@@ -587,7 +596,7 @@ execution::Result BacktestEngine::settle_source_staged_execution(
     // Source intraday readiness precedes all close-counter checks, including
     // Ready opening-only calls. Invalid/NoEffect returned before this point.
     std::optional<int> loss_day;
-    if (const auto status = preflight_source_close_observation(
+    if (const auto status = on_source_close_preflight(
             rows.closed_trades.data(), rows.closed_trades.size(), loss_day);
         status != execution::Status::Applied)
         return {status};
@@ -597,7 +606,7 @@ execution::Result BacktestEngine::settle_source_staged_execution(
     const auto result = commit_prepared_native_settlement_stage(
         stage, fill, lifecycle, context, rows);
     if (result.status == execution::Status::Applied && result.closed_trade_count != 0) {
-        observe_source_close_rows(trades_.data() + result.first_trade_index,
+        on_source_close_observed(trades_.data() + result.first_trade_index,
                                   result.closed_trade_count, loss_day);
     }
     return result;
@@ -704,7 +713,7 @@ execution::Status BacktestEngine::preflight_native_settlement_effects(
     const bool will_reset = stage.closed > 0.0 && stage.survivors.empty();
     const bool will_open_quoted = stage.opening > 0.0
         && (position_side_ == PositionSide::FLAT || stage.survivors.empty());
-    if (auto invalid = preflight_settlement_lifecycle(
+    if (auto invalid = preflight_source_lifecycle(
             lifecycle, will_reset, will_open_quoted))
         return *invalid;
 
@@ -733,7 +742,7 @@ execution::Result BacktestEngine::commit_prepared_native_settlement_stage(
     // synchronous kernel does not promise recovery/replay of a failed commit.
     // Order: authorized pre-close events, close observations and old-cycle
     // unbind, authorized pending removals, then quoted opening bind.
-    if (lifecycle.pre_close) apply_pre_close_lifecycle_batch(*lifecycle.pre_close);
+    if (lifecycle.pre_close) apply_source_pre_close_lifecycle(*lifecycle.pre_close);
     for (auto& trade : closed_trades) record_close_trade(std::move(trade));
     if (stage.closed > 0.0) {
         if (stage.survivors.empty()) {
@@ -745,7 +754,7 @@ execution::Result BacktestEngine::commit_prepared_native_settlement_stage(
             position_entry_count_ = static_cast<int>(pyramid_entries_.size());
         }
     }
-    apply_authorized_pending_removals(lifecycle.removals);
+    apply_source_pending_removals(lifecycle.removals);
     if (stage.opening > 0.0) {
         const double opening_commission = stage.current_costs.back();
         PyramidEntry lot{fill.price, context.effective_time_ms, stage.opening, fill.id,

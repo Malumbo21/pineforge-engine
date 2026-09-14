@@ -11,7 +11,7 @@
 #include <vector>
 
 namespace pineforge {
-inline namespace engine_script_run_v15 {
+inline namespace engine_script_run_v16 {
 
 class NativeExecutionConsumer final : public IExecutionConsumer {
 public:
@@ -33,7 +33,7 @@ public:
                   const std::string& script_tf,
                   const std::unordered_map<std::string, std::string>& inputs,
                   const SymInfo& syminfo,
-                  const StrategyOverrides* overrides,
+                  const source::StrategyOverrides* overrides,
                   bool bar_magnifier,
                   int magnifier_samples,
                   MagnifierDistribution magnifier_dist) override;
@@ -318,5 +318,5 @@ inline NativeExecutionConsumer& as_native_consumer(IExecutionConsumer& consumer)
     return static_cast<NativeExecutionConsumer&>(consumer);
 }
 
-}  // inline namespace engine_script_run_v15
+}  // inline namespace engine_script_run_v16
 }  // namespace pineforge

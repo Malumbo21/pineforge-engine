@@ -54,8 +54,10 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -193,7 +195,7 @@ std::vector<Bar> xau_bars() {
     return b;
 }
 
-class Probe : public BacktestEngine {
+class Probe : public pineforge::source::PineStrategyHost {
 public:
     Probe(double capital, double margin, double mintick, double lot) {
         initial_capital_ = capital;
@@ -214,7 +216,7 @@ public:
     }
     // The Pine body, called with bar_index_ on every bar.
     std::function<void(Probe&, int)> script;
-    void on_bar(const Bar& /*bar*/) override {
+    void on_source_bar(const Bar& /*bar*/) override {
         if (script) script(*this, bar_index_);
     }
 
@@ -251,10 +253,10 @@ public:
         default_qty_value_ = pct;
     }
     double close_now() const { return current_bar_.close; }
-    using BacktestEngine::strategy_entry;
-    using BacktestEngine::strategy_exit;
-    using BacktestEngine::strategy_close;
-    using BacktestEngine::strategy_close_all;
+    using pineforge::source::PineStrategyHost::strategy_entry;
+    using pineforge::source::PineStrategyHost::strategy_exit;
+    using pineforge::source::PineStrategyHost::strategy_close;
+    using pineforge::source::PineStrategyHost::strategy_close_all;
     const std::vector<PyramidEntry>& pyramid_entries() const {
         return pyramid_entries_;
     }

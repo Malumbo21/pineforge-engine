@@ -1,5 +1,6 @@
 // Literal tests of the actual resolved ReverseTo seam; no strategy/tape loop.
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/execution_projection.hpp>
 #include <pineforge/execution_reverse_to.hpp>
 
@@ -14,6 +15,8 @@
 #include <vector>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
+using pineforge::source::PineStrategyHost;
 namespace x = pineforge::execution;
 using ReverseTo = x::reverse_to_v1::ReverseTo;
 
@@ -46,7 +49,7 @@ void near(double actual, double expected) {
     CHECK(ok);
 }
 
-struct Book final : BacktestEngine {
+struct Book final : PineStrategyHost {
     Book() {
         initial_capital_ = 1000;
         commission_type_ = CommissionType::CASH_PER_ORDER;
@@ -57,7 +60,7 @@ struct Book final : BacktestEngine {
         current_bar_ = {100, 130, 70, 100, 1, 1736121600000LL};
         bar_index_ = 3;
     }
-    void on_bar(const Bar&) override {}
+    void on_source_bar(const Bar&) override {}
     x::PhysicalExecutionContext context() const {
         // Native execution coordinates intentionally differ from chart state.
         return {1736121660000LL, 7, {}, {}};
@@ -112,7 +115,7 @@ struct Book final : BacktestEngine {
     void exhaust_wins() { win_trades_count_ = std::numeric_limits<int>::max(); }
     void exhaust_lifecycle() { exit_leg_event_seq_ = UINT64_MAX; }
     void pending_exit() {
-        PendingOrder order;
+        PendingOrder order{};
         order.type = OrderType::EXIT;
         order.id = "retained";
         order.from_entry = "seed-11";
@@ -120,6 +123,7 @@ struct Book final : BacktestEngine {
         order.created_seq = 700;
         order.legs.attach(order.incarnation, position_cycle_seq_);
         pending_orders_.push_back(std::move(order));
+        CHECK(!pending_orders_.back().is_long);
     }
     size_t pending_count() const { return pending_orders_.size(); }
     const PendingOrder* pending_data() const { return pending_orders_.data(); }

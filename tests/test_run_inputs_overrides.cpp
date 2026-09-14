@@ -36,6 +36,7 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 using namespace pineforge;
 
@@ -60,8 +61,8 @@ namespace {
 
 // ── Group 1: input-getter probe ──────────────────────────────────────────
 // Thin passthrough to the protected get_input_* surface.
-struct GetterProbe : public BacktestEngine {
-    void on_bar(const Bar&) override {}
+struct GetterProbe : public pineforge::source::PineStrategyHost {
+    void on_source_bar(const Bar&) override {}
     double dbl(const std::string& k, double d) const { return get_input_double(k, d); }
     int    integer(const std::string& k, int d) const { return get_input_int(k, d); }
     int64_t i64(const std::string& k, int64_t d) const { return get_input_int64(k, d); }
@@ -154,9 +155,9 @@ void test_get_input_string() {
 // open a leg. With default_qty_value=Q (FIXED), each leg adds qty Q; final
 // position holds N*Q contracts (no closed trades → net_profit==0, equity
 // stays at initial_capital).
-class PyramidEntryStrat : public BacktestEngine {
+class PyramidEntryStrat : public pineforge::source::PineStrategyHost {
 public:
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         // Distinct ids so each call is a fresh pyramid-add attempt rather
         // than a same-id replacement.
         strategy_entry("E" + std::to_string(bar_index_), /*is_long=*/true);
@@ -194,7 +195,7 @@ void test_overrides_applied_to_config_and_equity() {
     std::printf("test_overrides_applied_to_config_and_equity\n");
     PyramidEntryStrat s;
 
-    StrategyOverrides ov;
+    source::StrategyOverrides ov;
     ov.initial_capital = 250000.0;
     ov.pyramiding = 2;
     ov.slippage = 3;
@@ -263,7 +264,7 @@ void test_overrides_large_pyramiding_opens_all_legs() {
     std::printf("test_overrides_large_pyramiding_opens_all_legs\n");
     PyramidEntryStrat s;
 
-    StrategyOverrides ov;
+    source::StrategyOverrides ov;
     ov.initial_capital = 1'000'000.0;
     ov.pyramiding = 10;
     ov.default_qty_value = 1.0;
@@ -311,9 +312,9 @@ void test_overrides_null_keeps_defaults() {
 // process_orders_on_close override changes the market fill price: when ON,
 // a market order placed in on_bar fills at THIS bar's close instead of the
 // next bar's open. We verify by realizing a closed trade and comparing PnL.
-class CloseThenExitStrat : public BacktestEngine {
+class CloseThenExitStrat : public pineforge::source::PineStrategyHost {
 public:
-    void on_bar(const Bar&) override {
+    void on_source_bar(const Bar&) override {
         if (bar_index_ == 0) strategy_entry("L", /*is_long=*/true);
         if (bar_index_ == 1) strategy_close("L", "exit");
     }
@@ -344,7 +345,7 @@ void test_override_process_orders_on_close_fills_at_close() {
     // (105), close placed bar 1 fills at bar 1 close (115). PnL = (115-105)*1.
     {
         CloseThenExitStrat s;
-        StrategyOverrides ov;
+        source::StrategyOverrides ov;
         ov.process_orders_on_close = 1;  // ON
         ov.slippage = 0;
         ov.commission_value = 0.0;
@@ -362,7 +363,7 @@ void test_override_process_orders_on_close_fills_at_close() {
     // (110), close placed bar 1 fills at bar 2 open (120). PnL = (120-110)*1.
     {
         CloseThenExitStrat s;
-        StrategyOverrides ov;
+        source::StrategyOverrides ov;
         ov.process_orders_on_close = 0;  // OFF
         ov.slippage = 0;
         ov.commission_value = 0.0;
@@ -397,7 +398,7 @@ void test_override_commission_reduces_pnl() {
     SymInfo sym;
 
     CloseThenExitStrat s;
-    StrategyOverrides ov;
+    source::StrategyOverrides ov;
     ov.process_orders_on_close = 0;
     ov.slippage = 0;
     ov.commission_value = 2.5;
@@ -431,7 +432,7 @@ void test_empty_tf_triggers_detect_timeframe() {
         make_bars(bars, N, /*step_ms=*/300'000);  // 5 minutes
         std::unordered_map<std::string, std::string> inputs;
         SymInfo sym;
-        StrategyOverrides ov;
+        source::StrategyOverrides ov;
         ov.pyramiding = 10;  // irrelevant here, just keep config explicit
         // Empty input_tf + empty script_tf → both go through detect_timeframe.
         s.run(bars, N, "", "", inputs, sym, &ov);

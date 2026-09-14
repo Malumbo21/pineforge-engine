@@ -30,6 +30,7 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 using namespace pineforge;
 
@@ -52,7 +53,7 @@ bool near(double a, double b, double tolerance = 1e-6) {
     return std::abs(a-b) < tolerance;
 }
 
-class MoneyProbe : public BacktestEngine {
+class MoneyProbe : public pineforge::source::PineStrategyHost {
 public:
     MoneyProbe(double capital = kCapital, double qty = kQty,
                Entry entry = Entry::DEFAULT_CLOSE, Close close = Close::LATER,
@@ -73,7 +74,7 @@ public:
         set_margin_call_enabled(true);
     }
 
-    void on_bar(const Bar& bar) override {
+    void on_source_bar(const Bar& bar) override {
         if ((entry_ == Entry::EXPLICIT_STOP && bar_index_ == 0)
             || (entry_ != Entry::EXPLICIT_STOP && bar_index_ == 1)) {
             strategy_entry("L", true, kNaN,
@@ -103,7 +104,7 @@ public:
     void pyramiding(int value) { pyramiding_ = value; }
     void scalar_fx(double value) { account_currency_fx_ = value; }
     void lot_step(double value) { qty_step_ = value; }
-    void intraday_cap(int value) { max_intraday_filled_orders_ = value; }
+    void intraday_cap(int value) { adapter_.cap = value; }
     double trigger_script_qty = kNaN;
     double trigger_script_equity = kNaN;
 

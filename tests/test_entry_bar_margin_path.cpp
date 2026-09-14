@@ -74,6 +74,7 @@
 
 #include <pineforge/bar.hpp>
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 using namespace pineforge;
 
@@ -255,7 +256,7 @@ std::vector<Bar> ford_bars() {
 
 // The tapes' broker: explicit-qty entries (default FIXED 1 is never used),
 // 1x margin both sides, margin calls on, market fills at the next open.
-class Probe : public BacktestEngine {
+class Probe : public pineforge::source::PineStrategyHost {
 public:
     Probe(double capital, double mintick, double lot, double commission_pct,
           double margin_pct = 100.0) {
@@ -276,7 +277,7 @@ public:
         set_margin_call_enabled(true);
     }
     std::function<void(Probe&, int)> script;
-    void on_bar(const Bar& /*bar*/) override {
+    void on_source_bar(const Bar& /*bar*/) override {
         if (script) script(*this, bar_index_);
     }
     void entry_stop(const std::string& id, bool is_long, double level,
@@ -292,7 +293,7 @@ public:
         default_qty_type_ = QtyType::PERCENT_OF_EQUITY;
         default_qty_value_ = 100.0;
     }
-    using BacktestEngine::strategy_close;
+    using pineforge::source::PineStrategyHost::strategy_close;
     bool flat() const { return position_side_ == PositionSide::FLAT; }
     int margin_call_rows() const {
         int n = 0;

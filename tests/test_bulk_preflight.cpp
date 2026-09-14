@@ -1,6 +1,7 @@
 // Structural chart-input admission, independent of strategy/broker decisions.
 // --baseline-safe runs only a finite malformed tail, never null/extreme-time UB.
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -12,6 +13,7 @@
 #include <vector>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 namespace {
 int failures = 0;
 int rejections = 0;
@@ -29,7 +31,7 @@ bool same_bar(const Bar& a, const Bar& b) {
         && same_number(a.low, b.low) && same_number(a.close, b.close)
         && same_number(a.volume, b.volume) && a.timestamp == b.timestamp;
 }
-class Probe final : public BacktestEngine {
+class Probe final : public pineforge::source::PineStrategyHost {
 public:
     int preparations = 0;
     int configurations = 0;
@@ -44,7 +46,7 @@ public:
         if (throw_on_prepare) throw std::runtime_error("sentinel preparation failure");
     }
     void configure_security_evaluators() override { ++configurations; }
-    void on_bar(const Bar& b) override { ++callbacks; observed.push_back(b); }
+    void on_source_bar(const Bar& b) override { ++callbacks; observed.push_back(b); }
     bool abort_pending() const { return abort_requested_.load(std::memory_order_relaxed); }
     size_t curve_size() const { return equity_curve_.size(); }
     double capital() const { return initial_capital_; }
@@ -121,7 +123,7 @@ void invoke(Probe& p, Route r, const Bar* bars, int n) {
         symbol.pointvalue = 50;
         symbol.mintick = 0.25;
         symbol.qty_step = 0.5;
-        StrategyOverrides overrides;
+        source::StrategyOverrides overrides;
         overrides.initial_capital = 54321;
         overrides.commission_value = 0.2;
         overrides.commission_type = 0;

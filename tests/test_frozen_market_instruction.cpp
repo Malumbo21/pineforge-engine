@@ -2,6 +2,7 @@
 // Literal native instruction and book transitions. No external data, reference
 // trades, strategy compiler or campaign grading participates in this test.
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/pending_order_mirror.hpp>
 #include <cmath>
 #include <cstddef>
@@ -13,7 +14,9 @@
 #include <type_traits>
 
 namespace pineforge {
-void fill_pending_order_mirror(const PendingOrder&, pf_pending_order_v1_t*);
+void fill_pending_order_mirror(const source::PendingOrder&, const MarketAdmissionJournal*,
+                               pf_pending_order_v1_t*);
+void fill_pending_order_mirror(const source::PendingOrder&, pf_pending_order_v1_t*);
 const pf_field_desc_t* pending_order_layout(int*);
 }
 
@@ -22,6 +25,7 @@ namespace frozen_prefix {
 }
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 using compat::pine::FrozenMarketInstruction;
 using compat::pine::FrozenMarketInstructionKind;
 #define PF_PREFIX_FIELD(name) \
@@ -95,7 +99,7 @@ void exclusive_instruction_and_revocation() {
     CHECK(!close.active() && !close.targeted_close());
 }
 
-class Book : public BacktestEngine {
+class Book : public pineforge::source::PineStrategyHost {
 public:
     Book() {
         initial_capital_ = 1000000;
@@ -107,7 +111,7 @@ public:
         bar_index_ = 0;
         current_bar_ = {100, 100, 100, 100, 1, 0};
     }
-    void on_bar(const Bar&) override {}
+    void on_source_bar(const Bar&) override {}
     void entry(const std::string& id, bool buy, double units) {
         strategy_entry(id, buy, nan, nan, units);
     }
@@ -300,7 +304,7 @@ void overflowed_total_retains_existing_finite_execution_guard() {
     CHECK(order.pine_frozen_market_instruction.active());
     CHECK(std::isinf(mirror(order).sbmt_tx_qty));
     double qty = 0; int close_only = -1, partition = -1;
-    CHECK(book.probe_fill_qty(0, 100, &qty, &close_only, &partition) == 0);
+    CHECK(book.observe_probe_fill_qty(0, 100, &qty, &close_only, &partition) == 0);
     CHECK(qty == 2 && partition == 0 && close_only == 0);
     // Positive source-total overflow cannot enable the expanded-transaction arm.
     book.step();

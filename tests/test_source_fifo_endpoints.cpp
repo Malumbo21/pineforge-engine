@@ -1,6 +1,7 @@
 // Literal source FIFO endpoint calls paired with the actual native Reduce owner.
 // No BacktestEngine::run(), generated strategy, tape, corpus or grading loop.
 #include <pineforge/engine.hpp>
+#include <pineforge/source/pine_strategy_host.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -14,6 +15,7 @@
 #include <vector>
 
 using namespace pineforge;
+using pineforge::source::PendingOrder;
 namespace x = pineforge::execution;
 
 namespace {
@@ -26,15 +28,18 @@ struct Abort {};
     std::printf("FAIL %s:%d %s\n", scenario, __LINE__, #value); throw Abort{}; } } while (0)
 
 template<class Tag, auto Member> struct Access { friend auto access(Tag) { return Member; } };
-#define ACCESS(Tag, Member) struct Tag { friend auto access(Tag); }; \
-    template struct Access<Tag, &BacktestEngine::Member>
-ACCESS(Partial, execute_partial_exit_qty);
-ACCESS(ByQuantity, execute_partial_exit_by_entry_qty);
-ACCESS(Drain, fifo_drain);
-ACCESS(ComputeClose, compute_close_target_qty);
-ACCESS(ImmediateClose, execute_immediate_close);
-ACCESS(ExitFill, apply_exit_order_fill);
-#undef ACCESS
+struct Partial { friend auto access(Partial); };
+struct ByQuantity { friend auto access(ByQuantity); };
+struct Drain { friend auto access(Drain); };
+struct ComputeClose { friend auto access(ComputeClose); };
+struct ImmediateClose { friend auto access(ImmediateClose); };
+struct ExitFill { friend auto access(ExitFill); };
+template struct Access<Partial, &pineforge::source::PineStrategyHost::execute_partial_exit_qty>;
+template struct Access<ByQuantity, &pineforge::source::PineStrategyHost::execute_partial_exit_by_entry_qty>;
+template struct Access<Drain, &BacktestEngine::fifo_drain>;
+template struct Access<ComputeClose, &pineforge::source::PineStrategyHost::compute_close_target_qty>;
+template struct Access<ImmediateClose, &pineforge::source::PineStrategyHost::execute_immediate_close>;
+template struct Access<ExitFill, &pineforge::source::PineStrategyHost::apply_exit_order_fill>;
 template<class> struct Args;
 template<class R, class C, class... A> struct Args<R(C::*)(A...)> { using tuple = std::tuple<A...>; };
 using Cause = std::tuple_element_t<2, typename Args<decltype(access(Partial{}))>::tuple>;
@@ -60,7 +65,7 @@ void near(double actual, double expected) {
     CHECK(ok);
 }
 
-struct Book final : BacktestEngine {
+struct Book final : pineforge::source::PineStrategyHost {
     Book() {
         initial_capital_ = 1000;
         commission_type_ = CommissionType::CASH_PER_ORDER;
@@ -75,7 +80,7 @@ struct Book final : BacktestEngine {
         stream_observe_actions_ = true;
         bar(1, 100);
     }
-    void on_bar(const Bar&) override {}
+    void on_source_bar(const Bar&) override {}
     void bar(int index, double price) {
         current_bar_ = {price, price + 20, price - 20, price, 1, 1736121600000LL + index * 60000};
         bar_index_ = index;
@@ -357,7 +362,7 @@ void frozen_reservation(double sign) {
     book.open(sign * .7, 100, 11, "old-first", 7);
     book.bar(2, 100);
     book.open(sign * .1, 100, 12, "old-second", 1);
-    PendingOrder order;
+    PendingOrder order{};
     order.type = OrderType::EXIT;
     order.id = "frozen-basket";
     order.from_entry = "";
