@@ -55,6 +55,8 @@ option(PINEFORGE_ENABLE_SANITIZERS
 # to quantify implicit-conversion debt. Not -Werror; never fails the build.
 option(PINEFORGE_STRICT_WARNINGS
     "Enable -Wconversion / -Wsign-conversion (does not imply -Werror)" OFF)
+option(PINEFORGE_REQUIRE_ABI_RECEIPTS
+    "Make receipt-backed ABI CTest rows fail instead of skip when evidence is missing" OFF)
 
 # === Eigen3 ============================================================
 # Used for matrix-typed PineScript (matrix.* API). Tries system install
@@ -77,36 +79,30 @@ endif()
 
 # === pineforge library =================================================
 set(PINEFORGE_SOURCE_LAYER_SOURCES
+    src/compat/pine/exit_activation.cpp
+    src/compat/pine/exit_lifecycle.cpp
+    src/compat/pine/order_birth.cpp
+    src/compat/pine/order_priority.cpp
+    src/compat/pine/reservation_expansion.cpp
+    src/source/pine_adapter.cpp
+    src/source/pine_scheduler_native.cpp
+    src/source/pine_scheduler.cpp
     src/source/pine_strategy_host.cpp
     src/source/pine_strategy_commands.cpp
-    src/source/pine_risk.cpp
-    src/source/pine_market_admission.cpp
-    src/source/pine_scheduler.cpp
-    src/source/pine_stream.cpp
     src/source/pine_aux_security.cpp
-    src/source/pine_fills.cpp
-    src/source/pine_path_resolve.cpp
-    src/source/pine_orders.cpp
-    src/source/pine_execution_lifecycle.cpp
-    src/source/pine_policy_members.cpp
     src/source/pine_state_hash.cpp
-    src/source/pine_pending_mirror.cpp
 )
 
 add_library(pineforge STATIC
     src/c_abi.cpp
-    src/compat/pine/order_birth.cpp
-    src/compat/pine/exit_activation.cpp
-    src/compat/pine/exit_lifecycle.cpp
-    src/compat/pine/order_priority.cpp
     src/engine_aux_security.cpp
-    src/engine_fills.cpp
     src/engine_lower_tf.cpp
     src/engine_metrics.cpp
     src/engine_orders.cpp
     src/engine_execution.cpp
     src/engine_path_resolve.cpp
     src/engine_report.cpp
+    src/reservation_expansion.cpp
     src/engine_run.cpp
     src/engine_security.cpp
     src/engine_state_hash.cpp
@@ -114,8 +110,6 @@ add_library(pineforge STATIC
     src/market_admission.cpp
     src/compat/pine/market_admission.cpp
     src/engine_trade_accessors.cpp
-    src/reservation_expansion.cpp
-    src/compat/pine/reservation_expansion.cpp
     src/pending_order_mirror.cpp
     src/native_order.cpp
     src/engine_consumer.cpp

@@ -1,65 +1,90 @@
-#include <pineforge/engine.hpp>
 #include <pineforge/compat/pine/exit_activation.hpp>
-#include <pineforge/source/pine_pending_intent.hpp>
-#include "../../engine_internal.hpp"
+
 #include <cmath>
+#include <stdexcept>
 
 namespace pineforge::compat::pine {
 
-bool ExitActivationPolicy::holds_stop() const {
+ExitActivationPolicy::ExitActivationPolicy(ExitPlacementEvidence evidence)
+    : evidence_(std::move(evidence)) {
+    const auto& value = *evidence_;
+    if (value.position_cycle <= 0 || value.entry_bar < 0
+        || (value.direction != 1 && value.direction != -1)
+        || !std::isfinite(value.cursor_price)) {
+        throw std::invalid_argument("invalid Pine exit placement evidence");
+    }
+}
+
+bool ExitActivationPolicy::holds_stop() const noexcept {
     return evidence_ && !std::isnan(evidence_->stop_level)
         && (evidence_->direction > 0 ? evidence_->cursor_price <= evidence_->stop_level
                                      : evidence_->cursor_price >= evidence_->stop_level);
 }
-bool ExitActivationPolicy::holds_limit() const {
-    return evidence_ && !evidence_->limit_continuation && !std::isnan(evidence_->limit_level)
+
+bool ExitActivationPolicy::holds_limit() const noexcept {
+    return evidence_ && !evidence_->limit_continuation
+        && !std::isnan(evidence_->limit_level)
         && (evidence_->direction > 0 ? evidence_->cursor_price >= evidence_->limit_level
                                      : evidence_->cursor_price <= evidence_->limit_level);
 }
-bool ExitActivationPolicy::continues_at_later_open() const {
+
+bool ExitActivationPolicy::continues_at_later_open() const noexcept {
     return evidence_ && evidence_->limit_continuation
         && evidence_->limit_continuation->cause == LimitContinuationCause::LaterSameOpen;
 }
-ExitLegActivationBounds ExitActivationPolicy::resolve(int64_t cycle, int entry_bar) const {
-    const int64_t first = entry_bar;
-    return {cycle, first + (holds_stop() ? 1 : 0), first + (holds_limit() ? 1 : 0)};
+
+ExitLegActivationBounds ExitActivationPolicy::resolve(std::int64_t owner_cycle,
+                                                       int owner_entry_bar) const {
+    const int first = owner_entry_bar;
+    return {owner_cycle, first + (holds_stop() ? 1 : 0), first + (holds_limit() ? 1 : 0)};
 }
 
-ExitActivationPolicy select_exit_activation(const source::PendingOrder& order,
-        double stop, double limit, const ExitActivationContext& c) {
-    if (!c.fill_recalc || !c.scheduler || !std::isfinite(c.cursor_price)
-        || c.side == PositionSide::FLAT || c.position_open_bar != c.bar_index)
+ExitActivationPolicy select_exit_activation(const ExitActivationRequest& request,
+                                            double stop, double limit,
+                                            const ExitActivationContext& context) {
+    if (!context.fill_recalc || !context.scheduler || !std::isfinite(context.cursor_price)
+        || context.cycle <= 0 || context.position_open_bar != context.bar_index
+        || (context.direction != 1 && context.direction != -1)) {
         return {};
-    const bool long_side = c.side == PositionSide::LONG;
+    }
     const bool limit_marketable = !std::isnan(limit)
-        && (long_side ? c.cursor_price >= limit : c.cursor_price <= limit);
-    const bool trailing = !std::isnan(order.legs.prices().trail_points) || !std::isnan(order.legs.prices().trail_price);
-    const bool later_open = !c.magnifier && historical_cascade_reach(order)
-        && c.after_first_open_fill && c.recalc_leg == 0
-        && (!std::isnan(stop) || !std::isnan(limit)) && !trailing && limit_marketable;
-    const bool first_high_recross = !c.magnifier && !c.process_on_close
-        && !c.warmup && c.stream_idle && historical_cascade_reach(order)
-        && !c.historical_segment && c.at_extreme && c.historical_point == 1
-        && c.recalc_leg == 1 && c.market_recalc_incarnation != 0
-        && c.market_recalc_fill == c.current_fill
-        && long_side && c.position_entry_count == 1 && c.pyramiding == 0
-        && c.lot_count == 1 && c.first_lot_incarnation == c.market_recalc_incarnation
-        && !order.from_entry.empty() && order.from_entry == c.first_lot_id
-        && !order.quantity_request.is_partial(internal::kFullQtyEps, internal::kFullPercentEps)
-        && std::isfinite(order.qty)
-        && std::abs(order.qty - c.position_quantity) <= internal::kQtyEpsilon
-        && c.pending_empty && order.oca_name.empty() && !trailing
-        && c.slippage == 0 && c.pointvalue == 1 && c.account_fx == 1
-        && c.fx_series_empty && limit_marketable
-        && internal::bar_path_uses_high_first(c.bar)
-        && c.cursor_price == c.tick_high
-        && c.bar.low < order.legs.prices().limit_price && order.legs.prices().limit_price < c.bar.high
-        && (std::isnan(order.legs.prices().stop_price) || order.legs.prices().stop_price < c.bar.low);
+        && (context.direction > 0 ? context.cursor_price >= limit
+                                  : context.cursor_price <= limit);
     std::optional<LimitContinuation> continuation;
-    if (later_open) continuation = LimitContinuation{LimitContinuationCause::LaterSameOpen, c.current_fill};
-    else if (first_high_recross) continuation = LimitContinuation{LimitContinuationCause::FirstHighRecross, c.current_fill};
-    return ExitActivationPolicy({c.cycle, c.position_open_bar, long_side ? 1 : -1,
-        c.cursor_price, stop, limit, continuation});
+    const bool historical_reach = historical_cascade_reach(request.birth_reach);
+    if (!context.magnifier && historical_reach
+        && context.after_first_open_fill
+        && context.recalc_leg == 0 && (!std::isnan(stop) || !std::isnan(limit))
+        && !request.requested_trailing && limit_marketable) {
+        continuation = LimitContinuation{LimitContinuationCause::LaterSameOpen,
+                                         context.current_fill};
+    } else if (!context.magnifier && !context.process_on_close && !context.warmup
+               && context.stream_idle && historical_reach
+               && request.full_quantity && !request.requested_trailing
+               && !context.historical_segment && context.at_extreme
+               && context.historical_point == 1 && context.recalc_leg == 1
+               && context.market_recalc_incarnation != 0
+               && context.market_recalc_fill == context.current_fill
+               && context.direction > 0 && context.position_entry_count == 1
+               && context.pyramiding == 0 && context.lot_count == 1
+               && context.first_lot_incarnation == context.market_recalc_incarnation
+               && request.has_from_entry
+               && request.from_entry == context.first_lot_id
+               && std::isfinite(request.quantity)
+               && std::abs(request.quantity - context.position_quantity) <= 1e-9
+               && context.pending_empty && request.oca_name.empty()
+               && context.slippage == 0 && context.pointvalue == 1.0
+               && context.account_fx == 1.0 && context.fx_series_empty
+               && limit_marketable && context.bar_path_high_first
+               && context.cursor_price == context.tick_high
+               && context.bar.low < limit && limit < context.bar.high
+               && (std::isnan(stop) || stop < context.bar.low)) {
+        continuation = LimitContinuation{LimitContinuationCause::FirstHighRecross,
+                                         context.current_fill};
+    }
+    return ExitActivationPolicy({context.cycle, context.position_open_bar,
+                                 context.direction, context.cursor_price,
+                                 stop, limit, continuation});
 }
 
 } // namespace pineforge::compat::pine

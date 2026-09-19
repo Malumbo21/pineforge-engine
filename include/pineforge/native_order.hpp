@@ -7,9 +7,11 @@
 #include "native_order_identity.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -20,19 +22,34 @@
 #include <vector>
 
 namespace pineforge::native_order {
-inline namespace native_order_v4 {
+inline namespace native_order_v5 {
 
 // Isolated working-request/value core: current LIVE requests and immutable
 // command history. It does not own positions, cash, paid fees, matching,
 // calendar, host phase, or a second physical book.
 //
-// Identity types remain native_order_v1. Request/core/event values are v4.
+// Identity types remain native_order_v1. Request/core/event values are v5.
 // Physical execution::Action is unchanged; native Reduce uses a typed size
 // source instead of a dummy units field. ExecutionPlan is a transient widening
 // used at the core/consumer boundary.
 
 using Flatten = execution::Flatten;
 using Transact = order_action::Transact;
+
+// A host-maintained, run-scoped roster identity.  Zero is invalid and is
+// never allocated by WorkingRequestCore.
+struct CohortHandle {
+    std::uint64_t value = 0;
+};
+inline bool operator==(CohortHandle left, CohortHandle right) noexcept {
+    return left.value == right.value;
+}
+inline bool operator!=(CohortHandle left, CohortHandle right) noexcept {
+    return !(left == right);
+}
+inline bool operator<(CohortHandle left, CohortHandle right) noexcept {
+    return left.value < right.value;
+}
 
 // Exact target exposure for an explicit reversal request. This is distinct
 // from execution::ReverseTo, which is the transient resolved execution plan.
@@ -58,8 +75,12 @@ struct Reduce {
 using OrderIntent = std::variant<Flatten, Reduce, Transact, ReverseTo, HostSized>;
 
 struct Market {};
+// `fill_through` makes the limit a touch trigger (market-if-touched): the
+// level still gates when the request becomes executable, but its fill is not
+// bounded by the level, so slippage may carry it past the level.
 struct Limit {
     double price = 0.0;
+    bool fill_through = false;
 };
 struct Stop {
     double price = 0.0;
@@ -92,7 +113,10 @@ struct BindOpenings {
     std::vector<RequestHandle> openings;
     int64_t cycle = 0;
 };
-using Owner = std::variant<Independent, WaitForApplied, BindOpening, BindOpenings>;
+struct BindCohort {
+    CohortHandle cohort;
+};
+using Owner = std::variant<Independent, WaitForApplied, BindOpening, BindOpenings, BindCohort>;
 
 enum class GroupEffect : std::uint8_t { Cancel = 0, Reduce = 1 };
 struct NoGroup {};
@@ -177,8 +201,11 @@ struct RemainingUnits {
     double q = 0.0;
 };
 struct RemainingDeferred {};
+// A dynamic cohort has no currently live member.  This is a live deferral,
+// not a terminal receipt: the consumer retries it at the next candidate.
+struct NoTarget {};
 using Remaining = std::variant<RemainingUnbound, RemainingFlattenAll, RemainingUnits,
-                               RemainingDeferred>;
+                               RemainingDeferred, NoTarget>;
 
 struct RemainingProjectionUnbound {};
 struct RemainingProjectionFlattenAll {};
@@ -186,9 +213,11 @@ struct RemainingProjectionUnits {
     double q = 0.0;
 };
 struct RemainingProjectionDeferred {};
+struct RemainingProjectionNoTarget {};
 using RemainingProjection =
         std::variant<RemainingProjectionUnbound, RemainingProjectionFlattenAll,
-                     RemainingProjectionUnits, RemainingProjectionDeferred>;
+                     RemainingProjectionUnits, RemainingProjectionDeferred,
+                     RemainingProjectionNoTarget>;
 
 struct BookTransaction {};
 struct Wait {
@@ -228,8 +257,11 @@ struct OpeningsClose {
     Side side = Side::Long;
     Enrollment enrollment;
 };
+struct CohortClose {
+    CohortHandle cohort;
+};
 using Authority = std::variant<BookTransaction, Wait, ArmedTransaction, UnboundBookClose, BookClose,
-                               OpeningClose, OpeningsClose>;
+                               OpeningClose, OpeningsClose, CohortClose>;
 
 // Native authorization receipt, converted to a call-local financial
 // SelectedOpeningSet only at the consumer's settlement boundary.
@@ -407,10 +439,20 @@ enum class OpeningShape : std::uint8_t {
     CloseOpposite = 2,
 };
 
+// Resolved host sizing normally remains subject to the run's quantity grid.
+// A host may instead authenticate literal units for a pure reduction; the
+// consumer still proves that the positive quantity is representable within
+// the selected exposure before it can reach settlement.
+enum class ExecutionGridPolicy : std::uint8_t {
+    SnapToGrid = 0,
+    ExplicitUnits = 1,
+};
+
 struct ExecutionTerms {
     double resolved_price = 0.0;
     std::optional<double> units;
     OpeningShape shape = OpeningShape::Transact;
+    ExecutionGridPolicy grid_policy = ExecutionGridPolicy::SnapToGrid;
 };
 
 using ExecutionPlan = std::variant<execution::Flatten, order_action::Reduce,
@@ -698,6 +740,96 @@ using CommandEvent = std::variant<AcceptedEvent,
                                   ArmedEvent,
                                   TermsResolvedEvent>;
 
+// Almost every prepared command yields one history event. Keep that ordinary
+// transactional payload inline; the overflow vector preserves the existing
+// arbitrary-length behavior for group/lifecycle plans that emit more events.
+class InlineCommandEvents {
+public:
+    InlineCommandEvents() = default;
+    InlineCommandEvents(InlineCommandEvents&& other) noexcept : size_(other.size_) {
+        for (std::size_t i = 0; i < size_ && i < inline_.size(); ++i) {
+            inline_[i] = std::move(other.inline_[i]);
+        }
+        overflow_ = std::move(other.overflow_);
+        other.size_ = 0;
+    }
+    InlineCommandEvents& operator=(InlineCommandEvents&& other) noexcept {
+        if (this != &other) {
+            clear();
+            size_ = other.size_;
+            for (std::size_t i = 0; i < size_ && i < inline_.size(); ++i) {
+                inline_[i] = std::move(other.inline_[i]);
+            }
+            overflow_ = std::move(other.overflow_);
+            other.size_ = 0;
+        }
+        return *this;
+    }
+    InlineCommandEvents(const InlineCommandEvents& other) : size_(other.size_) {
+        for (std::size_t i = 0; i < size_ && i < inline_.size(); ++i) {
+            inline_[i] = other.inline_[i];
+        }
+        overflow_ = other.overflow_;
+    }
+    InlineCommandEvents& operator=(const InlineCommandEvents& other) {
+        if (this != &other) {
+            clear();
+            size_ = other.size_;
+            for (std::size_t i = 0; i < size_ && i < inline_.size(); ++i) {
+                inline_[i] = other.inline_[i];
+            }
+            overflow_ = other.overflow_;
+        }
+        return *this;
+    }
+
+    std::size_t size() const noexcept { return size_; }
+    bool empty() const noexcept { return size_ == 0; }
+
+    template<class Event>
+    void emplace_back(Event&& event) {
+        push_back(CommandEvent(std::forward<Event>(event)));
+    }
+
+    void push_back(CommandEvent event) {
+        if (overflow_.empty() && size_ < inline_.size()) {
+            inline_[size_++].emplace(std::move(event));
+            return;
+        }
+        if (overflow_.empty()) {
+            overflow_.reserve(inline_.size() * 2U);
+            for (std::size_t i = 0; i < size_; ++i) {
+                overflow_.push_back(std::move(*inline_[i]));
+                inline_[i].reset();
+            }
+        }
+        overflow_.push_back(std::move(event));
+        ++size_;
+    }
+
+    void clear() noexcept {
+        for (std::size_t i = 0; i < size_ && i < inline_.size(); ++i) {
+            inline_[i].reset();
+        }
+        overflow_.clear();
+        size_ = 0;
+    }
+
+    CommandEvent& front() noexcept { return (*this)[0]; }
+    const CommandEvent& front() const noexcept { return (*this)[0]; }
+    CommandEvent& operator[](std::size_t index) noexcept {
+        return overflow_.empty() ? *inline_[index] : overflow_[index];
+    }
+    const CommandEvent& operator[](std::size_t index) const noexcept {
+        return overflow_.empty() ? *inline_[index] : overflow_[index];
+    }
+
+private:
+    std::array<std::optional<CommandEvent>, 2> inline_{};
+    std::vector<CommandEvent> overflow_{};
+    std::size_t size_ = 0;
+};
+
 struct CommandContext {
     int64_t decision_time_ms = 0;
     std::optional<double> quantity_grid;
@@ -710,6 +842,15 @@ struct EvaluationContext {
     MatchCursor cursor{};
     DriverEligibilityClass driver_class = DriverEligibilityClass::ObservedPrint;
     bool existing_matching_bit = false;
+    // Generic current-point delivery. At Open, the consumer sets this only for
+    // a market/immediate request born by the pre-open provider. On a continuous
+    // OHLC segment, it also admits a request born by an applied callback onto
+    // the unconsumed suffix. It is transient and never retained in a request.
+    bool pre_open_birth_eligible = false;
+    // Set only while resolving a CohortClose candidate.  It carries the
+    // physical side of the currently live selected roster and is not retained
+    // in a request definition.
+    std::optional<Side> cohort_side;
 };
 
 struct BeginTrailTracking {
@@ -737,6 +878,9 @@ using TriggerTransition = std::variant<BeginTrailTracking, ObserveTrailExtremum,
 
 struct ExecutionProposal {
     MatchCursor cursor{};
+    // Carries the generic pre-open delivery authorization from the matching
+    // evaluation through the synchronous execution preparation.
+    bool pre_open_birth_eligible = false;
     double raw_price = 0.0;
     double resolved_price = 0.0;
     ExecutionPlan physical_action{};
@@ -824,6 +968,28 @@ struct EligibilityFacts {
     const Authority* authority = nullptr;
 };
 
+struct CohortRoster {
+    CohortHandle handle{};
+    // Canonical origin handles, ordered by origin incarnation rather than by
+    // host insertion order.  A successor is normalized to its predecessor
+    // root before entering this table.
+    std::vector<RequestHandle> origins;
+};
+
+enum class CohortReceiptOperation : std::uint8_t { Add = 0, Remove = 1 };
+enum class CohortReceiptStatus : std::uint8_t {
+    Applied = 0,
+    InvalidHandle = 1,
+    UnknownOrigin = 2,
+    TerminalOrigin = 3,
+};
+struct CohortReceipt {
+    CohortReceiptOperation operation = CohortReceiptOperation::Add;
+    CohortReceiptStatus status = CohortReceiptStatus::InvalidHandle;
+    CohortHandle cohort{};
+    RequestHandle origin{};
+};
+
 class WorkingRequestCore {
 public:
     explicit WorkingRequestCore(RunIdentity identity);
@@ -840,8 +1006,19 @@ public:
     const RunIdentity& identity() const noexcept { return identity_; }
     const std::vector<LiveRequest>& live() const noexcept { return live_; }
     const std::vector<CommandEvent>& history() const noexcept { return history_; }
+    const std::vector<CohortRoster>& cohorts() const noexcept { return cohorts_; }
+    const std::vector<CohortReceipt>& cohort_receipts() const noexcept {
+        return cohort_receipts_;
+    }
     const LiveRequest* find_live(const RequestHandle& handle) const;
     const CommandEvent* event_at(const EventId& id) const;
+
+    // Command-boundary roster maintenance.  A rejected add/remove records a
+    // durable generic receipt but never emits a market event.
+    CohortHandle cohort_open();
+    void cohort_add(CohortHandle cohort, RequestHandle origin);
+    void cohort_remove(CohortHandle cohort, RequestHandle origin);
+    bool cohort_contains(CohortHandle cohort, const RequestHandle& opening) const;
 
     // R1 producer convenience: prepare then install one command. Bound opening
     // enrollment requires CommandContext observations via prepare_submit.
@@ -886,7 +1063,8 @@ public:
     Preparation<PreparedMutation> prepare_trigger(const RequestHandle& target,
                                                   const TriggerTransition& transition,
                                                   DriverEligibilityClass driver_class,
-                                                  uint64_t& next_timeline_ordinal);
+                                                  uint64_t& next_timeline_ordinal,
+                                                  std::optional<Side> cohort_side = std::nullopt);
     InstallResult install_mutation(PreparedMutation&& prepared) noexcept;
 
     Preparation<PreparedExecution> prepare_execution(const RequestHandle& target,
@@ -914,6 +1092,16 @@ public:
 
     // The allowance that prepare_evaluation would install for this point.
     static Allowance evaluated_allowance(const LiveRequest& live, uint64_t point) noexcept;
+    // Consumer-only no-event form of the ordinary allowance
+    // refresh. It preserves prepare_evaluation's eligibility and liveness
+    // checks while avoiding a transient mutation envelope per driver point.
+    void refresh_point_allowances(uint64_t point, const PositionIdentity& position) noexcept;
+    bool refresh_allowance(const RequestHandle& target,
+                           const EvaluationContext& context,
+                           const TargetObservation& observation);
+    bool refresh_cohort_allowance(const RequestHandle& target,
+                                  const EvaluationContext& context,
+                                  const TargetObservation& observation);
     // Pure arithmetic over the cached pending total. Outputs are assigned only
     // after every validation and subtraction succeeds.
     static bool effective_host_units(const PendingAdjustments& pending,
@@ -922,8 +1110,10 @@ public:
                                      double* after,
                                      bool* exhausted) noexcept;
 
+    void reserve(std::size_t expected_events);
     std::vector<RequestHandle> group_recipients(const EventId& applied) const;
     std::vector<RequestHandle> waiting_children(const RequestHandle& parent) const;
+    bool has_waiting_children(const RequestHandle& parent) const noexcept;
     std::vector<RequestHandle> bound_close_handles() const;
 
     Preparation<PreparedMutation> prepare_group_effect(const EventId& applied,
@@ -950,7 +1140,8 @@ public:
                                 const TriggerState& state,
                                 DriverEligibilityClass driver_class,
                                 bool existing_matching_bit) const noexcept;
-    bool working_is_buy(const LiveRequest& live) const noexcept;
+    bool working_is_buy(const LiveRequest& live,
+                        std::optional<Side> cohort_side = std::nullopt) const noexcept;
 
 private:
     enum class TargetKind { Live, NotWorking, InvalidHandle };
@@ -981,6 +1172,9 @@ private:
     bool authenticate_receipt_outcome(const CommandEvent& event, const EventId& cause,
                                       const RequestHandle& recipient, GroupEffect effect) const;
     bool trail_level_ok(double best, double offset, bool is_buy, double* stop) const noexcept;
+    const RequestDefinition* definition_for(const RequestHandle& handle) const noexcept;
+    std::optional<RequestHandle> canonical_cohort_origin(const RequestHandle& origin) const;
+    std::size_t cohort_index(CohortHandle cohort) const noexcept;
 
     uint64_t usable_ordinal(uint64_t next) const;
     uint64_t usable_incarnation(uint64_t next) const;
@@ -1001,7 +1195,7 @@ private:
         std::size_t history_size = 0;
         uint64_t last_ordinal = 0;
         bool consumed = false;
-        std::vector<CommandEvent> events;
+        InlineCommandEvents events;
         std::uint8_t live_change = 0;  // 0 none, 1 push, 2 erase, 3 update
         std::size_t live_index = 0;
         LiveRequest live_row{};
@@ -1036,6 +1230,9 @@ private:
         uint64_t outcome_ordinal = 0;
     };
     std::vector<ReceiptKey> receipts_;
+    std::uint64_t next_cohort_handle_ = 1;
+    std::vector<CohortRoster> cohorts_;
+    std::vector<CohortReceipt> cohort_receipts_;
 };
 
 class PreparedSubmit {
@@ -1143,13 +1340,22 @@ static_assert(std::is_nothrow_move_constructible_v<MatchRejectedEvent>);
 static_assert(std::is_nothrow_move_constructible_v<ExecutionAppliedEvent>);
 static_assert(std::is_nothrow_move_constructible_v<MatchCursor>);
 static_assert(std::variant_size_v<OrderIntent> == 5);
-static_assert(std::variant_size_v<Remaining> == 4);
-static_assert(std::variant_size_v<RemainingProjection> == 4);
+static_assert(std::variant_size_v<Remaining> == 5);
+static_assert(std::variant_size_v<RemainingProjection> == 5);
 static_assert(std::variant_size_v<Allowance> == 4);
 static_assert(std::variant_size_v<CommandEvent> == 17);
 static_assert(std::variant_size_v<ExecutionPlan> == 4);
 static_assert(std::variant_size_v<ExecutionScope> == 3);
 static_assert(std::variant_size_v<TriggerState> == 9);
 
-}  // inline namespace native_order_v4
+}  // inline namespace native_order_v5
 }  // namespace pineforge::native_order
+
+namespace std {
+template <>
+struct hash<pineforge::native_order::CohortHandle> {
+    std::size_t operator()(pineforge::native_order::CohortHandle value) const noexcept {
+        return static_cast<std::size_t>(value.value ^ (value.value >> 32));
+    }
+};
+}  // namespace std

@@ -2,7 +2,7 @@
 """Shared local/CI verification driver. Stdlib only. Not a command generator.
 
 Profiles: release, debug, sanitizers, native. Default build dir build-ci-PROFILE.
-Source guards, explicit configure, full rebuild, pinned e60/0e/v13/v14 ABI prepare/reuse,
+Source guards, explicit configure, full rebuild, pinned e60/0e/v13/v14/v15/v16 ABI prepare/reuse,
 CTest, install+find_package+VERSION smoke, native help / required WebSocket.
 Fail fast on configure/build. After a successful build collect independent
 CTest and package failures in the same run. Never deletes source, tests, or
@@ -37,8 +37,12 @@ DEFAULT_JOBS = 4
 JOBS_MIN, JOBS_MAX = 1, 64
 SCHEMA = 'pineforge-ci-verify/v1'
 SANITIZER_FLAG = '-fsanitize=address,undefined'
+# LeakSanitizer is unavailable in Apple's ASan runtime.  Keep the Linux CI
+# lane strict, while allowing the local macOS ASan/UBSan profile to execute
+# its actual instrumented tests instead of failing during runtime startup.
+_ASAN_LEAKS = '0' if sys.platform == 'darwin' else '1'
 SANITIZER_RUN_ENV = {
-    'ASAN_OPTIONS': 'detect_leaks=1:halt_on_error=1:abort_on_error=1',
+    'ASAN_OPTIONS': f'detect_leaks={_ASAN_LEAKS}:halt_on_error=1:abort_on_error=1',
     'UBSAN_OPTIONS': 'print_stacktrace=1:halt_on_error=1',
 }
 SOURCE_GUARD_SCRIPTS = (
@@ -50,6 +54,7 @@ SOURCE_GUARD_SCRIPTS = (
     ('source-guard-aggregate-versions', ['scripts/check_aggregate_cpp_versions.py']),
 )
 NATIVE_INCLUDE_INDEPENDENCE_PROFILES = frozenset(('release', 'native'))
+TWIN_PARITY_PROFILES = frozenset(('release', 'native'))
 
 
 class ConfigError(Exception):
@@ -95,6 +100,7 @@ class VerifyConfig:
     require_websocket: bool
     runner: Runner
     stream_output: bool = True
+    exclude_label: str | None = None
 
 
 class Parser(argparse.ArgumentParser):
@@ -139,6 +145,10 @@ def native_include_independence_command(cfg: VerifyConfig, prefix: Path) -> list
             '--build-dir', str(cfg.build_dir), '--prefix', str(prefix)]
 
 
+def twin_parity_command(source: Path) -> list[str]:
+    return [sys.executable, str(source / 'scripts/check_twin_parity.py')]
+
+
 def cmake_cache_definitions(cfg: VerifyConfig) -> dict[str, str]:
     profile = cfg.profile
     values = {
@@ -157,6 +167,7 @@ def cmake_cache_definitions(cfg: VerifyConfig) -> dict[str, str]:
         'PINEFORGE_BUILD_EXAMPLES': 'OFF',
         'PINEFORGE_ENABLE_COVERAGE': 'OFF',
         'PINEFORGE_STRICT_WARNINGS': 'OFF',
+        'PINEFORGE_REQUIRE_ABI_RECEIPTS': 'ON',
         'PINEFORGE_VERSION_SOURCE': 'FILE',
     }
     if cfg.curl_dir is not None:
@@ -194,6 +205,8 @@ def parse_args(argv: list[str] | None, *, source: Path = ROOT) -> argparse.Names
                         help='require installed ccache and bind CMAKE_*_COMPILER_LAUNCHER')
     parser.add_argument('--require-websocket', action='store_true',
                         help='native only: execute test_native_live_websocket and refuse skip (77)')
+    parser.add_argument('--exclude-label', default=None,
+                        help='exclude one CTest label from this local verification run')
     args = parser.parse_args(argv)
     if args.build_dir is None:
         args.build_dir = default_build_dir(source, args.profile)
@@ -206,6 +219,11 @@ def validate_config(args: argparse.Namespace, *, source: Path = ROOT,
         raise ConfigError(f'--jobs must be {JOBS_MIN}..{JOBS_MAX}')
     if args.require_websocket and args.profile != 'native':
         raise ConfigError('--require-websocket is only valid with the native profile')
+    if args.exclude_label is not None:
+        label = args.exclude_label.strip()
+        if not label or any(not (char.isalnum() or char in '_.-') for char in label):
+            raise ConfigError('--exclude-label must be a simple CTest label')
+        args.exclude_label = label
     if args.curl_dir is not None and not args.curl_dir.is_dir():
         raise ConfigError(f'--curl-dir is not a directory: {args.curl_dir}')
     ccache_path = None
@@ -232,6 +250,7 @@ def validate_config(args: argparse.Namespace, *, source: Path = ROOT,
         ccache_path=ccache_path,
         require_websocket=bool(args.require_websocket),
         runner=default_runner,
+        exclude_label=args.exclude_label,
     )
 
 
@@ -348,6 +367,7 @@ class Driver:
         self.abi_v13_action = 'not-started'
         self.abi_v14_action = 'not-started'
         self.abi_v15_frozen_action = 'not-started'
+        self.abi_v16_frozen_action = 'not-started'
         self.summary: dict = {
             'schemaVersion': SCHEMA,
             'status': 'incomplete',
@@ -371,6 +391,7 @@ class Driver:
             'abiV13': {'action': self.abi_v13_action},
             'abiV14': {'action': self.abi_v14_action},
             'abiV15Frozen': {'action': self.abi_v15_frozen_action},
+            'abiV16Frozen': {'action': self.abi_v16_frozen_action},
             'stages': self.stages,
             'failures': self.failures,
         }
@@ -381,6 +402,7 @@ class Driver:
         self.summary['abiV13'] = {'action': self.abi_v13_action}
         self.summary['abiV14'] = {'action': self.abi_v14_action}
         self.summary['abiV15Frozen'] = {'action': self.abi_v15_frozen_action}
+        self.summary['abiV16Frozen'] = {'action': self.abi_v16_frozen_action}
         self.summary['actualVersion'] = self.actual_version
         self.summary['stages'] = self.stages
         self.summary['failures'] = self.failures
@@ -488,6 +510,31 @@ class Driver:
         self.write_summary()
         return not failed
 
+    def ensure_corpus_submodule(self) -> bool:
+        """Materialize the exact public corpus gitlink before sweep-adjacent CI."""
+        update = [
+            'git', '-C', str(self.cfg.source), 'submodule', 'update', '--init',
+            '--depth', '1', '--', 'corpus',
+        ]
+        if self.invoke('corpus-submodule-init', update, timeout=600).returncode != 0:
+            return False
+        status = self.invoke(
+            'corpus-submodule-status',
+            ['git', '-C', str(self.cfg.source), 'submodule', 'status', '--', 'corpus'],
+            timeout=60)
+        if status.returncode != 0:
+            return False
+        value = status.stdout.decode('utf-8', 'replace').strip()
+        if not value or value[0] in '-+':
+            self.fail_stage(
+                'corpus-submodule-pin',
+                'corpus submodule is absent or not at the recorded gitlink: ' + repr(value),
+                argv=['git', 'submodule', 'status', '--', 'corpus'])
+            return False
+        self.pass_stage('corpus-submodule-pin', value,
+                        argv=['git', 'submodule', 'status', '--', 'corpus'])
+        return True
+
     def verify_configured_profile(self, cache: dict[str, str]) -> str | None:
         profile = self.cfg.profile
         if cache.get('CMAKE_BUILD_TYPE') != profile.build_type:
@@ -504,6 +551,7 @@ class Driver:
             ('PINEFORGE_BUILD_TUTORIAL', profile.tutorial),
             ('PINEFORGE_BUILD_LIVE_RUNNER', profile.live_runner),
             ('PINEFORGE_ENABLE_SANITIZERS', profile.sanitizers),
+            ('PINEFORGE_REQUIRE_ABI_RECEIPTS', True),
         ):
             if cmake_on(cache.get(key)) != wanted:
                 return f'{key} expected {"ON" if wanted else "OFF"} got {cache.get(key)!r}'
@@ -553,6 +601,15 @@ class Driver:
             extra_argv=['--commit', provider['commit'], '--tree', provider['tree'],
                         '--header-manifest', str(manifest)],
             stage='abi-v15-frozen', fetch_stage='abi-v15-frozen-fetch')
+
+    def ensure_abi_v16_frozen(self) -> None:
+        provider = PROVIDERS['v16-frozen']
+        manifest = self.cfg.source / provider['manifest'].relative_to(ROOT)
+        self.abi_v16_frozen_action = self.ensure_prepared_provider(
+            self.cfg.build_dir / provider['default_output'], provider['commit'], provider['tree'],
+            extra_argv=['--commit', provider['commit'], '--tree', provider['tree'],
+                        '--header-manifest', str(manifest)],
+            stage='abi-v16-frozen', fetch_stage='abi-v16-frozen-fetch')
 
     def ensure_prepared_provider(self, output: Path, commit: str, tree: str, *,
                                  extra_argv: list[str], stage: str, fetch_stage: str) -> str:
@@ -641,9 +698,15 @@ class Driver:
         self.write_summary()
         if not self.collect_tool_versions():
             return self.finish('failed', 1)
+        if not self.ensure_corpus_submodule():
+            return self.finish('failed', 1)
         guard_failed = False
         for name, argv in source_guard_commands(self.cfg.source):
             if self.invoke(name, argv, timeout=120).returncode != 0:
+                guard_failed = True
+        if self.cfg.profile.name in TWIN_PARITY_PROFILES:
+            if self.invoke('source-guard-twin-parity',
+                           twin_parity_command(self.cfg.source), timeout=120).returncode != 0:
                 guard_failed = True
         if guard_failed:
             return self.finish('failed', 1)
@@ -715,9 +778,21 @@ class Driver:
         self.ensure_abi_v13()
         self.ensure_abi_v14()
         self.ensure_abi_v15_frozen()
+        self.ensure_abi_v16_frozen()
 
+        # AppleClang's ASan runtime serializes shadow-memory initialization
+        # behind a process-global spin lock. Starting several instrumented
+        # binaries at once can wedge them before main(). Keep an AppleClang
+        # Darwin sanitizer lane serial; a caller that explicitly selects a
+        # GNU g++ runtime can retain normal parallelism, as can Linux CI.
+        cxx_name = Path(os.environ.get('CXX', '')).name
+        apple_asan = (self.cfg.profile.sanitizers and sys.platform == 'darwin'
+                      and not cxx_name.startswith('g++'))
+        ctest_jobs = 1 if apple_asan else self.cfg.jobs
         ctest = ['ctest', '--test-dir', str(self.cfg.build_dir),
-                 '--output-on-failure', '--no-tests=error', '--parallel', str(self.cfg.jobs)]
+                 '--output-on-failure', '--no-tests=error', '--parallel', str(ctest_jobs)]
+        if self.cfg.exclude_label:
+            ctest += ['-LE', self.cfg.exclude_label]
         if ctest_supports_junit(self.cfg.runner):
             ctest += ['--output-junit', str(self.cfg.build_dir / 'ctest-junit.xml')]
         self.invoke('ctest', ctest, extra_env=self.sanitizer_env(), timeout=1800)

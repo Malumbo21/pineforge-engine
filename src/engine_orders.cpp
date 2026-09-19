@@ -1,11 +1,9 @@
-#include <pineforge/compat/pine/exit_lifecycle.hpp>
 /*
  * engine_orders.cpp — execute_market_* and partial-exit fill mechanics
  */
 
 #include "engine_internal.hpp"
 #include <pineforge/order_action.hpp>
-#include <pineforge/source/pine_pending_intent.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -13,60 +11,13 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace pineforge {
-using source::PendingOrder;
 using namespace internal;
 
 namespace {
-// Existing source FIFO endpoint policy; never a native quantity tolerance.
-// Keep the R2 stop/whole-lot interpretation at 1e-10 in this adapter.
-constexpr double kSourceFifoEndpointEpsilon = kQtyEpsilon;
-
-std::optional<execution::SelectedOpeningSet> source_fifo_prefix_membership(
-        const std::vector<PyramidEntry>& lots, double qty_limit,
-        int64_t cycle) {
-    if (cycle <= 0 || !std::isfinite(qty_limit) || qty_limit <= 0.0)
-        return std::nullopt;
-
-    double qty_closed = 0.0;
-    size_t prefix_size = 0;
-    for (const auto& lot : lots) {
-        // Match the source's original accumulation and endpoint ordering.
-        // Once at the endpoint, even a tiny next sibling stays unselected.
-        if (qty_closed >= qty_limit - kSourceFifoEndpointEpsilon) break;
-        if (!std::isfinite(lot.qty) || lot.qty <= 0.0) return std::nullopt;
-        const double close_qty = std::min(lot.qty, qty_limit - qty_closed);
-        const double keep_qty = lot.qty - close_qty;
-        if (keep_qty > kSourceFifoEndpointEpsilon) return std::nullopt;
-        ++prefix_size;
-        qty_closed += close_qty;
-    }
-    if (prefix_size == 0 || prefix_size == lots.size()) return std::nullopt;
-
-    execution::SelectedOpeningSet selection{cycle, {}};
-    std::unordered_set<uint64_t> included;
-    double selected_qty = 0.0;
-    for (size_t index = 0; index < prefix_size; ++index) {
-        const auto& lot = lots[index];
-        if (lot.entry_incarnation == 0) return std::nullopt;
-        if (included.insert(lot.entry_incarnation).second)
-            selection.incarnations.push_back(lot.entry_incarnation);
-        selected_qty += lot.qty;
-        if (!std::isfinite(selected_qty)) return std::nullopt;
-    }
-    // An opening identity may have multiple physical fragments, but all of
-    // its live fragments must belong to this prefix. Otherwise use Reduce.
-    for (size_t index = prefix_size; index < lots.size(); ++index) {
-        if (included.count(lots[index].entry_incarnation) != 0)
-            return std::nullopt;
-    }
-    return selection;
-}
-
 // Source predicates are resolved here, never retained by native settlement.
 // Every fragment of an opening must agree with the selected source predicate.
 template<class Predicate>
@@ -192,38 +143,6 @@ std::vector<uint64_t> source_opening_membership(
 
 
 
-// FIFO-drain up to qty_limit from pyramid_entries_, optionally restricted to a
-// single from_entry id. See engine.hpp for the contract. Mirrors TradingView's
-// per-pyramid trade reporting: one Trade per drained slice. Returns total qty
-// drained so callers can assert / log if needed.
-// Retained private ABI helper. Production close paths below use explicit
-// source actions; this compatibility entry point also consumes the sole book.
-double BacktestEngine::fifo_drain(const std::string* from_entry, double qty_limit,
-                                  double fill_price, bool was_long) {
-    (void)was_long; // physical orientation belongs to the authoritative book
-    const int pre_count = position_entry_count_;
-    execution::Result result;
-    if (from_entry) {
-        const auto incarnations = source_opening_membership(pyramid_entries_,
-            [&](const PyramidEntry& lot) { return lot.entry_id == *from_entry; });
-        if (incarnations.empty()) return 0.0;
-        const execution::SelectedOpeningSet selection{position_cycle_seq_, incarnations};
-        result = settle_execution_selected_with_lifecycle(
-            order_action::Reduce{qty_limit}, execution::Fill{fill_price, {}, {}, 0}, {}, selection);
-    } else {
-        result = settle_resolved_execution(
-            order_action::Reduce{qty_limit}, execution::Fill{fill_price, {}, {}, 0});
-    }
-    if (result.status != execution::Status::Applied
-        && result.status != execution::Status::NoEffect)
-        throw std::runtime_error("invalid resolved compatibility drain settlement");
-    // Old callers chose the later source slot policy themselves. Preserve
-    // that interface without retaining its former physical FIFO/fee loop.
-    if (result.status == execution::Status::Applied && position_side_ != PositionSide::FLAT)
-        position_entry_count_ = pre_count;
-    return result.closed_units;
-}
-
 // Internal helper: execute a partial exit (reduce position by qty, create trade records)
 // TradingView creates individual trade records for each partial exit.
 
@@ -254,7 +173,6 @@ void BacktestEngine::append_quoted_lot(PyramidEntry lot, double total_qty,
     trail_best_price_ = lot.price;
     pyramid_entries_.push_back(std::move(lot));
     if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
-    on_source_append_quoted_lot_after_book(pyramid_entries_.back());
 }
 
 
@@ -267,7 +185,7 @@ void BacktestEngine::append_quoted_lot(PyramidEntry lot, double total_qty,
 
 // Internal helper: close an exact quantity only from entries matching
 // from_entry. Live-position strategy.exit calls freeze their percent-derived
-// reservations into PendingOrder::qty; when layered siblings fill on one bar,
+// reservations into request record::qty; when layered siblings fill on one bar,
 // that absolute reservation must survive earlier reductions of the position.
 
 
@@ -364,18 +282,42 @@ Trade BacktestEngine::build_close_trade_with_costs(const PyramidEntry& pe, doubl
     // a stop-out's adverse excursion is at least the loss at the SL fill and
     // a take-profit's favorable excursion includes the move to the TP fill.
     // The per-bar sampler (update_per_trade_extremes) cannot see this: exit
-    // fills happen inside process_pending_orders and the pyramid entry is
+    // fills happen inside request matching and the pyramid entry is
     // removed before the next sample, so same-bar entry+exit trades would
     // otherwise report 0/0. Fold the fill price in here. The carried
     // per-entry extreme is scaled to the closed slice (close_qty/pe.qty) so
     // a partial close reports the slice's USD excursion, matching TV's
     // per-trade-record qty. Both fields stay >= 0 (Pine accessor convention);
     // the TV-export sign flip happens only in the CSV writer.
-    double slice = (pe.qty > 0.0) ? (close_qty / pe.qty) : 1.0;
-    double fill_fav = (was_long ? (fill_price - pe.price) : (pe.price - fill_price))
+    const double slice = (pe.qty > 0.0) ? (close_qty / pe.qty) : 1.0;
+    const double fill_fav = (was_long ? (fill_price - pe.price) : (pe.price - fill_price))
                       * close_qty;
-    double runup = std::max(pe.max_runup * slice, fill_fav);
-    double drawdown = std::max(pe.max_drawdown * slice, -fill_fav);
+    double runup = 0.0;
+    double drawdown = 0.0;
+    if (lot_excursion_hook_) {
+        // The host owns this lot's excursion (RULING A48): it sampled the
+        // lot's path itself and returns the two magnitudes for the closing
+        // row. The kernel contributes nothing beyond the booking facts.
+        ClosedLotExcursionFacts facts;
+        facts.entry_incarnation = pe.entry_incarnation;
+        facts.entry_time_ms = pe.time;
+        facts.entry_price = pe.price;
+        facts.lot_qty = pe.qty;
+        facts.closed_qty = close_qty;
+        facts.fill_price = fill_price;
+        facts.carried_favorable = pe.max_runup;
+        facts.carried_adverse = pe.max_drawdown;
+        facts.is_long = was_long;
+        facts.entry_bar_index = pe.entry_bar_index;
+        facts.exit_bar_index = context.interval_index;
+        facts.entry_bar_high_masked = pe.skip_entry_bar_high;
+        facts.entry_bar_low_masked = pe.skip_entry_bar_low;
+        const ClosedLotExcursion owned = lot_excursion_hook_(facts);
+        runup = owned.favorable;
+        drawdown = owned.adverse;
+    } else {
+    runup = std::max(pe.max_runup * slice, fill_fav);
+    drawdown = std::max(pe.max_drawdown * slice, -fill_fav);
     // Priced (stop/limit/trail) exits fill mid-bar: the bar-path extremes the
     // assumed OHLC path reaches BEFORE the exit fill belong to this trade's
     // excursion, but per-bar sampling never sees them (the entry is removed
@@ -410,6 +352,7 @@ Trade BacktestEngine::build_close_trade_with_costs(const PyramidEntry& pe, doubl
                 drawdown = std::max(drawdown, -lo_fav);
             }
         }
+    }
     }
     // TV reports excursions on the NET OPEN-PROFIT basis: the entry-leg
     // commission is deducted from the favorable/adverse extremes (verified
@@ -506,7 +449,6 @@ void BacktestEngine::validate_close_trade_counters(const Trade* rows, size_t cou
 // every full-close path (execute_market_exit) and by partial-exit settlement
 // when the FIFO loop drained the position.
 void BacktestEngine::reset_position_state_to_flat() {
-    reset_source_exit_activations_before_flatten();
     position_side_ = PositionSide::FLAT;
     position_cycle_seq_ = 0;
     position_entry_price_ = 0.0;
@@ -516,9 +458,7 @@ void BacktestEngine::reset_position_state_to_flat() {
     position_entry_count_ = 0;
     position_open_bar_ = -1;
     trail_best_price_ = std::numeric_limits<double>::quiet_NaN();
-    trail_close_restart_bar_ = -1;
     pyramid_entries_.clear();
-    reset_source_position_ledgers_after_book_clear();
 }
 
 
@@ -594,10 +534,8 @@ void BacktestEngine::open_quoted_position(PositionSide requested, PyramidEntry l
     position_open_bar_ = lot.entry_bar_index;
     trail_best_price_ = lot.price;
     pyramid_entries_.clear();
-    reset_source_open_position_ledgers_before_book(lot);
     pyramid_entries_.push_back(std::move(lot));
     if (stream_observe_actions_) stream_observe_entry(pyramid_entries_.back());
-    on_source_open_position_booked(pyramid_entries_.back());
 }
 
 
@@ -644,7 +582,7 @@ void BacktestEngine::open_quoted_position(PositionSide requested, PyramidEntry l
 // (``strategy.close_all``) closes the long at chart 12:15 and the SE stop
 // fires hours later at 21:30, still applying the carry. So this helper
 // reads ``tv_carry_qty`` from the pending order itself (snapshotted at
-// placement, see PendingOrder struct in engine.hpp) rather than a per-bar
+// placement, see request record struct in engine.hpp) rather than a per-bar
 // transient state.
 //
 // Conditions:
@@ -712,11 +650,11 @@ void BacktestEngine::open_quoted_position(PositionSide requested, PyramidEntry l
 // ``enter_market_from_flat``; this branch keeps the standard
 // ``new_size = qty`` contract.
 //
-// We deliberately do NOT purge exit orders here. Mutating pending_orders_
-// mid-iteration of process_pending_orders shifts indices and corrupts the
+// We deliberately do NOT purge exit orders here. Mutating request_roster
+// mid-iteration of request matching shifts indices and corrupts the
 // filled_indices accounting. Stale exits targeting the old entry id get
 // cleaned up on the next bar by the "from_entry doesn't match any pyramid
-// entry" check in process_pending_orders. Newly-placed exits that target
+// entry" check in request matching. Newly-placed exits that target
 // the incoming entry id stay and evaluate correctly on the current bar's
 // remaining iterations.
 

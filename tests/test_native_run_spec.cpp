@@ -85,6 +85,9 @@ std::string snapshot(const NativeRunSpec& s) {
     std::string out;
     append(out, s.identity.session_key); append(out, s.identity.run_number);
     append(out, s.input_tf); append(out, s.script_tf);
+    append(out, s.timeframe_undetected);
+    append(out, s.slot_label_policy); append(out, s.legacy_tolerance);
+    append(out, s.path_order);
     append(out, s.ticker); append(out, s.tickerid); append(out, s.type);
     append(out, s.currency); append(out, s.basecurrency);
     append(out, s.description); append(out, s.volumetype);
@@ -92,7 +95,7 @@ std::string snapshot(const NativeRunSpec& s) {
     append(out, s.initial_capital); append(out, s.point_value);
     append(out, s.account_fx); append(out, s.price_tick);
     append(out, s.slippage_ticks); append(out, s.fee_kind); append(out, s.fee_value);
-    append(out, s.quantity_grid); append(out, s.close_execution);
+    append(out, s.quantity_grid); append(out, s.close_execution); append(out, s.abort_reporting);
     append(out, s.max_abs_units); append(out, s.max_open_lots);
     append(out, s.allowed_open_directions); append(out, s.initial_margin_fraction);
     return out;
@@ -205,7 +208,6 @@ void financial_values_and_options() {
         {&NativeRunSpec::initial_capital, Field::InitialCapital},
         {&NativeRunSpec::point_value, Field::PointValue},
         {&NativeRunSpec::account_fx, Field::AccountFx},
-        {&NativeRunSpec::price_tick, Field::PriceTick},
     };
     for (const auto& field : fields) {
         for (double value : invalid) {
@@ -219,6 +221,20 @@ void financial_values_and_options() {
             spec.*field.member = value;
             expect_acceptance(spec); // No invented arithmetic/cap restriction.
         }
+    }
+    for (double value : {-1.0, std::numeric_limits<double>::infinity(),
+                         -std::numeric_limits<double>::infinity(), std::nan("tick")}) {
+        auto tick_spec = complete_spec();
+        tick_spec.price_tick = value;
+        expect_refusal(tick_spec, Error::NotFinitePositive, Field::PriceTick);
+    }
+    for (double value : {0.0, -0.0, std::numeric_limits<double>::denorm_min(),
+                         0.125, 1.0, std::numeric_limits<double>::max()}) {
+        auto tick_spec = complete_spec();
+        tick_spec.price_tick = value;
+        expect_acceptance(tick_spec);
+        check(std::signbit(tick_spec.price_tick) == std::signbit(value),
+              "price tick validation preserves the admitted zero sign");
     }
     const struct {
         std::optional<double> NativeRunSpec::* member;
@@ -365,6 +381,158 @@ void complete_clock_contract() {
     }
 }
 
+void undetected_timeframe_contract() {
+    auto spec = complete_spec();
+    spec.input_tf.clear();
+    spec.script_tf.clear();
+    spec.timeframe_undetected = true;
+    expect_acceptance(spec);
+
+    spec = complete_spec();
+    spec.timeframe_undetected = true;
+    expect_refusal(spec, Error::InvalidUndetectedTimeframe, Field::TimeframeUndetected);
+
+    spec = complete_spec();
+    spec.input_tf.clear();
+    spec.script_tf.clear();
+    spec.timeframe_undetected = true;
+    IntrabarPath::lower_tf lower;
+    lower.tf = "1";
+    spec.intrabar.value = std::move(lower);
+    expect_refusal(spec, Error::InvalidUndetectedTimeframe, Field::TimeframeUndetected);
+
+    spec = complete_spec();
+    spec.input_tf.clear();
+    spec.script_tf.clear();
+    expect_refusal(spec, Error::EmptyRequiredString, Field::InputTimeframe);
+}
+
+void intrabar_sample_eligibility_contract() {
+    auto spec = complete_spec();
+    IntrabarPath::lower_tf lower;
+    lower.tf = "1";
+    lower.samples = 4;
+    spec.intrabar.value = lower;
+    expect_acceptance(spec);
+
+    lower.sample_eligibility = IntrabarPath::SampleEligibility::DistributionSamples;
+    spec.intrabar.value = lower;
+    expect_acceptance(spec);
+
+    lower.sample_eligibility = static_cast<IntrabarPath::SampleEligibility>(2u);
+    spec.intrabar.value = lower;
+    const auto before = static_cast<std::uint32_t>(lower.sample_eligibility);
+    const auto validation = validate_native_run_spec(spec);
+    check(validation.error == Error::UnknownIntrabarSampleEligibility,
+          "unknown intrabar sample eligibility is refused");
+    check(validation.field == Field::IntrabarSampleEligibility,
+          "unknown intrabar sample eligibility names its field");
+    const auto* retained = spec.intrabar.lower();
+    check(retained != nullptr
+              && static_cast<std::uint32_t>(retained->sample_eligibility) == before,
+          "intrabar sample-eligibility refusal preserves the supplied value");
+}
+
+void synthesized_intrabar_contract() {
+    auto spec = complete_spec();
+    IntrabarPath::synthesized synthesized;
+    synthesized.samples = 4;
+    synthesized.distribution = MagnifierDistribution::UNIFORM;
+    spec.intrabar.value = synthesized;
+    expect_acceptance(spec);
+
+    spec.slot_label_policy = NativeSlotLabelPolicy::LegacyTolerant;
+    expect_acceptance(spec);
+
+    synthesized.samples = 1;
+    spec.intrabar.value = synthesized;
+    expect_refusal(spec, Error::InvalidIntrabarPath, Field::IntrabarSamples);
+
+    synthesized.samples = 4;
+    synthesized.distribution = static_cast<MagnifierDistribution>(99u);
+    spec.intrabar.value = synthesized;
+    expect_refusal(spec, Error::InvalidIntrabarPath, Field::IntrabarDistribution);
+
+    synthesized.distribution = MagnifierDistribution::ENDPOINTS;
+    synthesized.volume_weighted_min_samples = 1;
+    spec.intrabar.value = synthesized;
+    expect_refusal(spec, Error::InvalidIntrabarPath, Field::IntrabarVolumeSamples);
+
+    spec = complete_spec();
+    spec.input_tf.clear();
+    spec.script_tf.clear();
+    spec.timeframe_undetected = true;
+    synthesized = IntrabarPath::synthesized{};
+    spec.intrabar.value = synthesized;
+    expect_acceptance(spec);
+
+    const auto first_digest = native_intrabar_path_digest(spec.intrabar);
+    synthesized.samples = 5;
+    spec.intrabar.value = synthesized;
+    const auto second_digest = native_intrabar_path_digest(spec.intrabar);
+    check(first_digest != second_digest,
+          "synthesized intrabar sampling parameters are content-hashed");
+}
+
+void legacy_tolerant_policy_contract() {
+    auto spec = complete_spec();
+    check(spec.slot_label_policy == NativeSlotLabelPolicy::Canonical,
+          "canonical slot labels are the native default");
+    check(spec.legacy_tolerance == NativeLegacyTolerance::None,
+          "legacy structural tolerance is opt-in");
+
+    spec.slot_label_policy = NativeSlotLabelPolicy::LegacyTolerant;
+    expect_acceptance(spec);
+    spec.legacy_tolerance = NativeLegacyTolerance::BatchStructuralBars;
+    expect_acceptance(spec);
+    check(native_legacy_tolerance_enabled(
+              spec.legacy_tolerance, NativeLegacyTolerance::BatchStructuralBars),
+          "legacy structural tolerance bit is readable");
+    check(!native_legacy_tolerance_enabled(
+              NativeLegacyTolerance::None, NativeLegacyTolerance::BatchStructuralBars),
+          "absent legacy structural tolerance stays strict");
+    spec.legacy_tolerance = static_cast<NativeLegacyTolerance>(
+        static_cast<std::uint32_t>(NativeLegacyTolerance::BatchStructuralBars)
+        | static_cast<std::uint32_t>(NativeLegacyTolerance::WarmupNonNegativeOHLC));
+    expect_acceptance(spec);
+    check(native_legacy_tolerance_enabled(
+              spec.legacy_tolerance, NativeLegacyTolerance::WarmupNonNegativeOHLC),
+          "stream warmup tolerance bit is readable");
+
+    spec = complete_spec();
+    spec.slot_label_policy = static_cast<NativeSlotLabelPolicy>(2u);
+    expect_refusal(spec, Error::UnknownSlotLabelPolicy, Field::SlotLabelPolicy);
+    spec = complete_spec();
+    spec.legacy_tolerance = static_cast<NativeLegacyTolerance>(4u);
+    expect_refusal(spec, Error::UnknownLegacyTolerance, Field::LegacyTolerance);
+}
+
+void abort_reporting_contract() {
+    auto spec = complete_spec();
+    check(spec.abort_reporting == NativeAbortReporting::Error,
+          "native abort reporting defaults to an error diagnostic");
+    expect_acceptance(spec);
+    spec.abort_reporting = NativeAbortReporting::Quiet;
+    expect_acceptance(spec);
+    spec.abort_reporting = static_cast<NativeAbortReporting>(2u);
+    expect_refusal(spec, Error::UnknownAbortReporting, Field::AbortReporting);
+}
+
+void path_order_contract() {
+    auto spec = complete_spec();
+    check(spec.path_order == NativePathOrder::Auto,
+          "native path ordering defaults to AUTO");
+    for (const auto order : {NativePathOrder::Auto, NativePathOrder::HighFirst,
+                             NativePathOrder::LowFirst}) {
+        spec = complete_spec();
+        spec.path_order = order;
+        expect_acceptance(spec);
+    }
+    spec = complete_spec();
+    spec.path_order = static_cast<NativePathOrder>(3u);
+    expect_refusal(spec, Error::UnknownPathOrder, Field::PathOrder);
+}
+
 void failure_atomicity() {
     auto spec = complete_spec();
     spec.fee_value = -0.0;
@@ -394,6 +562,12 @@ int main() {
     strings_and_identity();
     financial_values_and_options();
     complete_clock_contract();
+    undetected_timeframe_contract();
+    intrabar_sample_eligibility_contract();
+    synthesized_intrabar_contract();
+    legacy_tolerant_policy_contract();
+    abort_reporting_contract();
+    path_order_contract();
     failure_atomicity();
     std::cout << (checks - failures) << '/' << checks << " checks passed; "
               << failures << " failed\n";

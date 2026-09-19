@@ -3,6 +3,7 @@
 #include <pineforge/execution_consumer.hpp>
 #include <pineforge/native_host.hpp>
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -11,12 +12,14 @@
 #include <vector>
 
 namespace pineforge {
-inline namespace engine_script_run_v16 {
+inline namespace engine_script_run_v17 {
 
 class NativeExecutionConsumer final : public IExecutionConsumer {
 public:
     bool is_native() const noexcept override { return true; }
     void refuse_source_mutation(const char* operation) override;
+    bool stage_account_currency_fx_series(const std::vector<std::int64_t>& timestamps,
+                                          const std::vector<double>& rates) override;
     uint64_t continuation_hash() const noexcept override;
 
     void run_simple(BacktestEngine& engine, const Bar* bars, int n) override;
@@ -62,7 +65,14 @@ public:
                                                const native_order::Request& request);
     native_order::CancelResult cancel(BacktestEngine& engine,
                                       const native_order::RequestHandle& target);
+    native_order::CohortHandle cohort_open(BacktestEngine& engine);
+    void cohort_add(BacktestEngine& engine, native_order::CohortHandle cohort,
+                    native_order::RequestHandle origin);
+    void cohort_remove(BacktestEngine& engine, native_order::CohortHandle cohort,
+                       native_order::RequestHandle origin);
     std::optional<NativeCurrentPointView> current_execution_point() const;
+    std::optional<NativeTrailState> trail_state(
+        const BacktestEngine& engine, const native_order::RequestHandle& target) const;
     NativeCurrentExecutionPreview inspect_current_execution(
         const BacktestEngine& engine, const NativeCurrentExecution& command) const;
     NativeCurrentExecutionResult execute_current(
@@ -70,6 +80,11 @@ public:
     NativePhysicalPosition position(const BacktestEngine& engine) const;
     double marked(const BacktestEngine& engine, double price) const;
     std::vector<NativeMarketEvent> events_after(uint64_t after_ordinal) const;
+    uint64_t event_high_water() const noexcept;
+    uint64_t terminal_receipt_high_water() const noexcept {
+        return terminal_receipt_high_water_;
+    }
+    void reserve_driver_log(std::size_t expected_points);
     int64_t decision_floor() const noexcept {
         return has_floor_ ? decision_floor_ms_ : std::numeric_limits<int64_t>::min();
     }
@@ -163,6 +178,14 @@ private:
         ObservedTicks = 2,
     };
 
+    enum class CallbackPhase : std::uint8_t {
+        None = 0,
+        PreOpen = 1,
+        Bar = 2,
+        Applied = 3,
+        Tick = 4,
+    };
+
     struct AppendDigest {
         uint64_t h = 1469598103934665603ULL;
         uint64_t count = 0;
@@ -172,21 +195,56 @@ private:
         }
     };
 
+    // Derived read-only observations for ordinary OHLC points. They are not
+    // matching state: every request/position mutation clears this cache.
+    struct CohortTargetCacheEntry {
+        native_order::RequestHandle handle{};
+        native_order::TargetObservation target{};
+    };
+
+    // R4-D L10z review fix 4: the interval lookup cache is per-consumer state,
+    // not per-thread state. Two engines sharing a thread have independent
+    // calendars/timeframes, so a timestamp-keyed cache must not be shared.
+    struct IntervalCache {
+        std::int64_t input_ts = std::numeric_limits<std::int64_t>::min();
+        std::optional<native_calendar::NativeInterval> input_interval;
+        std::int64_t script_ts = std::numeric_limits<std::int64_t>::min();
+        std::optional<native_calendar::NativeInterval> script_interval;
+        void clear() noexcept {
+            input_ts = std::numeric_limits<std::int64_t>::min();
+            input_interval.reset();
+            script_ts = std::numeric_limits<std::int64_t>::min();
+            script_interval.reset();
+        }
+    };
+
     bool failed() const noexcept;
+    bool recoverable_abort() const noexcept;
     void latch_failure(NativeFailure failure) noexcept;
     void fail(BacktestEngine& engine, NativeFailure failure) noexcept;
     void render(BacktestEngine& engine, const char* text) const;
     const NativeRunSpec* spec_ptr() const;
     bool commands_allowed() const;
     bool timeframe_args_ok(const std::string& input_tf, const std::string& script_tf) const;
+    bool has_undetected_timeframe() const noexcept;
+    bool legacy_tolerant_slot_labels() const noexcept;
+    bool uses_raw_label_partition() const noexcept;
+    static native_calendar::NativeInterval timestamp_partition(std::int64_t timestamp) noexcept;
+    std::optional<native_calendar::NativeInterval> input_interval_at(std::int64_t timestamp) const;
+    std::optional<native_calendar::NativeInterval> script_interval_at(std::int64_t timestamp) const;
+    bool validate_undetected_begin(BacktestEngine& engine, const NativeBeginArgs& args);
     bool apply_spec(BacktestEngine& engine, const NativeRunSpec& spec);
     bool projection_ok(const BacktestEngine& engine) const;
     bool begin_ready(BacktestEngine& engine, NativeRunPhase phase, int64_t initial_floor_ms);
+    bool prepare_public_begin(BacktestEngine& engine, const NativeBeginArgs& args);
+    bool apply_staged_ingress(BacktestEngine& engine);
     bool refuse_mixed_input_mode(BacktestEngine& engine, InputMode requested);
     void select_input_mode(InputMode requested);
     bool admit_public_begin(BacktestEngine& engine, const char* not_ready_text);
     bool admit_public_stream_input(BacktestEngine& engine, NativeFailureOperation operation);
-    bool preflight_bars(BacktestEngine& engine, const Bar* bars, int n, bool stream);
+    bool preflight_bars(BacktestEngine& engine, const Bar* bars, int n, bool stream,
+                        bool preserve_status = false);
+    bool preflight_intrabar_path(BacktestEngine& engine);
     void pump_batch(BacktestEngine& engine, const Bar* bars, int n);
     bool consume_confirmed_input(BacktestEngine& engine, const Bar& bar, int index, bool last);
     bool contribute_input(BacktestEngine& engine, const Bar& bar,
@@ -194,6 +252,8 @@ private:
                           int index, InputContribution kind);
     void seal_script(BacktestEngine& engine, NativeCompletionKind kind);
     void deliver_confirmed_script(BacktestEngine& engine, const Bar& bar, const NativeCoordinate& base);
+    void deliver_intrabar_script(BacktestEngine& engine, const Bar& bar,
+                                 const NativeCoordinate& base);
     void deliver_aggregate_calculation(BacktestEngine& engine, const Bar& bar,
                                        const NativeCoordinate& base);
     int64_t calculation_time(const NativeCoordinate& base) const noexcept;
@@ -203,6 +263,12 @@ private:
     void match_path(BacktestEngine& engine, const NativeDriverPoint& point,
                     bool continuous, double from_price, double to_price);
     void apply_excursion(BacktestEngine& engine, double price);
+    void invoke_bar_open_callback(BacktestEngine& engine, const Bar& bar,
+                                  const NativeDriverPoint& point);
+    bool invoke_input_callback(BacktestEngine& engine, const Bar& bar,
+                               const NativeInputContext& context);
+    bool invoke_tick_callback(BacktestEngine& engine, const Bar& bar,
+                              const NativeTickContext& context);
     void invoke_callback(BacktestEngine& engine, const Bar& bar, const NativeCoordinate& coordinate);
     uint64_t take_ordinal(BacktestEngine& engine);
     void raise_floor(int64_t t);
@@ -215,13 +281,23 @@ private:
             int64_t cycle) const;
     native_order::TargetObservation read_target(
             const BacktestEngine& engine, const native_order::LiveRequest* live) const;
+    const native_order::TargetObservation* cached_cohort_target(
+            const BacktestEngine& engine, const native_order::LiveRequest& live);
+    void clear_cohort_target_cache() noexcept;
+    void retarget_cohort_target_cache(const native_order::RequestHandle& predecessor,
+                                      const native_order::RequestHandle& successor) noexcept;
     native_order::CommandContext make_command_context(
             const BacktestEngine& engine, const native_order::Request& request,
             native_order::CommandSurface surface) const;
     void refresh_target_scalars(const BacktestEngine& engine,
                                 native_order::TargetObservation& target) const noexcept;
+    std::optional<native_order::Side> cohort_side(
+        const BacktestEngine& engine, const native_order::LiveRequest& live) const;
+    bool request_is_buy(const BacktestEngine& engine,
+                        const native_order::LiveRequest& live) const;
     bool admit_opening_inspect(const BacktestEngine& engine, double resolved_price,
                                const execution::SettlementInspection& inspect,
+                               bool skip_initial_margin,
                                native_order::MatchRejectReason* reason) const;
     void fail_preparation(BacktestEngine& engine, const native_order::PreparationError& error,
                           NativeFailureOperation operation);
@@ -268,6 +344,10 @@ private:
     void sync_history_digest() const noexcept;
     void fold_driver_digest(const NativeDriverPoint& point) const noexcept;
     void fold_account_digest(const NativeAccountObservation& row) const noexcept;
+    bool pre_open_birth_eligible(const native_order::RequestHandle&,
+                                 const NativeDriverPoint&) const noexcept;
+    void record_pre_open_birth(const native_order::Request&, const native_order::RequestHandle&);
+    void note_terminal_events(const native_order::EventRange& events) noexcept;
 
     NativeLifecycle state_{NativeUnconfigured{}};
     uint64_t consumed_high_water_ = 0;
@@ -279,13 +359,20 @@ private:
     native_calendar::SessionCalendar calendar_{};
     native_calendar::Timeframe input_tf_{};
     native_calendar::Timeframe script_tf_{};
+    std::optional<native_calendar::Timeframe> intrabar_tf_;
     native_calendar::TimeframeCompatibility pairing_{};
     NativeRunSpec applied_{};
     std::optional<NativeFxCurve> staged_fx_curve_;
+    bool staged_ingress_fx_ = false;
     bool in_callback_ = false;
+    CallbackPhase callback_phase_ = CallbackPhase::None;
+    bool preparing_begin_ = false;
     mutable bool consuming_request_ = false;
     bool draining_notifications_ = false;
     std::optional<CurrentExecutionFrame> current_frame_;
+    uint64_t pre_open_birth_point_ordinal_ = 0;
+    int64_t pre_open_birth_time_ms_ = 0;
+    std::vector<native_order::RequestHandle> pre_open_births_;
     std::vector<AppliedNotification> applied_notifications_;
     std::size_t notification_head_ = 0;
     bool processing_input_ = false;
@@ -308,15 +395,32 @@ private:
     std::vector<NativeDriverPoint> driver_log_;
     std::vector<NativeAccountObservation> account_log_;
     NativeDecisionContext callback_context_{};
+    std::optional<NativeInputContext> input_callback_context_;
+    std::optional<Bar> input_callback_bar_;
+    std::optional<NativeTickContext> tick_callback_context_;
+    std::optional<Bar> tick_callback_bar_;
+    NativeDriverStatistics driver_statistics_{};
     std::optional<native_calendar::TimezoneIdentityDescriptor> tz_identity_{};
+    // Derived receipt cursor: it can be reconstructed from the immutable
+    // command history and only lets source projections skip empty polls.
+    uint64_t terminal_receipt_high_water_ = 0;
+    std::array<CohortTargetCacheEntry, 16> cohort_target_cache_{};
+    std::size_t cohort_target_cache_size_ = 0;
+    // Derived calendar lookup cache, cleared at staged ingress (L10c).
+    mutable IntervalCache interval_cache_{};
     mutable AppendDigest history_digest_{};
     mutable AppendDigest driver_digest_{};
     mutable AppendDigest account_digest_{};
+    // A host-owned margin verdict is part of the continuation only when the
+    // generic spec actually exposes an initial-margin gate.  Source specs do
+    // not set that gate, preserving their established fingerprint while the
+    // new generic authority remains hash-visible for native hosts.
+    mutable AppendDigest precommit_digest_{};
 };
 
 inline NativeExecutionConsumer& as_native_consumer(IExecutionConsumer& consumer) {
     return static_cast<NativeExecutionConsumer&>(consumer);
 }
 
-}  // inline namespace engine_script_run_v16
+}  // inline namespace engine_script_run_v17
 }  // namespace pineforge

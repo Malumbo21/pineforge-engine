@@ -1,93 +1,62 @@
-#include <pineforge/engine.hpp>
 #include <pineforge/compat/pine/order_priority.hpp>
-#include <pineforge/source/pine_pending_intent.hpp>
+
 #include <limits>
 
 namespace pineforge::compat::pine {
+namespace {
 
-std::optional<broker::OrderPriorityDecision> OrderPriority::select(
+bool finite(double value) noexcept { return std::isfinite(value); }
+bool absent(double value) noexcept { return std::isnan(value); }
+
+} // namespace
+
+std::optional<OrderPriorityDecision> OrderPriority::select(
         const OrderPriorityContext& ctx,
-        const std::vector<source::PendingOrder>& book) const {
-    if (!attached_ || !retained_parent_first_
-        || !ctx.broker_flat || !ctx.process_orders_on_close
-        || ctx.calc_on_order_fills || ctx.coof_scheduler_active
-        || ctx.bar_magnifier_enabled || ctx.stream_warmup_mode
-        || !ctx.stream_idle || book.size() != 2) return std::nullopt;
+        const std::vector<OrderPriorityCandidate>& candidates) const {
+    if (!attached_ || !retained_parent_first_ || !ctx.broker_flat
+        || !ctx.process_orders_on_close || ctx.calc_on_order_fills
+        || ctx.coof_scheduler_active || ctx.bar_magnifier_enabled
+        || ctx.stream_warmup_mode || !ctx.stream_idle || candidates.size() != 2) {
+        return std::nullopt;
+    }
 
-    const source::PendingOrder* parent = nullptr;
-    const source::PendingOrder* child = nullptr;
-    for (const source::PendingOrder& order : book) {
-        if (order.type == OrderType::ENTRY) parent = &order;
-        else if (order.type == OrderType::EXIT) child = &order;
+    const OrderPriorityCandidate* parent = nullptr;
+    const OrderPriorityCandidate* child = nullptr;
+    for (const auto& candidate : candidates) {
+        if (candidate.kind == OrderPriorityKind::Entry) parent = &candidate;
+        else if (candidate.kind == OrderPriorityKind::Exit) child = &candidate;
     }
     if (!parent || !child) return std::nullopt;
 
-    // Preserve every legacy exclusion. Incarnation adjacency and exact book
-    // size are Pine evidence boundaries, not native dependency invariants.
-    const uint64_t cancelled_incarnation =
-        parent->recreated_after_named_cancelled_entry_incarnation;
-    const uint64_t surviving_exit_incarnation =
-        parent->named_cancel_surviving_exit_incarnation;
-    const bool parent_is_exact_fresh_stop =
-        parent->type == OrderType::ENTRY
-        && parent->created_position_side == PositionSide::FLAT
-        && (parent->replaced_order_incarnation == 0)
-        && cancelled_incarnation != 0
-        && cancelled_incarnation < parent->incarnation
-        && cancelled_incarnation != child->incarnation
-        && surviving_exit_incarnation > cancelled_incarnation
-        && surviving_exit_incarnation < parent->incarnation
+    const bool exact_parent = parent->created_flat && parent->predecessor == 0
+        && parent->recreated_after_named_cancelled != 0
+        && parent->recreated_after_named_cancelled < parent->handle.incarnation
+        && parent->recreated_after_named_cancelled != child->handle.incarnation
+        && parent->named_cancel_surviving_exit > parent->recreated_after_named_cancelled
+        && parent->named_cancel_surviving_exit < parent->handle.incarnation
         && parent->created_bar == ctx.bar_index - 1
-        && std::isnan(parent->qty)
-        && !parent->birth.from_fill()
-        && !placement_has_prior_close(*parent)
-        && !placement_at_entry_capacity(*parent)
-        && !parent->stop_limit_activated
-        && std::isfinite(parent->legs.prices().stop_price)
-        && std::isnan(parent->legs.prices().limit_price)
-        && std::isnan(parent->legs.prices().trail_points)
-        && std::isnan(parent->legs.prices().trail_price)
-        && std::isnan(parent->legs.prices().trail_offset)
-        && parent->oca_name.empty()
-        && parent->oca_type == 0;
-    const double child_qp = std::isnan(child->qty_percent)
-        ? 100.0 : child->qty_percent;
-    const bool child_is_exact_retained_bracket =
-        child->type == OrderType::EXIT
-        && !child->from_entry.empty()
-        && (child->replaced_order_incarnation != 0)
-        && child->replaced_order_incarnation
-            == surviving_exit_incarnation
-        && child->created_position_side == PositionSide::FLAT
-        && child->created_bar == ctx.bar_index - 1
-        && !child->birth.from_fill()
-        && !placement_has_prior_close(*child)
-        && !child->quantity_request.is_partial(1e-9, 1e-9)
-        && std::isnan(child->qty)
-        && child_qp >= 100.0 - 1e-9
-        && std::isfinite(child->legs.prices().stop_price)
-        && std::isfinite(child->legs.prices().limit_price)
-        && std::isnan(child->legs.prices().profit_ticks)
-        && std::isnan(child->legs.prices().loss_ticks)
-        && std::isnan(child->legs.prices().trail_points)
-        && std::isnan(child->legs.prices().trail_price)
-        && std::isnan(child->legs.prices().trail_offset)
-        && child->oca_name.empty()
-        && child->oca_type == 0;
-    const bool exact_pair = parent_is_exact_fresh_stop
-        && child_is_exact_retained_bracket
-        && child->from_entry == parent->id
-        && child->created_seq < parent->created_seq
-        && child->incarnation != 0
-        && parent->incarnation != 0
-        && parent->incarnation
-            < std::numeric_limits<uint64_t>::max()
-        && child->incarnation == parent->incarnation + 1;
-    if (!exact_pair) return std::nullopt;
-    return broker::OrderPriorityDecision{{{
-        {parent->incarnation, child->created_seq},
-        {child->incarnation, parent->created_seq},
-    }}};
+        && parent->default_quantity && !parent->birth_from_fill
+        && !parent->prior_close && !parent->at_entry_capacity
+        && !parent->stop_limit_activated && finite(parent->stop) && absent(parent->limit)
+        && absent(parent->trail_points) && absent(parent->trail_price)
+        && absent(parent->trail_offset) && parent->oca_name.empty() && parent->oca_type == 0;
+    const double child_percent = absent(child->qty_percent) ? 100.0 : child->qty_percent;
+    const bool exact_child = !child->from_entry.empty()
+        && child->predecessor == parent->named_cancel_surviving_exit
+        && child->created_flat && child->created_bar == ctx.bar_index - 1
+        && !child->birth_from_fill && !child->prior_close && !child->at_entry_capacity
+        && absent(child->requested_qty) && child_percent >= 100.0 - 1e-9
+        && finite(child->stop) && finite(child->limit)
+        && absent(child->profit_ticks) && absent(child->loss_ticks)
+        && absent(child->trail_points) && absent(child->trail_price)
+        && absent(child->trail_offset) && child->oca_name.empty() && child->oca_type == 0;
+    if (!exact_parent || !exact_child || child->from_entry != parent->id
+        || child->source_sequence >= parent->source_sequence
+        || parent->handle.incarnation == std::numeric_limits<std::uint64_t>::max()
+        || child->handle.incarnation != parent->handle.incarnation + 1) {
+        return std::nullopt;
+    }
+    return OrderPriorityDecision{parent->handle, child->handle};
 }
 
 } // namespace pineforge::compat::pine

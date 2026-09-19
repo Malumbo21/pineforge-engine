@@ -128,6 +128,13 @@ execution::AccountEffectProjection invalid_projection(execution::Status status) 
     out.status = status;
     return out;
 }
+
+// ab9714be:src/engine_execution.cpp:264/:355 — native default of
+// validate_source_lifecycle: a non-empty lifecycle is InvalidLifecycle,
+// checked after book validation and before selection/allocation.
+bool nonempty_lifecycle_refused(const execution::LifecycleEffects* lifecycle) {
+    return lifecycle && (lifecycle->pre_close || !lifecycle->removals.empty());
+}
 } // namespace
 
 struct BacktestEngine::NativeSettlementStage {
@@ -185,6 +192,9 @@ execution::Status BacktestEngine::allocate_native_settlement_closes(
         const execution::CloseScope& book_or_opening,
         double& remaining) const {
     using execution::Status;
+    const bool consume_selected_exactly = stage.use_selected
+        && !stage.flatten
+        && stage.allocation_requested == stage.selected_held;
     if (!stage.flatten || stage.scoped)
         stage.survivors.reserve(pyramid_entries_.size());
     stage.closing_indices.reserve(stage.closes ? pyramid_entries_.size() : 0);
@@ -196,7 +206,8 @@ execution::Status BacktestEngine::allocate_native_settlement_closes(
             ? stage.selected_ids.count(lot.entry_incarnation) != 0
             : selected_for_close(book_or_opening, lot);
         const auto split = next_close_split(
-            lot, stage.closes && member, stage.flatten,
+            lot, stage.closes && member,
+            stage.flatten || consume_selected_exactly,
             stage.allocation_requested, closed, remaining);
         if (split.status != Status::Applied) return split.status;
         if (split.amount == 0.0) {
@@ -260,13 +271,10 @@ void BacktestEngine::stage_native_settlement(
         fail(status);
         return;
     }
-    if (lifecycle) {
-        if (auto invalid = validate_source_lifecycle(*lifecycle)) {
-            fail(*invalid);
-            return;
-        }
+    if (nonempty_lifecycle_refused(lifecycle)) {
+        fail(Status::InvalidLifecycle);
+        return;
     }
-
     CloseScopeInspection selection;
     if (selected) {
         selection = inspect_selected_opening_set(
@@ -351,11 +359,9 @@ void BacktestEngine::stage_native_settlement(
         fail(status);
         return;
     }
-    if (lifecycle) {
-        if (auto invalid = validate_source_lifecycle(*lifecycle)) {
-            fail(*invalid);
-            return;
-        }
+    if (nonempty_lifecycle_refused(lifecycle)) {
+        fail(Status::InvalidLifecycle);
+        return;
     }
     stage.incoming = reversal.signed_units < 0.0
         ? PositionSide::SHORT : PositionSide::LONG;
@@ -405,6 +411,10 @@ void BacktestEngine::finish_native_settlement_stage(
             return;
         }
     }
+    // A caller-pinned ticket is the canonical inspected value. Allocation
+    // shares may sum one ULP away after proportional division; settlement
+    // installs the inspected ticket, while the shares retain its residue.
+    if (fill.commission_account) stage.ticket = *fill.commission_account;
     double after_qty = 0.0;
     double weighted = 0.0;
     for (const auto& lot : stage.survivors) {
@@ -465,33 +475,11 @@ execution::Result BacktestEngine::settle_reversal_with_lifecycle_v1(
     execution::PhysicalExecutionContext context;
     context.effective_time_ms = current_bar_.timestamp;
     context.interval_index = bar_index_;
-    context.preceding_exit_path_prefix = fold_exit_path_extremes_;
     if (!std::isnan(fold_exit_trail_peak_)) {
         context.preceding_exit_trail_peak = fold_exit_trail_peak_;
     }
     NativeSettlementStage stage;
     stage_native_settlement(stage, reversal, fill, &lifecycle);
-    return settle_source_staged_execution(stage, fill, lifecycle, context);
-}
-
-execution::Result BacktestEngine::settle_resolved_execution(
-        const execution::Action& action, const execution::Fill& fill) {
-    return settle_execution_with_lifecycle(action, fill, {});
-}
-
-execution::Result BacktestEngine::settle_execution_with_lifecycle(
-        const execution::Action& action, const execution::Fill& fill,
-        const execution::LifecycleEffects& lifecycle) {
-    execution::PhysicalExecutionContext context;
-    context.effective_time_ms = current_bar_.timestamp;
-    context.interval_index = bar_index_;
-    context.preceding_exit_path_prefix = fold_exit_path_extremes_;
-    if (!std::isnan(fold_exit_trail_peak_)) {
-        context.preceding_exit_trail_peak = fold_exit_trail_peak_;
-    }
-    NativeSettlementStage stage;
-    stage_native_settlement(
-        stage, action, fill, execution::Book{}, nullptr, &lifecycle);
     return settle_source_staged_execution(stage, fill, lifecycle, context);
 }
 
@@ -502,7 +490,6 @@ execution::Result BacktestEngine::settle_execution_selected_with_lifecycle(
     execution::PhysicalExecutionContext context;
     context.effective_time_ms = current_bar_.timestamp;
     context.interval_index = bar_index_;
-    context.preceding_exit_path_prefix = fold_exit_path_extremes_;
     if (!std::isnan(fold_exit_trail_peak_)) {
         context.preceding_exit_trail_peak = fold_exit_trail_peak_;
     }
@@ -593,23 +580,10 @@ execution::Result BacktestEngine::settle_source_staged_execution(
     if (const auto status = prepare_native_settlement_commit(stage, fill, context, rows);
         status != execution::Status::Applied)
         return {status};
-    // Source intraday readiness precedes all close-counter checks, including
-    // Ready opening-only calls. Invalid/NoEffect returned before this point.
-    std::optional<int> loss_day;
-    if (const auto status = on_source_close_preflight(
-            rows.closed_trades.data(), rows.closed_trades.size(), loss_day);
-        status != execution::Status::Applied)
-        return {status};
     if (const auto status = preflight_native_settlement_effects(stage, lifecycle, rows);
         status != execution::Status::Applied)
         return {status};
-    const auto result = commit_prepared_native_settlement_stage(
-        stage, fill, lifecycle, context, rows);
-    if (result.status == execution::Status::Applied && result.closed_trade_count != 0) {
-        on_source_close_observed(trades_.data() + result.first_trade_index,
-                                  result.closed_trade_count, loss_day);
-    }
-    return result;
+    return commit_prepared_native_settlement_stage(stage, fill, lifecycle, context, rows);
 }
 
 void BacktestEngine::build_native_settlement_close_rows(
@@ -704,18 +678,14 @@ execution::Status BacktestEngine::preflight_native_settlement_effects(
         const NativeSettlementStage& stage,
         const execution::LifecycleEffects& lifecycle,
         const NativeSettlementRows& rows) {
+    // Non-empty lifecycle is refused in stage_native_settlement (A41(4) /
+    // ab9714be order). Ready stages that reach here carry an empty batch.
+    (void)lifecycle;
     const auto& closed_trades = rows.closed_trades;
     validate_close_trade_counters(closed_trades.data(), closed_trades.size());
     if (stage.opening > 0.0 && !stage.survivors.empty()
         && position_entry_count_ == std::numeric_limits<int>::max())
         throw std::overflow_error("position entry counter exhausted");
-
-    const bool will_reset = stage.closed > 0.0 && stage.survivors.empty();
-    const bool will_open_quoted = stage.opening > 0.0
-        && (position_side_ == PositionSide::FLAT || stage.survivors.empty());
-    if (auto invalid = preflight_source_lifecycle(
-            lifecycle, will_reset, will_open_quoted))
-        return *invalid;
 
     const size_t events = closed_trades.size() + (stage.opening > 0.0 ? 1 : 0);
     if (stream_observe_actions_) {
@@ -740,9 +710,7 @@ execution::Result BacktestEngine::commit_prepared_native_settlement_stage(
     // Commit through the existing accounting/observation sinks. Allocation or
     // lifecycle exceptions still abort the owning engine run; this internal
     // synchronous kernel does not promise recovery/replay of a failed commit.
-    // Order: authorized pre-close events, close observations and old-cycle
-    // unbind, authorized pending removals, then quoted opening bind.
-    if (lifecycle.pre_close) apply_source_pre_close_lifecycle(*lifecycle.pre_close);
+    // Lifecycle effects are already reflected by the native request core.
     for (auto& trade : closed_trades) record_close_trade(std::move(trade));
     if (stage.closed > 0.0) {
         if (stage.survivors.empty()) {
@@ -754,7 +722,6 @@ execution::Result BacktestEngine::commit_prepared_native_settlement_stage(
             position_entry_count_ = static_cast<int>(pyramid_entries_.size());
         }
     }
-    apply_source_pending_removals(lifecycle.removals);
     if (stage.opening > 0.0) {
         const double opening_commission = stage.current_costs.back();
         PyramidEntry lot{fill.price, context.effective_time_ms, stage.opening, fill.id,

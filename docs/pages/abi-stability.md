@@ -116,75 +116,40 @@ notice:
 - The shape of internal log lines (use them for humans, not parsers).
 
 Rebuild generated and native C++ objects against matching engine headers and
-runtime. R4-C advances `BacktestEngine`, `NativeStrategyHost`, and the private
-consumer to `engine_script_run_v16`; the host capability macro is
-`PINEFORGE_HAS_NATIVE_STRATEGY_HOST_V16`. `PendingOrder` is no longer an engine
-epoch type: it is `pineforge::source::PendingOrder`, with the explicit
-`pineforge-source-adapter/v1` source-hash domain. Native request/core/event
-values remain `native_order_v4`, the private consumer identity remains
-`native-consumer/v6`, and driver types remain `native_driver_v4`.
+runtime. R4-D L1 advances `BacktestEngine`, `NativeStrategyHost`, and the
+private consumer to `engine_script_run_v17`; the host capability macro is
+`PINEFORGE_HAS_NATIVE_STRATEGY_HOST_V17`. L3b removes the source compatibility
+order type; `pineforge-source-adapter/v2` hashes adapter and scheduler state
+instead. Native request/core/event values are `native_order_v5`, the private
+consumer identity is
+`native-consumer/v7`, driver types are `native_driver_v5`, and run specs are
+`native_run_spec_v2`.
 
 | Matrix role | Internal identity |
 | --- | --- |
-| Live engine/host library | `engine_script_run_v16` |
+| Live engine/host library | `engine_script_run_v17` |
 | `host-e7cdf05` immutable provider | `engine_script_run_v15` |
-| Source extension | `pineforge-source-adapter/v1` |
+| `host-ab9714b` immutable provider | `engine_script_run_v16` |
+| Source extension | `pineforge-source-adapter/v2` |
 
-The current v16 archive is checked with five archived provider inputs: the real
-e60 R2 and 0e R3 providers, authenticated c3ed455 v13 and f736676 v14 host
-closures, and the immutable e7cdf05 v15 source-layer-base closure. The verifier
-prepares real archives from immutable sources with the current profile's
-compiler and settings. Constructor/vtable, return-only `native_events()`, host
-observation, core request, driver and current-execution callers compile before
-links are interpreted. The v15↔v16 host/source pair is a required rejection in
-both directions; v16↔v16 succeeds. Existing historical v13/v14/v15 verdicts,
-including the unchanged driver-v4 positive links where applicable, remain
-required. No ABI caller executable is run.
-
-The v15 current-execution controls have been active since landing 1c.
+The verifier prepares six immutable historical archives with the profile's
+compiler/settings and authenticates every receipt against the real archive and
+header bytes. The active transition control is deliberately narrower and
+executable: callers compiled against `host-ab9714b` v16 link to its archive,
+callers compiled against live v17 link to the live archive, and both v16→v17
+and v17→v16 links must reject the exact epoch-qualified
+`BacktestEngine::broker_state_hash` symbol. Settlement, script-host, and
+aggregate controls each exercise that pair; no caller executable is run.
 
 For the 0.14.x line, this is an internal C++ epoch transition rather than a
 public C ABI break: `PF_ABI_VERSION` remains 4 and the append-only C ABI
 guarantee remains in force.
 
-The historical transitions retain their full comparisons. The reviewed v15→v16
-transition additionally consumes the authenticated relocation manifest: it
-allows exactly the listed relocated source storage and source seams, measures
-`sizeof(source::PendingOrder)` in the source-layer row, and rejects every other
-storage, vtable, layout, header, compile, or link difference. Against the older
-providers the checker still compares, in full and unconditionally:
-
-* every engine named data declaration in source order (252 declarations, 251
-  of them non-static data members) and the entire virtual method inventory —
-  an epoch transition is never a licence to change engine storage or the
-  vtable;
-* every compiler-emitted layout word — all 789 against e60 R2 and all 793
-  against 0e R3, covering `sizeof`/`alignof` of `BacktestEngine`,
-  `PendingOrder`, the native aggregates and the selected/projection types, plus
-  the offset/size/alignment triple of each of the 251 engine data members, not
-  only the leading financial `Result`/`SettlementInspection`, status and
-  Action/CloseScope words. The receipt's `layout.comparedWords` and
-  `priorLayout.comparedWords` therefore equal their `wordCount`;
-* every frozen native header's text, with exactly four enumerated exemptions —
-  `native_order.hpp`, `native_host.hpp`, `market_driver.hpp` and
-  `execution_consumer.hpp`, the headers that legitimately advance with
-  `native_order_v4`, host v16, `native_driver_v4` and consumer v6. Each actual
-  difference is recorded in `frozenShape.exemptedHeaders` with both digests and
-  its transition; an exempted header that did not change records nothing, and
-  any other differing header still raises. The exemption table lives in one
-  module constant keyed by the reviewed historical transitions, including
-  v15→v16.
-  Every recorded exemption must also match the pinned current header bytes.
-
-`native_order_identity.hpp`, `native_run_spec.hpp` and `native_calendar.hpp`
-remain frozen after comment stripping and whitespace normalization. The identity
-header's request/core/event namespace comment is renamed in Phase 0; its
-normalized text is unchanged. No other differences in these three headers are
-exempted.
-
-Earlier v2–v10 and v12 controls remain. Reusing an uninstrumented historical
-Release archive in a sanitizer profile is refused; preparation never overwrites
-an existing provider directory or substitutes a symbol stub for a real archive.
+The relocation manifest remains a reviewed description of the v16→v17 source
+and host transition; it is not proof by itself. The proof is the authenticated
+archive/header input plus the acceptance/rejection links above. The frozen
+pending-row POD is checked separately. Preparation never overwrites an
+existing provider directory or substitutes a symbol stub for a real archive.
 
 New standalone lifecycle values and `Lifecycle` own the inline namespace
 `pineforge::exit_legs::lifecycle_v1`; new admission values, `Draft`, `Journal`
@@ -223,13 +188,13 @@ validate an erased `pf_strategy_t` handle. Use a handle only with functions from
 its creating strategy module. A fully self-contained old module can still use
 its own matching runtime; this check does not turn it into a v11 module.
 
-The integrated representation advances the generic broker fingerprint domain to
-`pineforge-broker-state/v16` and stream fingerprint version to 16; the source
-extension begins with `pineforge-source-adapter/v1`. Native
-consumer identity is `native-consumer/v6`; driver v4 is unchanged, while
-`close_scope_v1` and `native_run_spec_v1` stay frozen. Stable `RunIdentity` /
-`RequestHandle` / `Birth` remain `native_order_v1`; request, core, and event
-values own `native_order_v4`. Terms receipts, attempted terms, deferred
+The current integrated representation uses generic broker fingerprint domain
+`pineforge-broker-state/v17` and stream fingerprint version 17; the source
+extension begins with `pineforge-source-adapter/v2`. Native consumer identity
+is `native-consumer/v7`, driver values own `native_driver_v5`, and run specs own
+`native_run_spec_v2`. Stable `RunIdentity` / `RequestHandle` / `Birth` remain
+`native_order_v1`; request, core, and event values own `native_order_v5`.
+Terms receipts, attempted terms, deferred
 remaining/allowance state, and a staged FX-curve digest contribute through the
 native continuation hash. Lifecycle definitions, generations, obligations and
 replay receipts, plus causal journal state remain represented. Existing

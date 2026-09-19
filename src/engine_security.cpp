@@ -37,7 +37,11 @@ void BacktestEngine::register_security_eval(int sec_id, const std::string& reque
         int lower_seconds = 0;
         if (supports_lower_tf_emulation(evaluator_input_tf, requested_tf,
                                         &lower_ratio, &lower_seconds)) {
-            ensure_supported_lower_tf_emulation_flags(lookahead_on, gaps_on);
+            // Registration precedes the final input-timeframe validation and
+            // cannot yet distinguish request.security_lower_tf from a plain
+            // request.security evaluator. The latter retains its own
+            // lookahead/gaps contract, so the lower-TF-array restriction is
+            // applied only after that identity is known below.
             state.lower_tf_requested = true;
             state.lower_tf_emulation = true;
             state.lower_tf_ratio = lower_ratio;
@@ -149,9 +153,8 @@ void BacktestEngine::validate_security_timeframes(const std::string& input_tf) {
             input_tf, state.tf, &lower_ratio, &lower_seconds);
         if (ltf_supported && state.lower_tf_array_requested) {
             // Only request.security_lower_tf may opt into LTF emulation.
-            // request.security with a finer TF must be rejected even
-            // when the ratio happens to be an integer — see the
-            // finer-than-input check below.
+            // Scalar request.security remains a validate-time refusal even
+            // when registration recognized an integer-divisor lower TF.
             state.lower_tf_requested = true;
             ensure_supported_lower_tf_emulation_flags(state.lookahead_on, state.gaps_on);
             state.lower_tf_emulation = true;

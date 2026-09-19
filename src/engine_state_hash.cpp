@@ -10,9 +10,18 @@ void BacktestEngine::hash_source_extension(BrokerStateHashSink& sink) const {
 }
 
 uint64_t BacktestEngine::broker_state_hash() const {
+    return broker_state_hash_projection();
+}
+
+uint64_t BacktestEngine::broker_state_hash_projection() const {
+    return broker_state_hash_from_execution_hash(execution_consumer().continuation_hash());
+}
+
+uint64_t BacktestEngine::broker_state_hash_from_execution_hash(
+        std::uint64_t execution_hash) const {
     BrokerStateHashSink f;
-    f.s("pineforge-broker-state/v16");
-    f.u(execution_consumer().continuation_hash());
+    f.s("pineforge-broker-state/v17");
+    f.u(execution_hash);
 
     // --- Position core ---
     f.i(static_cast<int64_t>(position_side_));
@@ -56,7 +65,6 @@ uint64_t BacktestEngine::broker_state_hash() const {
     }
 
     // A31 residue: these stage-coordinator inputs remain physical/generic.
-    f.b(fold_exit_path_extremes_);
     f.d(fold_exit_trail_peak_);
     f.d(trail_best_price_);
 

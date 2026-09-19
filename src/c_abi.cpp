@@ -217,7 +217,7 @@ extern "C" {
  * engine's per-lot range-end rows themselves matched TV (xau-grid 6/6,
  * silicon 9/9 rows). The row is built by build_close_trade from the open
  * pyramid lot, so it carries that lot's entry_incarnation like any other
- * close. No struct changed: PF_ABI_VERSION stays 3. */
+ * close. No struct changed by this accessor (PF_ABI_VERSION is 4 since the native lowering). */
 PF_API uint64_t strategy_closed_trade_entry_incarnation(
         pf_strategy_t s, int trade_index) {
     if (!s) return 0;
@@ -473,8 +473,8 @@ PF_API const pf_field_desc_t* strategy_pending_order_layout(int* count) {
 
 /* ABI v4 live-runtime surface (task 8, spec 3.6): engine-computed derived
  * order values and position scalars -- pure const reads of the engine's own
- * sizing / admission / level-resolution predicates
- * (BacktestEngine::probe_fill_qty & co., src/engine_fills.cpp). NULL-handle
+ * sizing / admission / level-resolution predicates supplied by the native
+ * request core plus the source adapter projection. NULL-handle
  * convention of the pf_live group: -1 for an int return, NaN for a double,
  * with nothing written through the out-pointers. */
 PF_API int strategy_pending_order_fill_qty(pf_strategy_t s, int index, double fill_price,

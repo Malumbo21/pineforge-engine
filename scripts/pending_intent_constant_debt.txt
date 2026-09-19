@@ -1,0 +1,5 @@
+# DELTA P1-5/L8d fail-closed bridge to the concurrent L8b projection repair.
+# Each row is currently zeroed only by copy_v1's POD memset. The checker
+# requires this set to be exact: a new constant fails, and any L8b live fold
+# makes the corresponding row stale so integration must delete it.
+# (empty since MERGE-L8: every field is projected live by the L8b lifecycle/reservation repair)
