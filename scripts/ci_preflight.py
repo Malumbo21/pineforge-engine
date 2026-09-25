@@ -33,7 +33,7 @@ from ci_verify import ROOT, source_guard_commands
 ACTIONLINT_VERSION = '1.7.12'
 # The names live only in tests/CMakeLists.txt. A digest pins that measured
 # population without maintaining a second row list in this Python guard.
-PR_SLOW_ROWS_SHA256 = '90f8932f921579c55561e1af962610e0e311d1f93f28722a4c5931d7b6f7fb53'
+PR_SLOW_ROWS_SHA256 = 'c1abd9bdd0c540398eb5e0870a0f652b12743d653eafb5c4ee9ee94ca6dc4cf0'
 
 
 def _jobs(workflow: str) -> dict[str, str]:
@@ -102,11 +102,32 @@ def ci_workflow_findings(ci: str, native: str, promote: str, cmake: str) -> list
             or '.["pineforge/parity"] == "success"' not in promote
             or '/check-runs' in promote):
         findings.append('baseline promotion must require the latest two head statuses')
+    # PRs are squash-merged, so the PR head is never an ancestor of the base
+    # branch. The merge commit (the event's merge_commit_sha, or the dispatch
+    # input) must be on the base branch, carry the verified PR head's tree and
+    # still be the base branch's tree; every skip exits before promotion.
+    merge_env = ('MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha'
+                 ' || github.event.inputs.merge_commit }}')
+    head_env = 'HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.inputs.pr_head }}'
+    if (promote.count(merge_env) != 2 or promote.count(head_env) != 3
+            or 'github.event.pull_request.head.sha || github.event.inputs.merge_commit' in promote
+            or '      pr_head:\n' not in promote
+            or 'git merge-base --is-ancestor "$MERGE_SHA" "origin/$BASE_REF"' not in promote
+            or '--is-ancestor "$HEAD_SHA"' in promote
+            or 'merge_tree=$(git rev-parse "$MERGE_SHA^{tree}")' not in promote
+            or 'head_tree=$(git rev-parse "$HEAD_SHA^{tree}")' not in promote
+            or 'base_tree=$(git rev-parse "origin/$BASE_REF^{tree}")' not in promote
+            or 'if [ "$merge_tree" != "$head_tree" ]; then' not in promote
+            or 'if [ "$base_tree" != "$merge_tree" ]; then' not in promote
+            or promote.count('echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0') != 4
+            or '--merge-commit "$MERGE_SHA" --head-sha "$HEAD_SHA" --ci-head "$HEAD_SHA"'
+            not in promote):
+        findings.append('baseline promotion must admit a squash merge by tree equality only')
     blocks = re.findall(r'^set\(PINEFORGE_PR_SLOW_TESTS\n(.*?)^\)', cmake,
                         re.MULTILINE | re.DOTALL)
     names = re.findall(r'^    (test_[A-Za-z0-9_]+)$', blocks[0], re.MULTILINE) if len(blocks) == 1 else []
     canonical = '\n'.join(names) + '\n'
-    if (len(blocks) != 1 or len(names) != 27 or len(set(names)) != 27
+    if (len(blocks) != 1 or len(names) != 28 or len(set(names)) != 28
             or hashlib.sha256(canonical.encode()).hexdigest() != PR_SLOW_ROWS_SHA256
             or cmake.count('APPEND PROPERTY LABELS slow') != 1
             or 'set_property(TEST ${_pf_slow_test} APPEND PROPERTY LABELS slow)' not in cmake
@@ -188,6 +209,8 @@ def check_commands(source: Path) -> list[tuple]:
         ('native-tempdir-tests',
          [sys.executable, str(source / 'scripts/check_native_cpp_versions.py'),
           '--self-test-tempdir']),
+        ('dangling-comment-names-tests',
+         [sys.executable, str(source / 'scripts/test_check_dangling_comment_names.py')]),
         ('doc-anchors-tests',
          [sys.executable, str(source / 'scripts/test_check_doc_anchors.py')]),
         ('doc-anchors',

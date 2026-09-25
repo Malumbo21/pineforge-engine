@@ -45,6 +45,20 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* Public C words with enum types must retain their published width even when
+ * a consumer enables -fshort-enums. The C99 fallback keeps the strict-C99
+ * header build valid; the two newer languages get a native static assertion. */
+#if defined(__cplusplus)
+#define PF_STATIC_ASSERT(condition) static_assert((condition), #condition)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define PF_STATIC_ASSERT(condition) _Static_assert((condition), #condition)
+#else
+#define PF_STATIC_ASSERT_JOIN_(a, b) a##b
+#define PF_STATIC_ASSERT_JOIN(a, b) PF_STATIC_ASSERT_JOIN_(a, b)
+#define PF_STATIC_ASSERT(condition) \
+    typedef char PF_STATIC_ASSERT_JOIN(pf_static_assertion_, __LINE__)[(condition) ? 1 : -1]
+#endif
+
 /* ── Version ─────────────────────────────────────────────────────── */
 /* Macros (PINEFORGE_VERSION_MAJOR / _MINOR / _PATCH / _STRING / _FULL,
  * PINEFORGE_GIT_SHA) live in the generated <pineforge/version.h>. */
@@ -186,8 +200,8 @@ typedef struct pf_trade_s {
                              *   the previous short form (entry/exit-1)*100 was wrong on
                              *   large moves. Sign always matches pnl. */
     int     is_long;        /**< 1 if long, 0 if short. */
-    double  max_runup;      /**< Peak favorable price travel during the trade ($/unit qty). */
-    double  max_drawdown;   /**< Peak adverse  price travel during the trade ($/unit qty). */
+    double  max_runup;      /**< Peak favorable whole-trade excursion, account currency, net of entry fees. */
+    double  max_drawdown;   /**< Peak adverse whole-trade excursion, account currency, net of entry fees. */
     double  qty;            /**< Filled quantity. */
     double  commission;     /**< Entry+exit commission actually deducted from pnl
                              *   (account currency). pnl is already net of this. */
@@ -432,24 +446,24 @@ typedef struct pf_report_s {
      * Loss-side fields are positive magnitudes. Undefined values are NaN
      * (see per-field docs). */
     pf_metrics_t        metrics;
-    /* Per-script-bar equity curve. time_ms is the script-bar OPEN
+    /* Per-script-bar equity curve (bare host: KernelRecorded); time_ms is the script-bar OPEN
      * timestamp; equity = initial_capital + net_profit + open_profit at
-     * bar close. Heap-allocated; freed by report_free. len ==
-     * script_bars_processed, EXCEPT after a mid-run error (check
-     * strategy_get_last_error): an exception can truncate the curve, and
-     * metrics then describe the truncated prefix. NOTE int64_t length
-     * (ctypes: c_int64). */
+     * bar close. Free via #report_free or #strategy_native_report_free_v1.
+     * On a completed KernelRecorded run len == script_bars_processed; a
+     * Failed or Aborted run can expose a shorter prefix (check
+     * strategy_get_last_error), and metrics describe that prefix. NOTE int64_t
+     * length (ctypes: c_int64). */
     pf_equity_point_t*  equity_curve;
     int64_t             equity_curve_len;
-    /* Per-script-bar broker-state hash, filled when
-     * #strategy_set_broker_state_hash_recording is on; freed by
-     * #report_free. NULL / 0-length when recording was off (default) or no
-     * script bars were dispatched. When populated, len ==
-     * script_bars_processed, and the last element equals
-     * #strategy_broker_state_hash's value at the end of the run for a
-     * compiled Pine strategy and a bare native host alike: the recorder
-     * latches the continuation at each report point, and the scalar read
-     * after the run folds the last latch. ABI v4. */
+    /* Per-script-bar broker-state hash when recording is on and report
+     * points exist (KernelRecorded for a bare native host); freed by
+     * #report_free or #strategy_native_report_free_v1. NULL / 0-length when off or no points were recorded.
+     * On a completed run, len == script_bars_processed and the last row
+     * equals #strategy_broker_state_hash after the run for Pine and bare
+     * native hosts alike: each point latches the continuation, and the
+     * scalar folds the last latch. A Failed or Aborted run can have a
+     * shorter recorded prefix; its last row need not equal the scalar.
+     * ABI v4. */
     uint64_t*           broker_state_hash;
     int64_t             broker_state_hash_len;
 } pf_report_t;
@@ -502,11 +516,16 @@ typedef enum pf_native_spec_optional_e {
  *  #pf_native_close_execution_t and `allowed_open_directions` a
  *  #pf_native_open_directions_t (zero-filled, that word admits no opening at
  *  all). #strategy_configure_native_v1 hands the whole value to the kernel,
- *  which answers every refusal with -1 and a Failed native handle:
- *  PF_NATIVE_FAILURE_INVALID_SPECIFICATION for an invalid spec,
- *  PF_NATIVE_FAILURE_CONTRACT for a Ready or Running handle or a refused reuse
- *  (a handle an abort already failed keeps that failure). It has no typed
- *  out-parameters, and no configure call accepts a handle it failed. The
+ *  which answers an invalid spec with -1 and a Failed native handle
+ *  (PF_NATIVE_FAILURE_INVALID_SPECIFICATION). A Ready handle still fails by
+ *  the kernel's Contract rule. A Running handle is refused at the C boundary
+ *  without changing its native state, including from a callback. A Completed
+ *  handle or one Failed by a cooperative abort may be configured for another
+ *  run outside callbacks; the kernel judges reuse constraints (an aborted
+ *  handle is reused with the same session key and a higher run number), and a
+ *  handle whose configure call failed remains Failed. A Completed
+ *  host's `on_hash_extension` callback cannot reconfigure it during a read-only hash query.
+ *  This call has no typed out-parameters. The
  *  extended path validates before configuring: #strategy_configure_native_ext_v1
  *  keeps the handle Unconfigured on a validation refusal, and
  *  #strategy_configure_native_ext_result_v1 additionally writes the exact
@@ -548,6 +567,7 @@ typedef enum pf_native_fx_curve_error_e {
     PF_NATIVE_FX_CURVE_ERROR_ALLOCATION_FAILURE     = 4,
     PF_NATIVE_FX_CURVE_ERROR_WRONG_PHASE            = 5
 } pf_native_fx_curve_error_t;
+PF_STATIC_ASSERT(sizeof(pf_native_fx_curve_error_t) == 4);
 
 /** Stage an immutable account-currency FX curve on a Ready native handle.
  *
@@ -738,11 +758,11 @@ PF_API uint64_t strategy_closed_trade_entry_incarnation(
  *  lifecycle uses close-only strategy calculation (the Pine strategy default)
  *  while resting broker orders are evaluated on every normalized trade.
  *
- *  This compiled-strategy C entry point rejects calc_on_order_fills, historical
- *  probe/tail overrides, timestamped FX and auxiliary/native security feeds.
- *  The hand-written `NativeStrategyHost` stream API has its own generic
- *  contract and accepts the native FX curve, auxiliary feeds and calculation
- *  trigger where its run specification permits them.
+ *  A generated Pine strategy using this entry point rejects calc_on_order_fills,
+ *  historical probe/tail overrides, timestamped FX and auxiliary/native
+ *  security feeds. A C native host can also use this entry point and accepts
+ *  the native FX curve, auxiliary feeds and calculation trigger where its
+ *  run specification permits them.
  *  @return 0 on success, -1 on failure. Inspect #strategy_get_last_error. */
 PF_API int strategy_stream_begin(pf_strategy_t s,
                                  const pf_bar_t* warmup_bars,
@@ -947,8 +967,8 @@ PF_API void strategy_set_probe_suppress_tail_logic(pf_strategy_t s, int on);
 PF_API void strategy_set_path_order(pf_strategy_t s, int mode);
 /** The dual-entry-stop arbitration decided on the LAST bar the most recent
  *  run() dispatched: a flat position resting exactly one long stop-only
- *  ENTRY and one short stop-only ENTRY, both touched on that bar
- *  (`dual_entry_stop_path_winner`, internal). Values mirror
+ *  ENTRY and one short stop-only ENTRY, both touched on that bar.
+ *  Values mirror
  *  `internal::DualEntryStopPathWinner`'s enumerator order:
  *    - `0` None -- no such pair was arbitrated on that bar (not flat, no
  *      matching pair, or neither/only one side touched).
@@ -975,12 +995,12 @@ PF_API void strategy_set_path_order(pf_strategy_t s, int mode);
  *  value; it is a silent no-op under the COOF scheduler, mirroring
  *  #strategy_set_probe_suppress_tail_logic's dispatch-path-scope caveat. */
 PF_API int strategy_last_bar_dual_entry_path(pf_strategy_t s);
-/** Toggle per-script-bar broker-state hash recording (spec §3.4, ABI v4).
+/** Toggle per-report-point broker-state hash recording (spec §3.4, ABI v4).
  *
  *  When @p on is non-zero, every subsequent run() appends
  *  #strategy_broker_state_hash's value to pf_report_t::broker_state_hash
- *  immediately after each script bar is dispatched, so the array's length
- *  matches pf_report_t::script_bars_processed. Cleared (recorded array
+ *  after each report point (KernelRecorded for bare hosts); completed runs
+ *  match pf_report_t::script_bars_processed, failed ones may not. Cleared (recorded array
  *  emptied, not the flag itself) at the start of every run(); the flag is
  *  persistent configuration, like #strategy_set_realtime_tail, and stays
  *  set until a caller passes @p on == 0.
@@ -1081,16 +1101,16 @@ typedef enum pf_fill_qty_partition_e {
  *      over-cap add); or what one of the two MARKET reversal kernels
  *      opens -- a same-bar-market member against an opposite live position
  *      opens the remainder `sbmt_tx_qty - min(sbmt_tx_qty, live qty)`
- *      (`apply_same_bar_market_tx_reversal`), and the exact SHORT-seed
+ *      (the same-bar market reversal path), and the exact SHORT-seed
  *      collision's final short re-opens the residual
  *      `pyramid_entries[0].qty - pyramid_entries[1].qty` after closing both
- *      lots (`short_seed_collision_final_short_is_live`). Both kernels are
+ *      lots (the short-seed collision path). Both kernels are
  *      modelled; each reports `close_only` 1 when it opens nothing.
  *    - `2` DEFAULT_STOP_PLACEMENT -- the DEFAULT percent_of_equity <= 100
  *      pure STOP entry's placement size (`default_stop_placement_qty`,
- *      round-7 family K), when `use_default_stop_placement_qty` says the
+ *      round-7 family K), when the placement-size rule says the
  *      fill consumes it: created flat, filling from flat, positive fill.
- *    - `3` AT_FILL -- default sizing at the slipped fill (`calc_qty`).
+ *    - `3` AT_FILL -- default sizing at the slipped fill.
  *  @p close_only receives 1 when the kernel's close-only predicate fires
  *  -- the fill closes against the live opposite position and that
  *  predicate opens no leg of its own: the order's
@@ -1101,17 +1121,17 @@ typedef enum pf_fill_qty_partition_e {
  *  same-cycle frozen explicit-FIXED transaction the close consumes exactly,
  *  a finalized flat MARKET pair against an opposite position, or one of the
  *  two reversal kernels above opening nothing. Where the order was created
- *  FLAT the engine's close-only branch is `close_opposite_then_enter`: a
+ *  FLAT the engine's close-only branch can open a remainder: a
  *  transaction larger than the live position still opens the remainder, so
  *  a consumer compares @p qty with the live position. A replaced
- *  default-percent short (`replaced_percent_short_market_is_live`) is
- *  dispatched `close_opposite_then_enter` with its `frozen_default_qty`:
+ *  default-percent short is dispatched
+ *  with its `frozen_default_qty`:
  *  @p qty is that transaction, @p close_only 0. The probe answers for the
  *  order filling against the CURRENT book and position; fills that an
  *  earlier order in the same pass would make first are not simulated.
  *  NOT folded into @p qty: the deferred-flip
- *  carry (`tv_carry_qty`, added by `enter_market_from_flat` for a priced
- *  entry firing from FLAT whose placement side is the opposite of the
+ *  carry (`tv_carry_qty`, added on a priced entry from FLAT whose
+ *  placement side is the opposite of the
  *  requested side) -- read `tv_carry_qty` / `created_position_side` from
  *  the mirror. Returns 0 on success; 1 -- with @p qty NaN, @p close_only 0,
  *  @p partition -1 (#PF_FILL_QTY_PARTITION_EXIT) -- when the order is an EXIT (its fill quantity is
@@ -1125,10 +1145,10 @@ PF_API int strategy_pending_order_fill_qty(pf_strategy_t s, int index, double fi
  *  (`profit_ticks` / `loss_ticks` / `trail_points`) resolve now (ABI v4,
  *  task 8): entries, plain orders and exits with an empty `from_entry`
  *  always; an exit bound to a `from_entry` only once that id has filled in
- *  the CURRENT position cycle -- the gate the engine's own
- *  `materialize_relative_exit_prices_for_live_position` and eligibility
- *  pass share. 0 otherwise; -1 when @p s is NULL or @p index is out of
- *  range. */
+ *  the CURRENT position cycle -- the same condition the level-resolution
+ *  and eligibility passes use.
+ *  0 otherwise; -1 when @p s is NULL or
+ *  @p index is out of range. */
 PF_API int strategy_pending_order_level_resolved(pf_strategy_t s, int index);
 /** The price levels the @p index-th resting order would fire at, as the
  *  engine's fill path resolves them (ABI v4, task 8). A leg the order
@@ -1229,12 +1249,12 @@ typedef enum pf_close_cause_e {
  *  max-intraday-loss (4) and filled-order-cap (5) rows get their value (the
  *  adapter classifies its own bracket rows by order family, so it clears the
  *  kernel's `2` on them first); then the row's `exit_from_bracket` flag -- true
- *  only for a REAL `strategy.exit` leg, either an `OrderType::EXIT` fill
+ *  only for a REAL `strategy.exit` leg, either an exit-order fill
  *  whose id does NOT carry the internal `"__close__"` prefix that a deferred
  *  `strategy.close`/`close_all` order is also given (that path reuses the
- *  same `OrderType::EXIT` fill machinery), or a whole-position bracket
+ *  same exit fill machinery), or a whole-position bracket
  *  revived and fired at the margin-call event price
- *  (`revive_position_brackets_after_margin_call_partial`) -- -> 2;
+ *  (through the margin-call bracket revival) -- -> 2;
  *  otherwise 1.
  *  A Pine/source run's values are unchanged. A bare native host that declares
  *  a kernel margin model now reads `3` for its own liquidation rows (and `4`

@@ -865,7 +865,9 @@ struct CancelResult {
 /// submits again. OpeningDirection, MaxAbsUnits, MaxOpenLots, InitialMargin and
 /// RiskLimit are the run's admission gates; TermsUnresolved is a host-sized or
 /// basis-sized quantity that could not be resolved; NoOppositeExposure and
-/// InvalidTerms are shapes the answered terms cannot take.
+/// InvalidTerms are shapes the answered terms cannot take;
+/// UnrepresentableQuantity is a quantity the settlement cannot book exactly on
+/// the book it met.
 enum class MatchRejectReason : std::uint8_t {
     NonpositivePrice = 0,
     OpeningDirection = 1,
@@ -879,6 +881,20 @@ enum class MatchRejectReason : std::uint8_t {
     /// An opening refused while the run spec's generic risk limits are
     /// blocking (L9). Reduces never reach this gate.
     RiskLimit = 9,
+    /// The settlement's inspection answered execution::Status::
+    /// UnrepresentableQuantity: a close split binary64 cannot hold (a rest
+    /// below half an ulp of the lot it ends in, a whole lot that cannot
+    /// decrement the rest or move the running sum), a reduction or transaction
+    /// the position absorbs, or an opening the surviving book absorbs; or the
+    /// request core cannot take the fill off the request's own units
+    /// (CoreFailure::NonrepresentableQuantity: a scope of dust closed by a far
+    /// larger request, a point budget too small to move its remaining units);
+    /// or what an off-grid Reduce the grid admitted as a FIFO boundary of its
+    /// scope settles no longer closes whole lots of the book it meets
+    /// (CommandContext::units_are_scope_boundary). The request ends here,
+    /// nothing moves, and the run goes on; the settlement's and the core's
+    /// cases stopped the whole run before R5 lane K-ULP4.
+    UnrepresentableQuantity = 10,
 };
 
 /// Which price a candidate is being offered at: the point's own price, or the
@@ -958,6 +974,10 @@ enum class CoreFailure : std::uint8_t {
     StaleHandle = 4,
     UnsupportedTransition = 5,
     ConflictingReceipt = 6,
+    /// A group deduction's pending total that overflows binary64 (or a
+    /// non-finite reservation, which a valid run does not reach). A deduction
+    /// binary64 cannot take off its recipient is absorbed instead (R5 lane
+    /// K-ULP5); it failed the run with this discriminator before.
     UnrepresentableReservation = 7,
     InvalidScope = 8,
     InvalidProposal = 9,
@@ -1060,6 +1080,12 @@ struct NoEffectEvent {
     const Birth& birth() const noexcept { return definition->birth; }
 };
 
+/// One candidate's execution terms, recorded. For a request whose units were
+/// deferred it also binds them: it spends the pending group chain
+/// (`prior_adjustment_ids`, `pending_total`), takes `effective_deduction` off the
+/// resolved units and leaves `remaining_after`. That deduction is 0 with a
+/// positive `pending_total` and positive resolved units when binary64 cannot
+/// take the total off them -- absorbed, and the units stand (R5 lane K-ULP5).
 struct TermsResolvedEvent {
     uint64_t ordinal = 0;
     DefinitionRef definition;
@@ -1153,6 +1179,15 @@ struct ExecutionAppliedEvent {
     }
 };
 
+/// A group effect's deduction from a live sibling whose remaining units are
+/// known (GroupEffect::Reduce): `requested_delta` is the member fill's
+/// `filled_working`, `actual_deduction` the part taken -- capped at `before`,
+/// which then cancels the sibling -- and `after` is fl(before -
+/// actual_deduction). A deduction binary64 cannot take off `before` (at most
+/// half an ulp of it: fl(before - d) is `before`) is absorbed (R5 lane K-ULP5):
+/// `actual_deduction` is 0 and `after` equals `before`, the exact binary64
+/// result, and the member's fill stands. A deduction that is taken is positive,
+/// so an `actual_deduction` of 0 names an absorbed one.
 struct ReservationReducedEvent {
     uint64_t ordinal = 0;
     DefinitionRef definition;
@@ -1165,6 +1200,14 @@ struct ReservationReducedEvent {
     RemainingProjection after = RemainingProjectionUnits{};
 };
 
+/// A group effect's deduction deferred into a sibling whose units are not known
+/// yet: its pending total grows by `deferred_delta`, in commit order, and the
+/// receipts chain back through `previous_pending_receipt` until the terms or
+/// the owner fill that binds the sibling's units takes the total off them. A
+/// fill the total cannot move (fl(total + fill) is the total) is absorbed (R5
+/// lane K-ULP5): `deferred_delta` is 0, `pending_after` is `pending_before` and
+/// the event joins no chain. A total below half an ulp of a later fill rounds
+/// into it, as binary64 addition does.
 struct DeferredGroupAdjustmentEvent {
     uint64_t ordinal = 0;
     DefinitionRef definition;
@@ -1179,7 +1222,10 @@ struct DeferredGroupAdjustmentEvent {
 
 /// A Reduce{OwnerOpenedUnits} was bound, at its owner's fill, to what that fill
 /// opened. It is how a bracket child's size becomes a number, and it precedes the
-/// ArmedEvent of the same drain.
+/// ArmedEvent of the same drain. `effective_deduction` is the part of the child's
+/// pending group total taken off `source_units`; it is 0 with a positive
+/// `pending_total` when binary64 cannot take that total off them -- absorbed, and
+/// the owner's units stand (R5 lane K-ULP5).
 struct QuantityBoundEvent {
     uint64_t ordinal = 0;
     DefinitionRef definition;
@@ -1405,6 +1451,18 @@ struct CommandContext {
     std::optional<double> sizing_scope;
     std::optional<double> sizing_price;
     bool sizing_admissible = true;
+    /// A Reduce's ExplicitUnits are a FIFO boundary of its scope: the binary64
+    /// sum, in book order, of the scope's lots through one of them -- the head
+    /// lot's own size, a prefix, the whole scope. Such a quantity is on the
+    /// quantity grid whatever the grid predicate answers: these are the book's
+    /// own quantities, which settlement arithmetic can move off any decimal
+    /// grid; closing them takes whole lots and splits none (R5 lane K-ULP4).
+    /// The execution consumer measures it at submit, for a request of
+    /// ImmediateRemaining capacity; its candidate settles what then remains
+    /// only on the grid, at a boundary of the scope as it stands or at least at
+    /// its held total, and refuses anything else (MatchRejectReason::
+    /// UnrepresentableQuantity). Appended last, like the members above.
+    bool units_are_scope_boundary = false;
 };
 
 struct EvaluationContext {
@@ -1812,7 +1870,9 @@ public:
                                   const EvaluationContext& context,
                                   const TargetObservation& observation);
     /// Pure arithmetic over the cached pending total. Outputs are assigned only
-    /// after every validation and subtraction succeeds.
+    /// after every validation and subtraction succeeds. A total binary64 cannot
+    /// take off the resolved units is absorbed: the deduction is 0 and the
+    /// units stand (R5 lane K-ULP5).
     static bool effective_host_units(const PendingAdjustments& pending,
                                      double resolved_units,
                                      double* deduction,

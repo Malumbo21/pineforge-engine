@@ -13,40 +13,40 @@ then `run` or `stream_*`. Submit from native begin/bar callbacks, or between
 realtime inputs on the same thread. Do not override the inherited `on_bar`
 (it is `final` and refused). Do not write protected engine fields.
 
-**The callbacks.** Only `on_native_bar` (`native_host.hpp:874`) is
+**The callbacks.** Only `on_native_bar` (`native_host.hpp:881`) is
 pure-virtual: it is the script-bar calculation, and a host that overrides
 nothing else is a complete, correct host — every other callback below has a
 default that is the established behaviour. The surface is **not** close-only.
 
 | callback | when | section |
 |---|---|---|
-| `prepare_native_begin` (`native_host.hpp:846`) | once, with the begin's own arguments, before the run starts | *Lifecycle and run identity* |
-| `on_native_run_begin` (`native_host.hpp:853`) | once, after the reset, before any bar; the one place `declare_timeframe_subscriptions` and `declare_auxiliary_feed` are legal | *Higher-timeframe series for native hosts* |
-| `on_native_input` (`native_host.hpp:856`) | once per accepted confirmed input, before it is aggregated or matched | *Calendar, session, timeframes, warmup* |
-| `on_native_tick` (`native_host.hpp:859`) | once per accepted realtime print, before it is matched | *Batch OHLCV vs ticks vs quiet* |
-| `on_native_timeframe_bar` (`native_host.hpp:866`) | once per delivered bucket of a declared series | *Higher-timeframe series for native hosts* |
-| `on_native_bar_open` (`native_host.hpp:870`) | at the modeled opening, before that point's matching pass | *Native requests* (and its lookahead warning) |
-| `on_native_bar` (`native_host.hpp:874`) | the script bar's own calculation | *Calculation timing* |
-| `on_native_recalculate` (`native_host.hpp:893`) | every calculation of the run, tagged with its reason; the default forwards to `on_native_bar` | *Calculation timing* |
-| `on_native_sub_bar` (`native_host.hpp:908`) | after each retained lower-timeframe sub-bar's whole path | *Sub-bars* |
-| `on_native_applied` (`native_host.hpp:918`) | after each applied execution — the calculate-on-fill point | *Native requests* |
-| `on_native_margin_call` (`native_host.hpp:981`) | right after the `on_native_applied` of a kernel liquidation's own fill | *Margin and liquidation* |
+| `prepare_native_begin` (`native_host.hpp:853`) | once, with the begin's own arguments, before the run starts | *Lifecycle and run identity* |
+| `on_native_run_begin` (`native_host.hpp:860`) | once, after the reset, before any bar; the one place `declare_timeframe_subscriptions` and `declare_auxiliary_feed` are legal | *Higher-timeframe series for native hosts* |
+| `on_native_input` (`native_host.hpp:863`) | once per accepted confirmed input, before it is aggregated or matched | *Calendar, session, timeframes, warmup* |
+| `on_native_tick` (`native_host.hpp:866`) | once per accepted realtime print, before it is matched | *Batch OHLCV vs ticks vs quiet* |
+| `on_native_timeframe_bar` (`native_host.hpp:873`) | once per delivered bucket of a declared series | *Higher-timeframe series for native hosts* |
+| `on_native_bar_open` (`native_host.hpp:877`) | at the modeled opening, before that point's matching pass | *Native requests* (and its lookahead warning) |
+| `on_native_bar` (`native_host.hpp:881`) | the script bar's own calculation | *Calculation timing* |
+| `on_native_recalculate` (`native_host.hpp:901`) | every calculation of the run, tagged with its reason; the default forwards to `on_native_bar` | *Calculation timing* |
+| `on_native_sub_bar` (`native_host.hpp:916`) | after each retained lower-timeframe sub-bar's whole path | *Sub-bars* |
+| `on_native_applied` (`native_host.hpp:926`) | after each applied execution — the calculate-on-fill point | *Native requests* |
+| `on_native_margin_call` (`native_host.hpp:989`) | right after the `on_native_applied` of a kernel liquidation's own fill | *Margin and liquidation* |
 
 **The answering hooks** — each is consulted, and each has a default that is
-the kernel's own answer: `resolve_execution_terms` (`native_host.hpp:927`),
-`validate_execution_precommit` (`native_host.hpp:940`),
-`resolve_margin_requirement` (`native_host.hpp:956`), `margin_check_allowed`
-(`native_host.hpp:968`), `resolve_margin_call_units` (`native_host.hpp:975`),
-`resolve_anchored_level` (`native_host.hpp:992`), `owns_lot_excursions` /
-`closed_lot_excursion` (`native_host.hpp:1010`) and the hash seam
+the kernel's own answer: `resolve_execution_terms` (`native_host.hpp:935`),
+`validate_execution_precommit` (`native_host.hpp:948`),
+`resolve_margin_requirement` (`native_host.hpp:964`), `margin_check_allowed`
+(`native_host.hpp:976`), `resolve_margin_call_units` (`native_host.hpp:983`),
+`resolve_anchored_level` (`native_host.hpp:1000`), `owns_lot_excursions` /
+`closed_lot_excursion` (`native_host.hpp:1018`) and the hash seam
 `hash_host_extension`. Each is documented beside the feature it shapes.
 
 **Declaring a hook the host does not have.** Two of those defaults still cost
 the kernel work at every bar or fill. A host whose `on_native_bar_open` does
 nothing says so with `declare_native_bar_open_hook(false)`
-(`native_host.hpp:1027`), and one that keeps the default
+(`native_host.hpp:1035`), and one that keeps the default
 `validate_execution_precommit` with `declare_native_precommit_hook(false)`
-(`native_host.hpp:1035`). The kernel then makes no bar-open call, and neither
+(`native_host.hpp:1043`). The kernel then makes no bar-open call, and neither
 consults the precommit hook nor builds the settlement preview it would have been
 shown, unless the host owns lot excursions, which that preview's closing rows
 consult. It keeps every effect of its own that the skipped call's boundary has,
@@ -115,7 +115,9 @@ Configure:
   setup.
 - `Completed` → same session key, `run_number` above high-water → `Ready`.
   Prior-run records stay inspectable until the next successful begin.
-- `Running` or `Failed` → refused; `Failed` keeps the first failure.
+- `Running` → refused. A non-aborted `Failed` handle keeps its first failure
+  and refuses configure; an `Aborted` handle may be reused with the same
+  session key and a higher run number.
 
 Begin (`run` / `stream_begin`) is allowed only from `Ready`. Success consumes
 the run number, projects the spec onto execution storage, **resets once**
@@ -201,6 +203,10 @@ Always set, with documented defaults in the header:
 Optional, absent unless set:
 
 - `quantity_grid`: finite > 0; **admission only**, never resizes quantity
+- `quantity_tolerance`: finite > 0, in units; two quantities within it are one
+  quantity to the settlement (a close within it of a FIFO boundary ends there,
+  a dust lot a close reaches closes whole). See *What a host gets from a
+  quantity* below.
 - `max_abs_units`: finite > 0; opening cap on the resulting book
 - `max_open_lots`: positive; surviving + new lots
 - `initial_margin_fraction`: finite > 0 as a fraction, not a percent. Opening
@@ -226,13 +232,13 @@ refusal. Each is generic, and all four are folded into the continuation identity
 unconditionally, including their defaults; changing any of them changes the
 identity.
 
-- `slot_label_policy` (`NativeSlotLabelPolicy` `native_run_spec.hpp:323`) —
+- `slot_label_policy` (`NativeSlotLabelPolicy` `native_run_spec.hpp:324`) —
   `Canonical` (default) requires every confirmed input to carry its calendar
   slot label (`interval.open_ms`, or the scheduled clipped
   `eligible_open_ms`). `FeedTolerant` accepts a provider's own strictly
   increasing labels instead. `LegacyTolerant` is the deprecated spelling of
   the same value and hashes identically.
-- `legacy_tolerance` (`NativeFeedTolerance` `native_run_spec.hpp:344`) — a bit
+- `legacy_tolerance` (`NativeFeedTolerance` `native_run_spec.hpp:345`) — a bit
   mask of admission exceptions for a tolerated feed shape, separate from slot
   labels because a host may want the tolerant price admission and canonical
   labels. `BatchStructuralBars` admits finite but non-positive OHLC and reads
@@ -240,7 +246,7 @@ identity.
   finite non-negative interim warmup values, while the final warmup close
   stays strictly positive. `native_feed_tolerance_enabled` tests one bit.
   `NativeLegacyTolerance` is the deprecated spelling of the type.
-- `path_order` (`NativePathOrder` `native_run_spec.hpp:334`) — `Auto`
+- `path_order` (`NativePathOrder` `native_run_spec.hpp:335`) — `Auto`
   (default) keeps the open-proximity rule that decides whether a modeled bar
   walks its high or its low first. `HighFirst` / `LowFirst` state it, so a
   replay or a live host does not depend on that inference.
@@ -257,7 +263,7 @@ explicitly instead of inventing a clock literal. It is incompatible with
 
 ### The intrabar path
 
-`NativeRunSpec::intrabar` (`IntrabarPath` `native_run_spec.hpp:377`) is a
+`NativeRunSpec::intrabar` (`IntrabarPath` `native_run_spec.hpp:378`) is a
 `std::variant` the spec owns — deliberately a spec value, not a caller borrow,
 because matching may need the finer bars later, while sealing an aggregated
 script bar:
@@ -284,12 +290,12 @@ the sub-bar sections of `tests/test_native_calc_timing.cpp`.
 
 ### Validating a spec
 
-`validate_native_run_spec(spec)` (`native_run_spec.hpp:805`) answers a
-`NativeRunSpecValidation` (`native_run_spec.hpp:788`): a
-`NativeRunSpecError` (`native_run_spec.hpp:677`) and the
-`NativeRunSpecField` (`native_run_spec.hpp:645`) it first failed on, with
+`validate_native_run_spec(spec)` (`native_run_spec.hpp:819`) answers a
+`NativeRunSpecValidation` (`native_run_spec.hpp:802`): a
+`NativeRunSpecError` (`native_run_spec.hpp:691`) and the
+`NativeRunSpecField` (`native_run_spec.hpp:658`) it first failed on, with
 `ok()` and an explicit `operator bool`. `normalize_native_run_spec(spec)`
-(`native_run_spec.hpp:815`) validates and rewrites the one admitted literal —
+(`native_run_spec.hpp:829`) validates and rewrites the one admitted literal —
 a numeric `-0` fee becomes `+0` — leaving every other literal alone. Neither
 allocates on the failure path, neither changes a spec it rejects, and the
 field order is deterministic, so a host can report "which field" rather than
@@ -307,7 +313,7 @@ field order is deterministic, so a host can report "which field" rather than
 valid and clear the curve. `validate_native_fx_curve`
 (`native_fx_curve.hpp:48`) is the same judgement as a pure query.
 
-`native_run_spec_digest(spec)` (`native_run_spec.hpp:891`) is the portable
+`native_run_spec_digest(spec)` (`native_run_spec.hpp:905`) is the portable
 constant described under *Lifecycle and run identity*: exactly the fields the
 consumer folds into a run's continuation identity, and nothing else. Each
 feature suite pins the refusals of the fields it owns — the eighteen
@@ -454,11 +460,11 @@ spec fields.
 The rich `run(bars, n, input_tf, script_tf, inputs, syminfo, overrides, …)`
 overload (`engine.hpp:1623-1634`) is **not** refused as a source mutation: it
 reaches `NativeExecutionConsumer::run_rich`
-(`native_execution_consumer.cpp:8954-8994`), which admits the begin, checks the
+(`native_execution_consumer.cpp:9150-9190`), which admits the begin, checks the
 timeframe arguments against the spec, preflights and pumps the batch exactly
 like the plain overload. `inputs` / `syminfo` / `overrides` are carried only as
 `NativeBeginArgs` fields to `prepare_native_begin` — the overrides as the
-opaque `overrides_opaque` (`native_host.hpp:739`), which the kernel forwards
+opaque `overrides_opaque` (`native_host.hpp:746`), which the kernel forwards
 and never dereferences. No test pins either behaviour; prefer the plain
 overload. What *is* refused is source **mutation** through the setters
 (below).
@@ -482,7 +488,7 @@ Serialized external C++ calls may command only **between realtime inputs**,
 never reentrantly during input processing. A host written in C issues the same
 five commands through `strategy_native_submit_v1` / `_replace_v1` /
 `_cancel_v1` / `_cancel_all_v1` / `_cancel_where_v1`
-(`native_c_api.h:2689-2739`), under the same legality rule; see *Driving the
+(`native_c_api.h:2730-2780`), under the same legality rule; see *Driving the
 kernel from C* below.
 
 `native_order::Request` values belong to `native_order_v7`
@@ -618,25 +624,32 @@ a host reacts to its own execution and may submit again. A request born there,
 mid-bar on a continuous segment, is eligible on the **remaining path suffix** of
 that segment — the birth is admitted at the current cursor and the geometric
 search then sees only the unconsumed suffix (`born_on_remaining_path`,
-`native_execution_consumer.cpp:5463-5467`). Requests accepted before the
+`native_execution_consumer.cpp:5616-5620`). Requests accepted before the
 segment, and discrete points, keep the ordinary birth gate above.
 
 `on_native_bar_open` fires at the modeled opening, before that point's matching
-pass (`native_execution_consumer.cpp:6910-6912`). **Lookahead warning:** the
+pass (`native_execution_consumer.cpp:7066-7068`). **Lookahead warning:** the
 `Bar` it receives is the *complete* script bar — the consumer has already set
-`engine.current_bar_ = open_view` (`native_execution_consumer.cpp:6802`), the
+`engine.current_bar_ = open_view` (`native_execution_consumer.cpp:6958`), the
 complete bar unless the spec asks for `NativeOpenBarView::OpenOnly` — so its
 high, low and close are the finished bar's, not what is known at the open. A
 host that must decide on open-only information reads
-`current_partial_bar()` (`native_host.hpp:1046`; C:
-`strategy_native_partial_bar_v1`), the lookahead-free bar so far at this
-cursor, or declares `NativeOpenBarView::OpenOnly`, which masks this one
+`current_partial_bar()` (`native_host.hpp:1061`; C:
+`strategy_native_partial_bar_v1`), the lookahead-free bar so far (at the bar
+open, the open alone), or declares `NativeOpenBarView::OpenOnly`, which masks this one
 callback's bar down to its open. Both are under *The bar so far, and the
 open-bar view* below.
 
 A `quantity_grid`, when present, admits Transact/Reduce quantities on the
-exact binary64 grid in `native_order.hpp`. Flatten is not gridded. Rejection
-does not rewrite the attempted bits.
+exact binary64 grid in `native_order.hpp`, and a `Reduce` whose units are a
+FIFO boundary of its scope -- the binary64 sum, in book order, of the scope's
+lots through one of them: the head lot's own size, a prefix, the whole scope --
+which settlement arithmetic can move off any decimal grid
+(`CommandContext::units_are_scope_boundary`, R5 lane K-ULP4), for a request
+that settles in one fill; its candidate settles what then remains only on the
+grid, at a boundary of the scope as it stands or at least at its held total,
+and refuses anything else with `MatchRejectReason::UnrepresentableQuantity`.
+Flatten is not gridded. Rejection does not rewrite the attempted bits.
 
 **Acceptance is not a fill.** `submit_market` returns `SubmitResult`:
 
@@ -665,8 +678,10 @@ not the acceptance-cycle book: a flatten accepted while flat can still close a
 same-point opening that already filled. If the book is flat at execution,
 Reduce/Flatten terminalize `NoEffectEvent`: no execution identity, no fill,
 no fee, no physical action. `MatchRejectedEvent` is an event ordinal without
-execution identity (opening direction, max units/lots, initial margin, or
-nonpositive resolved price). An opening denial rejects the **entire**
+execution identity (opening direction, max units/lots, initial margin,
+nonpositive resolved price, or a quantity the settlement cannot book exactly on
+the book it met -- `UnrepresentableQuantity`, which ends that request and not
+the run; see *What a host gets from a quantity* below). An opening denial rejects the **entire**
 Transact, including a proposed close remainder; it does not close old
 exposure first. Closing-only Reduce/Flatten remain allowed while opening
 limits are already exceeded.
@@ -922,7 +937,9 @@ trigger alternative, and a retained best must still produce a representable
 level for the successor's offset; otherwise the replacement is rejected and
 the predecessor stays live.
 
-Two more options change what a replacement consumes, never what it matches.
+Two more options change what a replacement keeps. `keep_handle` can also
+change matching when a re-priced parent has waiting children: they retain
+their owner and may fill, whereas a plain replace ends that ownership.
 `keep_handle` re-prices the request in place: the successor keeps the
 predecessor's handle, its place in the chain (no chain-root pair is folded
 again), its children and cohort members, and a trail's arm ordinal, and takes
@@ -1300,8 +1317,8 @@ liquidated immediately as a current execution. Nothing fills mid-path.
 **The FX roll (`NativeMarginCheckKind::FxRoll`).** `required(P)` carries the
 account rate, so under a declared `NativeFxCurve` an account can cross its
 maintenance line while every price stands still. A step of the curve is
-therefore a check point of its own: the first driver point the account
-converts at a different rate than the point before it, offered immediately
+therefore a check point of its own: the first walked driver point the account
+converts at a different rate than the previous walked point, offered immediately
 before that point is matched. The walk has not moved yet — a discrete point is
 measured at its own price, a segment at its origin with its destination among
 the waypoints that remain — so the mark is the unchanged price and only the
@@ -1421,7 +1438,7 @@ adapter answers `margin_check_allowed` with TradingView's scheduling — which
 includes the post-exit re-size: when a priced bracket leg of the script bar
 fills, the slice resting at that bar's adverse extreme was sized on the
 pre-exit book, and the legacy broker cancelled and re-scheduled it there
-(`margin_check_allowed` `pine_adapter.cpp:13844-13868`), so the adapter admits
+(`margin_check_allowed` `pine_adapter.cpp:14069-14093`), so the adapter admits
 the kernel's own point for that driver point while (and only while) a slice
 rests —
 `resolve_margin_requirement` with its ten-significant-digit money and
@@ -1647,14 +1664,21 @@ and a request born there follows the ordinary birth rule.
 std::optional<Bar> current_partial_bar() const;   // non-virtual
 ```
 
-answers the lookahead-free bar so far at the current cursor: the open of this
-script bar's first modeled point, the running high/low, and the close at the
-cursor. `volume` accrues only activity actually consumed — the completed
-lower-timeframe sub-bars of an intrabar path, or the observed prints of a
-stream — and stays 0 for a modeled path that carries no intrabar volume of its
-own. It is valid in the bar-open, applied, tick, sub-bar and recalculation
-callbacks, and is `nullopt` outside a path walk, including in the bar's own
-close calculation, where the host already holds the complete bar.
+answers the lookahead-free bar so far: the open of this script bar's first
+modeled point, the running high/low, and the close at the last path point the
+walk has consumed. A discrete point — the open of the bar or of a sub-bar, a
+sample of a `DistributionSamples` magnifier, an observed print of a stream — is
+folded before its callbacks run, so there the bar so far closes at the cursor.
+A fill inside a segment (a trigger crossed between two path points) happens
+before the walk reaches the segment's destination, so that fill's
+`on_native_applied` and its `OrderFill` recalculation read a bar that still
+ends at the segment's origin: it never runs ahead of the cursor, and it does
+not yet hold the fill price. `volume` accrues only activity actually consumed —
+the completed lower-timeframe sub-bars of an intrabar path, or the observed
+prints of a stream — and stays 0 for a modeled path that carries no intrabar
+volume of its own. It is valid in the bar-open, applied, tick, sub-bar and
+recalculation callbacks, and is `nullopt` outside a path walk, including in the
+bar's own close calculation, where the host already holds the complete bar.
 
 This matters because the mid-bar callbacks are handed the **complete** script
 bar: `on_native_bar_open` receives the whole bar by default, and so does every
@@ -1800,16 +1824,16 @@ says otherwise, and the C spellings are in
 | `native_marked_equity(mark)` | the account's marked equity at `mark` | `strategy_native_marked_equity_v1` |
 | `native_working_requests()` | one `NativeWorkingRequest` `native_host.hpp:669` per live request: its `definition`, its `remaining` and its `trigger_state` | `strategy_native_working_len_v1` / `_get_v1` |
 | `trail_state(handle)` | `NativeTrailState` `native_host.hpp:657`: `activated`, `best_price`, `current_level`, `activation_ordinal`; `nullopt` when the handle is not a live trail | `strategy_native_trail_state_v1` |
-| `native_events(after)` | `NativeMarketEvent` `native_host.hpp:370` rows: a `NativeEventKind` `native_host.hpp:360` (`Command`, `Driver`, `Account`) and exactly one of `command`, `driver` (`NativeDriverPoint` `market_driver.hpp:91`) or `account` (`NativeAccountObservation` `native_host.hpp:351`) — the rows the run's `event_retention` keeps (*What a run keeps of its events*) | `strategy_native_events_v1` |
+| `native_events(after)` | `NativeMarketEvent` `native_host.hpp:370` rows: a `NativeEventKind` `native_host.hpp:360` (`Command`, `Driver`, `Account`) and exactly one of `command`, `driver` (`NativeDriverPoint` `market_driver.hpp:97`) or `account` (`NativeAccountObservation` `native_host.hpp:351`) — the rows the run's `event_retention` keeps (*What a run keeps of its events*) | `strategy_native_events_v1` |
 | `native_event_window_start()` | the oldest ordinal a read can still return: every command event at or above it is retained; 1 while nothing was dropped | `strategy_native_event_window_v1` |
 | `current_execution_point()` | `NativeCurrentPointView` `native_host.hpp:646`: the active callback's decision context, its price, the `NativeCurrentQuoteKind` `native_host.hpp:451` and the ordinal the quote came from; `nullopt` outside a decision point | `pf_native_decision_v1::price` / `::quote_kind` |
 | `native_risk_state()` | `NativeRiskState` `native_host.hpp:631`: whether openings are blocked and why, the risk day, the fills counted in it, the loss-day streak, the peak equity and the day's opening equity | `strategy_native_risk_state_v1` |
 | `native_liquidation_price()` | the solved level `L`, or `nullopt` | `strategy_native_liquidation_price_v1` |
-| `current_partial_bar()` | the lookahead-free bar so far at this cursor | `strategy_native_partial_bar_v1` |
+| `current_partial_bar()` | the lookahead-free bar so far, through the last path point consumed | `strategy_native_partial_bar_v1` |
 | `native_series_bar(i)` | the latest delivered bucket of subscription `i` | `strategy_native_series_bar_v1` |
 | `native_recalculation_count()` / `native_recalculations_skipped()` | the calculations the cadence drove and the ones its per-point bound dropped | `strategy_native_recalculations_v1` |
-| `native_decision_floor()` (`native_host.hpp:1320`) | the run's monotonic decision floor in epoch ms — the same value `NativeStateView::decision_floor_ms` carries, and the lower bound every request's birth is compared against | `pf_native_state_v1::decision_floor_ms` |
-| `native_consumed_high_water()` (`native_host.hpp:1325`) | the highest `run_number` this host has consumed. It lives **outside** per-run reset, so the next configure on the same host needs a strictly larger number; a fresh host reads 0 | `pf_native_state_v1::consumed_high_water` |
+| `native_decision_floor()` (`native_host.hpp:1343`) | the run's monotonic decision floor in epoch ms — the same value `NativeStateView::decision_floor_ms` carries, and the lower bound every request's birth is compared against | `pf_native_state_v1::decision_floor_ms` |
+| `native_consumed_high_water()` (`native_host.hpp:1348`) | the highest `run_number` this host has consumed. It lives **outside** per-run reset, so the next configure on the same host needs a strictly larger number; a fresh host reads 0 | `pf_native_state_v1::consumed_high_water` |
 | `native_continuation_hash()` | the consumer's continuation identity: a fold of its live state (*What the continuation and the broker-state hash fold*), the timezone folded by its content, so the same spec over the same bars and zone rules answers the same value on every host | `strategy_native_continuation_hash_v1` |
 | `native_sized_units(sized, price, equity, fx)` | the kernel's own `Sized` resolution as a pure query | none — see *Previewing a basis* |
 | `inspect_current_execution(cmd)` | `NativeCurrentExecutionPreview`, with a `NativeCurrentRefusal` `native_host.hpp:685` when the command cannot be consumed here | none — `strategy_native_execute_current_v1` answers the same verdicts |
@@ -1831,40 +1855,43 @@ rather than relabelled. Failure copy and move do not allocate.
 `last_error()` is presentation text beside it, never the authority.
 
 **Callback contexts.** The bar callbacks receive
-`NativeDecisionContext` (`market_driver.hpp:114`): the point's
-`NativeCoordinate` (`market_driver.hpp:71` — ordinal, the interval stamps,
-the effective time, the `NativePathPhase` and the `NativeCompletionKind`),
+`NativeDecisionContext` (`market_driver.hpp:120`): the point's
+`NativeCoordinate` (`market_driver.hpp:72` — ordinal, the script-bar
+`interval_index`, the named input-slot `input_interval_index`, the interval
+stamps, the effective time, the `NativePathPhase` and the
+`NativeCompletionKind`),
 the decision floor, both calendar intervals, and the script bar's
-session-day facts (R5 lane F5): `in_session` (`market_driver.hpp:154`),
+session-day facts (R5 lane F5): `in_session` (`market_driver.hpp:161`),
 `opens_session_day`, `closes_session_day` and
 `closes_session_day_open_ended`. They read the run's own calendar and
 session day — the cycle that rolls at the session's first window start,
 keyed to its trading date, so an overnight session is one day across local
 midnight — and the bar before or after the script bar: the one the run
-holds (its batch input or stream warmup), otherwise the calendar's slot one
-script width away. A run's first bar opens its session day and a batch's
+holds (its batch input or stream warmup), otherwise the calendar's previous
+or next eligible input slot, across declared breaks. A run's first bar opens
+its session day and a batch's
 final bar closes it; the open-ended close reads the calendar at that final
 bar instead, for a host whose last input is still forming; a D/W/M bar holds
 whole days, so all four are true. Every callback of one script bar carries
 the same four, fills and fill recalculations included, and a C host reads
 the first three from `pf_native_decision_v1`'s session bytes
-(`native_c_api.h:1440`). The kernel resolves each session day once through
+(`native_c_api.h:1454`). The kernel resolves each session day once through
 `native_calendar::session_day_at` (`native_calendar.hpp:407`), which a host
 may call too. `tests/test_native_session_day_facts.cpp` replays the
 TradingView session tapes through a bare host. It is a presentation snapshot
 copied onto the callback stack: writing to it cannot move the floor, the
 matching time or the after-calculation coordinate, and the session-day facts
 fold into no digest. `on_native_input` receives
-`NativeInputContext` (`native_host.hpp:754`) instead — the two intervals, the
+`NativeInputContext` (`native_host.hpp:761`) instead — the two intervals, the
 input index and whether this input completes the script interval — and
-`on_native_tick` receives `NativeTickContext` (`native_host.hpp:766`), the
+`on_native_tick` receives `NativeTickContext` (`native_host.hpp:773`), the
 decision context plus the print's sequence, where zero keeps the public
 `TradeTick` sentinel meaning "the provider supplied none".
 
 **Cohorts.** A cohort is a host-built roster of openings a later close binds
 to: `cohort_open()` answers a `native_order::CohortHandle`, `cohort_add`
-(`native_host.hpp:1250`) enrolls one accepted opening's handle,
-`cohort_remove` (`native_host.hpp:1253`) takes it back off, and a request with
+(`native_host.hpp:1273`) enrolls one accepted opening's handle,
+`cohort_remove` (`native_host.hpp:1276`) takes it back off, and a request with
 `owner = native_order::BindCohort{cohort}` closes what the roster holds at
 the match. The C spellings are `strategy_native_cohort_open_v1` / `_add_v1` /
 `_remove_v1`; in C the pairing is fixed — a `BindCohort` owner is reachable
@@ -1882,7 +1909,7 @@ spec digest folds a retention other than the default.
 
 | retention | what the kernel keeps | memory |
 |---|---|---|
-| `Window` (the default) | the command journal, only until the host has read it; no driver point, no account row | O(live) |
+| `Window` (the default) | the command journal, only until the host has read it; no driver point, no account row | O(live + replaces) |
 | `Commands` | the whole command journal and every account row; no driver point | O(run) |
 | `Full` | the whole command journal, every driver point and every account row — the record every run kept before the field existed | O(run) |
 
@@ -1963,20 +1990,22 @@ drawdown/run-up walk, and metrics computed over a real series.
 The per-bar **broker-state hash** is a row of that same report, so
 `KernelRecorded` records it too. It stays behind the recording switch it
 always had — `set_broker_state_hash_recording(true)`
-(`engine.hpp:2126`; C: `strategy_set_broker_state_hash_recording`), off by
+(`engine.hpp:2127`; C: `strategy_set_broker_state_hash_recording`), off by
 default, set while no run is active — because each row is a full
 `broker_state_hash()` over the lots and the closed rows (since v19 a row costs
 the live state, not the run's length: the closed rows enter through a running
 digest). With the switch on,
 one row follows each point, after the extremes that point just folded
-(`record_script_report_point`, `native_execution_consumer.cpp:7631`), so
+(`record_script_report_point`, `native_execution_consumer.cpp:7802`), so
 
 ```text
 broker_state_hash_len == equity_curve_len == script_bars_processed
 ```
 
-in batch and across a stream's warmup and realtime legs alike. That length
-identity is the only part of the array that holds across drivings.
+on a completed run in batch and across a stream's warmup and realtime legs
+alike. A Failed or Aborted run may expose only a recorded prefix, whose last
+row need not equal the final scalar. That length identity is the only part of
+the array that holds across drivings.
 
 **What a row is, and what it is for.** A row is the run's *continuation
 identity* at that bar, not its trade outcome. `broker_state_hash()` is
@@ -2024,9 +2053,11 @@ appends its own rows.
 `NativeReportPolicy::KernelRecordedAtHostMarks` records the very same series
 at the points the host marks, for a host whose report cadence is not one point
 per calculation. The consumer never records on its own initiative under it:
-the host calls the kernel's report mark from inside its own callback, naming
-the label the point carries, and the kernel performs the extremes fold and the
-curve append. The Pine adapter is that host — its report has one point per
+the host calls `mark_native_report_point(report_ts)` from inside its own
+callback, naming the label the point carries. The kernel performs the extremes
+fold and curve append. The call returns `true` when it appends; it returns
+`false` and changes nothing outside a running `KernelRecordedAtHostMarks` run.
+The Pine adapter is one marking host — its report has one point per
 published *source* slot, which is not the same series of instants: a
 `calc_on_order_fills` re-entry marks the slot it opened at the fill and the
 bar's ordinary close calculation then marks nothing, and a suppressed probe
@@ -2090,13 +2121,13 @@ under the ticket the model or the run named. A host running its own forced
 close states the cause on the row it produced.
 
 `closed_trade_close_cause(i)` (`engine.hpp:1833`) is the C++ read and
-`strategy_closed_trade_close_cause` (`pineforge.h:1253`) the C one, with the
+`strategy_closed_trade_close_cause` (`pineforge.h:1273`) the C one, with the
 same numbering: `-1` for a bad index or a NULL handle, `0` UNKNOWN, `1`
 SCRIPT, `2` BRACKET, `3` MARGIN_CALL, `4` INTRADAY_LOSS_CAP, `5`
 INTRADAY_FILL_CAP, `6` RANGE_END. A row closed at the end of the run
 (`open_at_end`) always answers `6`, ahead of every other cause. The ticket a
 row was booked under is `strategy_closed_trade_entry_id` /
-`_exit_id` / `_exit_comment` (`pineforge.h:1176-1206`), which index exactly the
+`_exit_id` / `_exit_comment` (`pineforge.h:1196-1226`), which index exactly the
 rows of `fill_report`'s trade array and take any handle this engine produces
 — including a `pf_strategy_t` from `strategy_native_host_create_v1`, which is
 how a C host reads back the ticket its own margin model declared.
@@ -2176,7 +2207,13 @@ Both digests fold **state**, not history (the v19 value epoch, R5 lane V19-A:
   two driver-point instants the FX-roll check reads. The acknowledgement and
   the event high waters are readback bookkeeping and fold nowhere. So equal state answers an equal value,
   two command histories that reach one state answer one value, and a read costs
-  the live state whatever the run's length. The fold takes one
+  the live state whatever the run's length. A cohort roster is live state as
+  its host keeps it: every member folds at every read, so an origin the host
+  leaves on its roster after nothing can bind it any more — its request chain
+  no longer works and no lot it opened is still open — costs every later read.
+  The Pine adapter takes each such origin off its roster (`cohort_remove`) at
+  the next bar open (R5 lane V19-FIX), so a Pine run's rosters hold the
+  openings that still work or hold a lot, however many the run has made. The fold takes one
   multiply-xorshift per 64-bit word; a string folds as its length, then its
   bytes eight at a time. `native_run_spec_digest(spec)` keeps its byte-wise
   FNV-1a and its values.
@@ -2237,8 +2274,9 @@ binding a ledger). Stream D/W uses civil/session next-open stepping.
 Each confirmed input is attributed **wholly** to the script period that
 contains its input open (OHLC/volume are not split across a calendar
 boundary). Script calculation time is not earlier than the latest included
-contributor close. An unfinished trailing coarser script bucket does not
-become complete merely because batch input ended.
+contributor close. A trailing coarser script bucket is calculated at batch
+end when its final contributor reaches the calendar's last-traded close.
+Input that stops inside the interval leaves its bucket unfinished.
 
 Session strings: empty or `"24x7"`; comma-separated `HHMM-HHMM` windows;
 `2400` as a legal end; overnight wrap; equal start/end as a full day from
@@ -2250,8 +2288,12 @@ IANA aliases.
 
 **Batch** may be sparse (missing in-session slots are allowed; no synthetic
 prices). **Stream warmup** requires at least one input and every **provided**
-input slot to be a complete confirmed interval; missing in-session bars are
-refused. An unfinished coarser **script** bucket is retained through
+input slot to be a complete confirmed interval. Under `Canonical`, missing
+in-session bars are refused; under `FeedTolerant`, warmup may omit them,
+including an entire trading day. Realtime `stream_push_bar` still refuses an
+in-session gap under either policy. A calendar day mask must exclude days a
+stream is expected to skip, such as weekends. An unfinished coarser **script**
+bucket is retained through
 Warmup → Realtime. The handoff does not invent a script callback, a future
 exclusive close, or a raised floor to a future seal. Empty batch is a valid
 completed run with no events.
@@ -2730,7 +2772,7 @@ A host that wants only the running aggregate — no series instance, no
 aggregates the input itself. `TimeframeAggregator` (`timeframe.hpp:288`) is
 public and engine-free; feed it from `on_native_input`, which runs once per
 accepted confirmed input bar before that bar is aggregated or matched
-(`on_native_input` `native_host.hpp:856`). Include
+(`on_native_input` `native_host.hpp:863`). Include
 `<pineforge/timeframe.hpp>`:
 
 ```cpp
@@ -2756,7 +2798,7 @@ Only completed buckets are published, so this recipe has no lookahead by
 construction. It is the same class the kernel's own subscription evaluator
 aggregates with, and the one the kernel's `script_bucket_completions` query
 feeds when the Pine scheduler asks how its input span buckets
-(`TimeframeAggregator` `native_execution_consumer.cpp:7711`). What it does
+(`TimeframeAggregator` `native_execution_consumer.cpp:7884`). What it does
 **not** give you is what a
 declared subscription does: an `authoritative_bars` feed, the `gaps` and
 `lookahead` delivery rules, the lazy-seal chronology, a C spelling, and the
@@ -2803,8 +2845,9 @@ synthesize neither bars nor matching points.
 `stream_advance_time(ms)` finishes elapsed intervals and raises the accepted
 time floor; it is not an extra print. `stream_end(false)` completes without
 inventing a final callback or fill. `stream_end(true)` may partial-finalize
-an existing forming observed input; it does not synthesize a missing input
-or force an incomplete coarser script bucket complete.
+an existing forming observed input and calculates a pending script bucket
+when its final contributor reached the calendar's last-traded close. It does
+not synthesize a missing input or complete a bucket whose session is still open.
 
 The decision floor is monotonic (delivered event time, accepted input
 completion, tick time, time-advance). A refused preflight does not raise it.
@@ -2819,7 +2862,7 @@ These are existing refusals, not implied future features:
 - In-session gaps on stream/warmup
 - Source `calc_on_every_tick` / `calc_on_order_fills` enabled (the runner
   rejects an explicit true override, and the Pine host refuses a stream begin
-  with `calc_on_order_fills`, `pine_strategy_host.cpp:283-286`). This is a
+  with `calc_on_order_fills`, `pine_strategy_host.cpp:284-287`). This is a
   **source-route** refusal, not a limit on the native hooks: `on_native_tick`
   and `on_native_applied` are delivered on a stream, and a native host's own
   `NativeRunSpec::calculation` is accepted there, where `EveryModeledPoint`
@@ -2841,7 +2884,7 @@ These are existing refusals, not implied future features:
 A C host has the same stream and the same commands. Streaming needs no new
 symbol — `strategy_stream_begin` and its family (`sha256:2e963d6ab1630db1535bd944dc7406ba649e9d14a589065db25347569fbad150` native_c_api.h:37-39) take
 a `pf_strategy_t` from `strategy_native_host_create_v1` unchanged — and
-`strategy_native_submit_v1` (`native_c_api.h:2639`) obeys the one legality
+`strategy_native_submit_v1` (`native_c_api.h:2680`) obeys the one legality
 rule its C++ spelling does.
 
 Rebuild strategy libraries against this engine. An ABI-v4 module without the
@@ -2860,8 +2903,10 @@ native contract is legacy and cannot take `--native-config`.
 | Submit/replace/cancel outside the allowed phase | throws; not a fill | command only from callbacks or between realtime inputs |
 | Cooperative abort | `Failed` (`Aborted`) | reuse with `configure_native` using the same session key and a higher run number |
 
-`last_run_status()` is not failure authority. After `Failed`, later `run` /
-`stream_*` / `configure_native` refuse (`native host already failed`).
+`last_run_status()` is not failure authority. After a cooperative `Aborted`
+failure, `configure_native` can reuse the host with the same session key and
+a higher run number. Other failures remain latched: subsequent `run`,
+`stream_*` and `configure_native` calls refuse (`native host already failed`).
 
 ## C++ example
 
@@ -2918,6 +2963,7 @@ pineforge::NativeRunSpec make_spec() {
     spec.fee_value = 6.0;
     spec.close_execution = pineforge::NativeCloseExecution::NextEligiblePoint;
     spec.allowed_open_directions = pineforge::NativeOpenDirections::Both;
+    spec.event_retention = pineforge::NativeEventRetention::Full;
     return spec;
 }
 
@@ -3049,6 +3095,79 @@ closed + |opened| can round one ulp either side of the units; the fill's
 B-ENGINE). Before, a sum one ulp above stopped the run, and one ulp below left
 a 2^-49-unit remainder that a second fill opened as a dust lot.
 
+### What a host gets from a quantity
+
+Every quantity request ends in exactly one terminal outcome, and no ordinary
+quantity stops the run, nor does a sibling's share of it (last below). The
+FIFO rules are the settlement's (`docs/native-settlement.md`, "Physical lots
+and quantities"); what a host sees:
+
+- A close that spans lots and ends inside one is one terminal fill whose
+  `closed_units` and `filled_working` are its request, even where the rows,
+  the whole lots and the rest, add up one ulp away (R5 lane K-ULP2).
+- A close whose binary64 FIFO sum reaches its request at a lot -- the book's
+  own held total, a FIFO prefix of it -- closes that lot whole and leaves no
+  dust lot (K-ULP3).
+- A crossing `Transact` is charged exactly its units (K-ULP1, above).
+- A request the settlement cannot book exactly on the book it meets is refused,
+  typed: a terminal `MatchRejectedEvent` with
+  `MatchRejectReason::UnrepresentableQuantity` (C:
+  `PF_NATIVE_MATCH_REJECT_UNREPRESENTABLE_QUANTITY`), nothing moved, the run
+  still running (R5 lane K-ULP4). `inspect_current_execution` shows the
+  settlement's refusal beforehand as a `settlement_readiness` of
+  `UnrepresentableQuantity` (the request core's check and the grid's boundary
+  re-check are made at execution only), and `execute_current` answers the
+  `MatchRejectedEvent` without throwing. Ordinary
+  decimal quantities reach it: after open 1.5, `Reduce` 1.3 and open 2.9, a
+  `Reduce 0.2` needs `2^-54` of the 2.9 lot, and a dust lot a close left at
+  the head of the book refuses the next close and the next opening on its
+  side. Until K-ULP4 each of these stopped the run with code 6, discriminator
+  5. `Flatten` is never refused for a quantity.
+- On a `quantity_grid` the book's own quantities are on the grid: a
+  `ScopeFraction` whose product is its scope's held total as it stands
+  (`fraction == 1` of the gross scope, settled in one fill) resolves to that
+  total, unfloored, and a `Reduce` of a FIFO boundary of its scope is
+  admitted (above). A fill the request's own units cannot absorb --
+  a scope of dust closed by a far larger request -- is the same typed
+  refusal, from the request core's check.
+- `NativeRunSpec::quantity_tolerance` is the opt-in for a host that keeps
+  decimal quantities, as a broker ledger does: within the tolerance a close
+  ends at the FIFO boundary it is near, charged its request, and a dust lot a
+  close reaches closes whole, so such a host's closes neither leave dust nor
+  meet the refusal above. A C host sets it in the `quantity_tolerance` tail of
+  `pf_native_run_spec_ext_v1`. The Pine adapter does not declare it and keeps
+  its own `1e-10` rule (`docs/native-settlement.md`, "Quantity tolerance").
+- A deduction an OCA-Reduce sibling cannot take is absorbed, and the run goes
+  on (R5 lane K-ULP5). In a group with `GroupEffect::Reduce` a member's fill is
+  deducted from every live sibling: from its remaining units (a
+  `ReservationReducedEvent`; C `PF_NATIVE_EVENT_RESERVATION_REDUCED`), or,
+  while its units are not known, into its pending total (a
+  `DeferredGroupAdjustmentEvent`; C `PF_NATIVE_EVENT_DEFERRED_GROUP`), which
+  its terms (`TermsResolvedEvent`) or its owner's fill (`QuantityBoundEvent`)
+  later takes off the units they bind. A deduction too small to move what it
+  is taken from -- `fl(units - d)` is the units again, at most half an ulp of
+  them -- leaves the sibling's units, or its pending total, as they were, the
+  exact binary64 result; the member's fill stands, and the event says it took
+  nothing: `actual_deduction` 0 with `after` equal to `before`, or
+  `deferred_delta` 0 with `pending_after` equal to `pending_before` (it joins
+  no chain), or `effective_deduction` 0 beside a positive `pending_total` and
+  units above zero that stand. A C host reads the first two as
+  `PF_NATIVE_EVENT_RESERVATION_REDUCED` and `PF_NATIVE_EVENT_DEFERRED_GROUP`
+  rows whose `closed_units` is 0; its `TERMS_RESOLVED` and `QUANTITY_BOUND`
+  rows carry no deduction, so there it reads the absorption as the units that
+  stand -- the fill, or the working row's remaining units -- beside the
+  `DEFERRED_GROUP` rows it received. Each deduction is taken on its own, so
+  fills absorbed one by one can leave a sibling above what one deduction of
+  their sum would. After open 0.5, open 1000.1 and a bound close of
+  1000, one group of a resting `Reduce 1000`, a `Reduce 0.3` and a
+  `ScopeFraction 1`: the fraction closes 2.2759572004815709e-14, below half an
+  ulp of the resting member's 999.7, which keeps 999.70000000000005. A pending
+  total below half an ulp of a later fill rounds into it, as binary64 addition
+  does. Until K-ULP5 each of these failed the run after the fill was booked,
+  with code 6, discriminator 7 (`CoreFailure::UnrepresentableReservation`); a
+  pending total that overflows binary64 -- fills near the largest finite
+  double -- still does.
+
 ### Sizing without a host override
 
 `native_order::Sized` is the sixth `OrderIntent`: an opening whose size the
@@ -3165,10 +3284,9 @@ its `resolve_execution_terms` override; and its own placement-time money-band
 and affordability gates, which consume a quantity before any request exists and
 so cannot be a kernel decision. The percentage fee reserve is the kernel's
 (`reserve_percent_fee`). The generic conversion is available through
-`native_sized_units()`, while source paths that keep `HostSized{Open}` restate
-their source-specific quotient and floor in `resolve_execution_terms`; this
-paragraph does not claim that every source conversion is implemented at one
-call site. The two
+`native_sized_units()`. Source paths that keep `HostSized{Open}` retain their
+source-specific floor in `resolve_execution_terms`, while the cash or equity
+quotient comes from the kernel's sizing query. The two
 lot floors stay the adapter's because neither is the kernel's `SnapToGrid` on
 every input — the cash floor keeps a quotient a millionth of a lot under a
 boundary raw, and the percent floor has no on-grid tolerance, so an exact lot
@@ -3263,7 +3381,14 @@ because `scope * percent / 100` and `scope * (percent / 100)` are different
 binary64 values. The result is floored onto `quantity_grid` like every other
 engine quantity; a fraction that does not buy one whole step is
 `TermsUnresolved`, and `fraction` outside `(0, 1]` is `InvalidQuantityBasis` at
-submit.
+submit. The one exception is a fraction whose product is its scope's held
+total as it stands -- `fraction == 1` of the gross scope, "close it all", for a
+request that settles it in one fill (no point budget, no group deduction
+pending against it): it resolves to that total, which is the fold of the
+book's own lots and is not floored, so it closes the scope whole whatever the
+grid (R5 lane K-ULP4; floored, it closed up to a step short, left a dust lot,
+or found nothing to close). A scope net of siblings' claims, or frozen at
+acceptance at another total, is floored like any other fraction.
 
 Neither kind is emitted by the Pine adapter, which keeps resolving its own
 `HostSized` terms; `native_order` values therefore belong to `native_order_v7`.
@@ -3605,8 +3730,8 @@ such field matches.
 **Reading the kernel back.** Eight accessors answer what the C++ host reads
 off itself. Four of them are `std::optional` in C++, and `PF_NATIVE_ABSENT`
 (1, a non-negative *outcome*, not an error) is the C spelling of that empty:
-`strategy_native_partial_bar_v1` (`current_partial_bar()` — the bar so far at
-this cursor, absent in the bar's own close calculation, where the callback
+`strategy_native_partial_bar_v1` (`current_partial_bar()` — the bar so far
+through the last path point consumed, absent in the bar's own close calculation, where the callback
 already holds the complete bar), `_series_bar_v1` (`native_series_bar()` — the
 latest completed bucket of a declared subscription, absent before its first
 delivery and on every bar a `PF_NATIVE_GAPS_CLEAR` series publishes nothing on),
@@ -3659,8 +3784,8 @@ subscriptions, and the generic risk limits — travel in
 `pf_native_run_spec_ext_v1`, passed together with the base spec to
 `strategy_configure_native_ext_v1`. It replaces
 `strategy_configure_native_v1` rather than following it, because the kernel
-configures each run exactly once: a second configure of a Ready handle fails
-it. The one field of `NativeRunSpec` it deliberately does not carry is
+configures each run exactly once: a second extended configure of a Ready
+handle is refused without changing it. The one field of `NativeRunSpec` it deliberately does not carry is
 `identity`, which the base spec owns.
 
 The nine enum-valued words of the two specs are `uint32_t` words holding a
@@ -3687,11 +3812,16 @@ marks each report point from inside its own callbacks, and the callback table
 has no call that marks one, so its integer, 2, is refused like any other.
 `strategy_configure_native_v1` has no boundary check of its own for the three
 base-spec words: the kernel's validation judges them, and a bad one answers
--1 and leaves the host failed. That call answers every refusal so — Failed
-with `PF_NATIVE_FAILURE_INVALID_SPECIFICATION` for an invalid spec, with
-`PF_NATIVE_FAILURE_CONTRACT` for a Ready or Running handle or a refused reuse
-— and has no out-parameters; a handle an abort failed keeps that failure,
-and no configure call accepts a handle a configure failed.
+-1 and leaves the host Failed with `PF_NATIVE_FAILURE_INVALID_SPECIFICATION`.
+The kernel still fails a Ready handle under its Contract rule. The C boundary
+refuses a Running handle without changing its state, including when a callback
+calls it. It also refuses a Completed host's
+`on_hash_extension` callback during a read-only hash query. A Completed handle or one Failed by a
+cooperative abort may be configured for another run; the kernel judges reuse
+constraints and can fail a refused reuse with `PF_NATIVE_FAILURE_CONTRACT`. An
+Aborted handle is reusable with the same session key and a higher run number; a
+handle whose configure call failed remains Failed and cannot be configured again.
+The call has no typed out-parameters.
 
 `strategy_configure_native_ext_result_v1` is the typed spelling of
 `strategy_configure_native_ext_v1`: the same inputs plus two out-parameters
@@ -3713,11 +3843,11 @@ by anything but an abort, answer `PF_NATIVE_E_STATE` with
 cooperative abort latches only while a run holds its spec, and the Failed
 state keeps it, so no public call reaches it.
 
-`pf_native_run_spec_ext_v1`'s third published length,
+`pf_native_run_spec_ext_v1`'s third of six published lengths,
 `PF_NATIVE_RUN_SPEC_EXT_V1_POLICY_SIZE`, ends the tail after the base layout
 (`PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE`) and the risk tail
 (`PF_NATIVE_RUN_SPEC_EXT_V1_RISK_SIZE`); the runtime accepts it and the other
-three. That tail appends what the header used to list as unrepresentable — the retained intrabar path
+five. That tail appends what the header used to list as unrepresentable — the retained intrabar path
 (`PF_NATIVE_SPEC_EXT_INTRABAR`), the four feed-shape and presentation
 policies (`PF_NATIVE_SPEC_EXT_FEED_POLICY`: slot labels, feed tolerance, the
 forced path order, abort reporting), and the margin model's remaining knobs
@@ -3732,12 +3862,14 @@ The intrabar block is also what makes `on_sub_bar` reachable: only
 has sub-bars of its own. A `PF_NATIVE_SLOT_LABEL_FEED_TOLERANT` run keeps the
 caller's own labels and delivers none.
 
-`pf_native_request_v1` likewise has four published lengths now — base, plus
+`pf_native_request_v1` likewise has five published lengths now — base, plus
 the anchored-leg tail (`PF_NATIVE_REQUEST_V1_ANCHOR_SIZE`), plus the
 sizing detail (`PF_NATIVE_REQUEST_V1_SIZING_SIZE`): `size_price` (`SizePrice`:
 `RESOLVED`, `SIGNAL`, `SIGNAL_ON_TICK`) and `reduce_basis` (`ScopeBasis`:
-`AT_MATCH`, `AT_ACCEPTANCE`), plus the trail seed: `trail_best_seed` and
-`trail_has_best_seed` (`Trail::best_seed`, where the running best starts).
+`AT_MATCH`, `AT_ACCEPTANCE`), plus the trail seed
+(`PF_NATIVE_REQUEST_V1_SEED_SIZE`): `trail_best_seed` and
+`trail_has_best_seed` (`Trail::best_seed`, where the running best starts),
+and the current arm-relation tail.
 
 `pf_native_working_v1` is the first **readout** with an additive tail:
 `trail_has_arm_price`, the request's own flag read back, so a trail with no
@@ -3783,15 +3915,18 @@ every series is built from the input (the subscription row itself has no spare
 word left, so the source rides beside it rather than in it). The event
 retention (`PF_NATIVE_SPEC_EXT_EVENT_RETENTION`, R5 lane V19-B) is the last:
 `event_retention`, a `pf_native_event_retention_e` word, and a reserved word
-that must be zero. The struct therefore has five published lengths and the
-runtime accepts each: `PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE`,
-`PF_NATIVE_RUN_SPEC_EXT_V1_RISK_SIZE`, `PF_NATIVE_RUN_SPEC_EXT_V1_POLICY_SIZE`,
-`PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE` (each the offset of the first field
+that must be zero. The quantity tolerance (`PF_NATIVE_SPEC_EXT_QUANTITY_TOLERANCE`,
+R5 lane K-ULP4) is the last: one `double`, `quantity_tolerance`. The struct
+therefore has six published lengths and the runtime accepts each:
+`PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE`, `PF_NATIVE_RUN_SPEC_EXT_V1_RISK_SIZE`,
+`PF_NATIVE_RUN_SPEC_EXT_V1_POLICY_SIZE`, `PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE`,
+`PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE` (each the offset of the first field
 of the tail behind it, not a literal) and the current `sizeof`; a caller is
 refused with `PF_NATIVE_E_STRUCT` for a bit whose tail it does not carry, and
 any other length is refused outright. A caller that does not set the
 retention bit keeps `PF_NATIVE_EVENT_RETENTION_FULL`, so every caller
-compiled before the tail existed reads back the record it always did. A realtime stream appends later feed
+compiled before the tail existed reads back the record it always did; one
+that does not set the tolerance bit keeps the exact settlement. A realtime stream appends later feed
 bars with `strategy_native_append_auxiliary_bars_v1`, the C spelling of
 `append_auxiliary_bars`: `PF_NATIVE_OK`, or `PF_NATIVE_E_STATE` for every
 by-name refusal above with the reason in `strategy_get_last_error`.
@@ -3804,10 +3939,12 @@ lengths** and the runtime accepts each: the layout this header first shipped
 field rather than a literal), that plus six hooks
 (`PF_NATIVE_CALLBACKS_V1_HOOKS_SIZE`), that plus the policy-hook tail
 (`PF_NATIVE_CALLBACKS_V1_POLICY_SIZE`), and the current one, whose trailing
-`reserved1` marker (documented zero, not checked) says the host reads the
+`reserved1` marker (required zero, checked at host creation) says the host reads the
 lot-excursion facts' `entry_commission` tail. A host compiled against an
 earlier layout keeps working and simply has none of the later hooks
-installed, which is exactly the kernel's own default for each.
+installed, which is exactly the kernel's own default for each. The policy-hook
+layout already receives the decision's session tail; the later marker affects
+only the lot-excursion facts tail.
 
 Two of the six are ordinary observation callbacks. `on_recalculate` is
 `on_native_recalculate`: every calculation of the run arrives there, tagged
@@ -3990,7 +4127,7 @@ These are contract, not pending work.
 The standalone native host has no Pine decision path at runtime, and the
 constructor/member cut has since landed: `engine.hpp` has **zero** references to
 `CapAttachment`, `OrderPriority` or `IntradayCap`. `NativeStrategyHost` is
-zero-argument (`native_host.hpp:826`); the `CapAttachment` constructor belongs
+zero-argument (`native_host.hpp:833`); the `CapAttachment` constructor belongs
 to `source::PineStrategyHost` (`pine_strategy_host.hpp:241-244`), and the cap
 type itself lives in the adapter (`intraday_cap.hpp:18`).
 

@@ -62,7 +62,8 @@ enum class NativeCompletionKind : std::uint8_t {
 };
 
 /// Everything the kernel knows about WHERE a point is, as one owning value: its
-/// event ordinal, the interval index, the nominal and scheduled-eligible opens,
+/// event ordinal, the script interval index, the named input interval index,
+/// the nominal and scheduled-eligible opens,
 /// the last traded close, the next period and next input opens, the effective time
 /// the account converts and hashes at, the source price time, and the three
 /// classifications above. A host reads it through NativeDecisionContext; mutating
@@ -71,6 +72,11 @@ enum class NativeCompletionKind : std::uint8_t {
 struct NativeCoordinate {
     uint64_t ordinal = 0;
     int interval_index = 0;
+    // The script-bar coordinate is the public index above.  Aggregated runs
+    // retain the input slot that supplied this point here for hosts that need
+    // to inspect input cadence; it occupies the former alignment padding and
+    // does not change the v19 C++ layout.
+    int input_interval_index = 0;
     int64_t open_ms = 0;
     int64_t eligible_open_ms = 0;
     int64_t last_traded_close_ms = 0;
@@ -129,21 +135,22 @@ struct NativeDecisionContext {
     // day across local midnight). Every callback of the bar carries the same
     // four: its open, its sub-bars and ticks, its calculation, and every fill
     // and recalculation on it.
-    //   in_session         the script bar's label is in session.
+    //   in_session         the script bar has an eligible instant in session.
     //   opens_session_day  in session, and the bar before it is not, or is on
     //                      another session day.
     //   closes_session_day in session, and the bar after it is not, or is on
     //                      another session day.
     // "The bar before / after" is the one the run holds — the batch input or
-    // stream warmup being consumed — and otherwise the calendar's slot one
-    // script width away. At the run's own edges nothing is held: its first bar
+    // stream warmup being consumed — and otherwise the calendar's previous
+    // or next eligible input slot, across declared breaks. At the run's own
+    // edges nothing is held: its first bar
     // opens its session day, and a batch's final bar closes it, because a
     // batch is complete input; a stream reads on, because it continues.
     //   closes_session_day_open_ended
     //                      closes_session_day for a run whose input goes on
     //                      past it: a batch's final bar, which nothing held
-    //                      follows, is judged by the calendar one script width
-    //                      on, exactly as a stream's bar is, instead of by the
+    //                      follows, is judged by the calendar's next eligible
+    //                      input slot, exactly as a stream's bar is, instead of by the
     //                      run's end. Every other bar reads closes_session_day.
     //                      It is what a host that recomputes a batch whose
     //                      last input is still forming reads for that bar.

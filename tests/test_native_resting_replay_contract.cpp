@@ -150,6 +150,7 @@ bool equal_cursor_bits(const no::MatchCursor& a, const no::MatchCursor& b) {
     const auto& x = a.point;
     const auto& y = b.point;
     return bits_eq(a.t, b.t) && x.ordinal == y.ordinal && x.interval_index == y.interval_index
+        && x.input_interval_index == y.input_interval_index
         && x.open_ms == y.open_ms && x.eligible_open_ms == y.eligible_open_ms
         && x.last_traded_close_ms == y.last_traded_close_ms
         && x.next_period_open_ms == y.next_period_open_ms
@@ -304,6 +305,7 @@ void same_event_id(const no::EventId& a, const no::EventId& b) {
 void same_coord(const NativeCoordinate& a, const NativeCoordinate& b) {
     same_u64(a.ordinal, b.ordinal);
     CHECK(a.interval_index == b.interval_index);
+    CHECK(a.input_interval_index == b.input_interval_index);
     same_i64(a.open_ms, b.open_ms);
     same_i64(a.eligible_open_ms, b.eligible_open_ms);
     same_i64(a.last_traded_close_ms, b.last_traded_close_ms);
@@ -872,25 +874,6 @@ void units_after(const no::ExecutionAppliedEvent& e, double before, double after
     same_d(std::get<no::RemainingProjectionUnits>(e.remaining_after).q, after);
 }
 
-void failed_is_permanent(Host& h, int64_t next_offset) {
-    REQUIRE(h.native_state().kind == NativeLifecycleKind::Failed);
-    const auto before = h.native_state().failure;
-    const auto hash = h.native_continuation_hash();
-    const auto count = h.native_events(0).size();
-    const auto position = h.physical_position();
-    CHECK(!h.input(next_offset, 100));
-    CHECK(!h.stream_advance_time(T + next_offset + 100));
-    CHECK(!h.stream_end(false));
-    bool threw = false;
-    try { (void)h.submit(tx(1)); } catch (const std::exception&) { threw = true; }
-    CHECK(threw);
-    CHECK(h.native_state().kind == NativeLifecycleKind::Failed);
-    same_failure(h.native_state().failure, before);
-    CHECK(h.native_events(0).size() == count);
-    CHECK(h.native_continuation_hash() == hash);
-    same_d(h.physical_position().signed_units, position.signed_units);
-}
-
 void replay_partial_budget(double sign) {
     Host a, b;
     const char* key = sign > 0 ? "P2-budget-L" : "P2-budget-S";
@@ -1257,6 +1240,12 @@ void replay_confirmed_bar(double sign) {
     CHECK(trail_b.incarnation == trail_a.incarnation);
 }
 
+// A one-unit point budget cannot move a 2^60-unit request's remaining units
+// (fl(2^60 - 1) is 2^60): the request core refuses the fill. Since R5 lane
+// K-ULP4 that is the request's typed refusal -- a MatchRejectedEvent with
+// MatchRejectReason::UnrepresentableQuantity -- and the run goes on; it failed
+// the run with SettlementFailure / NonrepresentableQuantity before. Both
+// replays refuse identically.
 void replay_failed_capacity(double sign) {
     Host a, b;
     const char* key = sign > 0 ? "P2-C8-L" : "P2-C8-S";
@@ -1264,24 +1253,26 @@ void replay_failed_capacity(double sign) {
     auto r = tx(sign * 0x1p60, "huge"); r.capacity = no::PointBudget{1};
     const auto ha = put(a, r), hb = put(b, r);
     same_hosts("accepted", a, b);
-    CHECK(!a.input(0, 100)); CHECK(!b.input(0, 100));
-    same_hosts("failed", a, b);
-    REQUIRE(a.native_state().kind == NativeLifecycleKind::Failed);
-    CHECK(a.native_state().failure.code == NativeFailureCode::SettlementFailure);
-    CHECK(a.native_state().failure.discriminator
-          == static_cast<uint32_t>(no::CoreFailure::NonrepresentableQuantity));
-    CHECK(native_failure_has_recipient(a.native_state().failure.context));
-    CHECK(a.native_state().failure.context.recipient.incarnation == ha.incarnation);
+    CHECK(a.input(0, 100)); CHECK(b.input(0, 100));
+    same_hosts("refused", a, b);
+    CHECK(a.native_state().kind != NativeLifecycleKind::Failed);
+    const auto rejected = events_of<no::MatchRejectedEvent>(a);
+    REQUIRE(rejected.size() == 1);
+    CHECK(rejected[0].handle().incarnation == ha.incarnation);
+    CHECK(rejected[0].reason == no::MatchRejectReason::UnrepresentableQuantity);
     CHECK(fills(a, ha).empty());
     CHECK(events_of<no::ExecutionAppliedEvent>(a).empty());
     same_d(a.physical_position().signed_units, 0);
-    failed_is_permanent(a, 1);
-    failed_is_permanent(b, 1);
-    same_hosts("refused", a, b);
     CHECK(hb.incarnation == ha.incarnation);
 }
 
-void replay_failed_group(double sign) {
+// A one-unit fill cannot move a 2^60-unit sibling's remaining units
+// (fl(2^60 - 1) is 2^60). Since R5 lane K-ULP5 that deduction is absorbed -- a
+// ReservationReducedEvent that requests the fill and deducts 0, the recipient's
+// units 2^60 before and after -- and the run goes on; the request core answered
+// UnrepresentableReservation and the run failed with discriminator 7 before.
+// Both replays absorb identically.
+void replay_absorbed_group(double sign) {
     Host a, b;
     const char* key = sign > 0 ? "P2-G5-L" : "P2-G5-S";
     start(a, key, 1, 2); start(b, key, 1, 2);
@@ -1292,22 +1283,31 @@ void replay_failed_group(double sign) {
     auto emit = tx(sign, "filler"); emit.group = no::Member{7, 1, no::GroupEffect::Reduce};
     const auto fa = put(a, emit), fb = put(b, emit);
     same_hosts("accepted", a, b);
-    CHECK(!a.input(0, 100)); CHECK(!b.input(0, 100));
-    same_hosts("failed", a, b);
+    CHECK(a.input(0, 100)); CHECK(b.input(0, 100));
+    same_hosts("absorbed", a, b);
+    CHECK(a.native_state().kind == NativeLifecycleKind::Running);
     REQUIRE(fills(a, fa).size() == 1);
     CHECK(fills(a, fa)[0].terminal);
     CHECK(fills(a, ra).empty());
-    CHECK(events_of<no::ReservationReducedEvent>(a).empty());
-    const auto failure = a.native_state().failure;
-    CHECK(failure.discriminator == static_cast<uint32_t>(no::CoreFailure::UnrepresentableReservation));
-    CHECK(native_failure_has_cause(failure.context) && native_failure_has_recipient(failure.context));
-    CHECK(failure.context.cause.ordinal == fills(a, fa)[0].ordinal);
-    CHECK(failure.context.recipient.incarnation == ra.incarnation);
+    const auto reduced = events_of<no::ReservationReducedEvent>(a);
+    REQUIRE(reduced.size() == 1);
+    CHECK(reduced[0].recipient == ra);
+    CHECK(reduced[0].cause.ordinal == fills(a, fa)[0].ordinal);
+    same_d(reduced[0].requested_delta, 1);
+    same_d(reduced[0].actual_deduction, 0);
+    same_d(reduced[0].before.q, 0x1p60);
+    same_remaining_proj(reduced[0].after, no::RemainingProjectionUnits{0x1p60});
+    CHECK(cancellations(a, ra).empty());
     same_d(a.physical_position().signed_units, sign);
-    failed_is_permanent(a, 1);
-    failed_is_permanent(b, 1);
-    same_hosts("refused", a, b);
+    // The run goes on: the same next fill on both, and both complete.
+    const auto na = put(a, tx(sign, "next")), nb = put(b, tx(sign, "next"));
+    CHECK(a.input(1, 100)); CHECK(b.input(1, 100));
+    CHECK(fills(a, na).size() == 1);
+    same_hosts("continued", a, b);
+    finish(a); finish(b);
+    same_hosts("complete", a, b);
     CHECK(fb.incarnation == fa.incarnation && rb.incarnation == ra.incarnation);
+    CHECK(nb.incarnation == na.incarnation);
 }
 
 void perturb_one_field(double sign) {
@@ -1800,10 +1800,10 @@ int main() {
                  [&] { replay_owner_expiry_replace(sign); });
         run_case(sign > 0 ? "identical confirmed-bar long" : "identical confirmed-bar short",
                  [&] { replay_confirmed_bar(sign); });
-        run_case(sign > 0 ? "failed capacity prefix long" : "failed capacity prefix short",
+        run_case(sign > 0 ? "refused capacity prefix long" : "refused capacity prefix short",
                  [&] { replay_failed_capacity(sign); });
-        run_case(sign > 0 ? "failed group prefix long" : "failed group prefix short",
-                 [&] { replay_failed_group(sign); });
+        run_case(sign > 0 ? "absorbed group prefix long" : "absorbed group prefix short",
+                 [&] { replay_absorbed_group(sign); });
         run_case(sign > 0 ? "perturb fields long" : "perturb fields short",
                  [&] { perturb_one_field(sign); });
         run_case(sign > 0 ? "perturb owner long" : "perturb owner short",

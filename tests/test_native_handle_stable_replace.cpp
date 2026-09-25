@@ -1,7 +1,8 @@
 // R5 lane V19-D witness: a replace that keeps the handle
 // (ReplaceOptions::keep_handle) or carries a close's book binding
-// (ReplaceOptions::keep_binding) changes what the run records, never what it
-// matches, nor any ordinal of its timeline.
+// (ReplaceOptions::keep_binding) changes what the run records and, when a
+// re-priced parent has waiting children, whether those children remain
+// matchable; outside that ownership case it preserves the fill timeline.
 //
 // 1. The differential. One seeded bare host plays randomized re-issue scripts
 //    on gapped tapes -- exits of every closing intent (explicit units,
@@ -52,10 +53,10 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <functional>
 #include <map>
 #include <memory>
@@ -545,6 +546,7 @@ void read_journal(const ReissueHost& host, Record& record) {
     auto cursor = [](full_fold::Fold& f, const no::MatchCursor& c) {
         f.u(c.point.ordinal);
         f.i(c.point.interval_index);
+        f.i(c.point.input_interval_index);
         f.i(c.point.effective_time_ms);
         f.e(c.point.path_phase);
         f.d(c.t);
@@ -1097,37 +1099,53 @@ private:
     std::optional<no::RequestHandle> tp_, sl_;
 };
 
-double continuation_seconds(int bars) {
+double continuation_seconds(int bars, int repeats) {
     k3_book::BookConfig tape_config;
     tape_config.seed = 99;
     tape_config.bars = bars;
     const auto tape = k3_book::make_tape(tape_config);
     NativeRunSpec spec = directed_spec();
-    ContinuationHost host;
-    CHECK(host.configure_native(spec).status == NativeSetupStatus::Applied);
-    const auto start = std::chrono::steady_clock::now();
-    host.run(tape.bars.data(), static_cast<int>(tape.bars.size()));
-    const double seconds =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    CHECK(host.last_error().empty());
-    CHECK(host.native_state().kind == NativeLifecycleKind::Completed);
-    // A range per bar: a walk of them at every read would be quadratic.
-    CHECK(host.issued_ranges() + 10 > static_cast<std::size_t>(bars));
+    double seconds = 0.0;
+    for (int repeat = 0; repeat < repeats; ++repeat) {
+        ContinuationHost host;
+        CHECK(host.configure_native(spec).status == NativeSetupStatus::Applied);
+        const std::clock_t start = std::clock();
+        host.run(tape.bars.data(), static_cast<int>(tape.bars.size()));
+        seconds += static_cast<double>(std::clock() - start) / CLOCKS_PER_SEC;
+        CHECK(host.last_error().empty());
+        CHECK(host.native_state().kind == NativeLifecycleKind::Completed);
+        // A range per bar: a walk of them at every read would be quadratic.
+        CHECK(host.issued_ranges() + 10 > static_cast<std::size_t>(bars));
+    }
     return seconds;
 }
 
 void scaling() {
-    constexpr int kSmall = 2000;
+    constexpr int kInitialSmall = 2000;
+    constexpr int kMaxRepeats = 256;
+    constexpr double kMinLegSeconds = 0.1;
+    int repeats = 1;
+    while (continuation_seconds(kInitialSmall, repeats) < kMinLegSeconds
+           && repeats < kMaxRepeats / 2) {
+        repeats *= 2;
+    }
     double best_small = 1e9, best_large = 1e9;
-    for (int round = 0; round < 3; ++round) {
-        best_small = std::min(best_small, continuation_seconds(kSmall));
-        best_large = std::min(best_large, continuation_seconds(4 * kSmall));
+    for (int round = 0; round < 5; ++round) {
+        if (round % 2 == 0) {
+            best_small = std::min(best_small, continuation_seconds(kInitialSmall, repeats));
+            best_large = std::min(best_large, continuation_seconds(4 * kInitialSmall, repeats));
+        } else {
+            best_large = std::min(best_large, continuation_seconds(4 * kInitialSmall, repeats));
+            best_small = std::min(best_small, continuation_seconds(kInitialSmall, repeats));
+        }
     }
     const double ratio = best_large / best_small;
+    CHECK(best_small >= kMinLegSeconds);
+    CHECK(best_large >= kMinLegSeconds);
     CHECK(ratio < 8.0);
-    std::printf("continuation read every bar, re-prices keeping handles: %d bars %.4f s, %d bars "
-                "%.4f s (x%.2f, bound x8)\n",
-                kSmall, best_small, 4 * kSmall, best_large, ratio);
+    std::printf("continuation read every bar, re-prices keeping handles: %d bars x%d %.4f s, "
+                "%d bars x%d %.4f s (x%.2f, bound x8)\n", kInitialSmall, repeats,
+                best_small, 4 * kInitialSmall, repeats, best_large, ratio);
 }
 }  // namespace
 

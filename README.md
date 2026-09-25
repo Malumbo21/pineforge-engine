@@ -171,7 +171,8 @@ report. Each is a CTest row: `ctest --test-dir build -R example_`.
 Hand the runtime a callback table and drive the kernel from any language with
 a C FFI — no C++ in your own code. The complete file is
 [`examples/native/hello_kernel_c.c`](examples/native/hello_kernel_c.c); the
-43 `strategy_native_*` functions are declared in
+41 `strategy_native_*` functions (plus two `strategy_configure_native_ext_*`
+functions) are declared in
 [`include/pineforge/native_c_api.h`](include/pineforge/native_c_api.h) and
 summarised in [Driving the kernel from C](#driving-the-kernel-from-c) below.
 
@@ -449,12 +450,12 @@ inventories are pinned by `scripts/check_c_abi_runtime.py`:
 | `strategy_set_account_currency_fx_series` | Effective-time quote-to-account FX |
 | `strategy_get_last_error` | The latest runtime error |
 | `pf_version_get` / `pf_version_string` / `pf_abi_version` | Runtime version, version string, struct-layout version (`PF_ABI_VERSION == 4`) |
-| `strategy_execution_contract` / `strategy_configure_native_v1` / `strategy_configure_native_fx_curve_v1` / `_fx_curve_ext_v1` | Query Legacy vs NativeMarketV1; apply the versioned native run specification (a refused one returns `-1` and leaves the handle Failed); stage or clear an immutable native FX curve, `_fx_curve_ext_v1` also writing the typed refusal (`pf_native_fx_curve_error_e`) and the offending point's index |
+| `strategy_execution_contract` / `strategy_configure_native_v1` / `strategy_configure_native_fx_curve_v1` / `_fx_curve_ext_v1` | Query Legacy vs NativeMarketV1; apply the versioned native run specification (an invalid or refused base call returns `-1` and leaves the handle Failed; a cooperative `Aborted` handle may be reused with the same key and a higher run number); stage or clear an immutable native FX curve, `_fx_curve_ext_v1` also writing the typed refusal (`pf_native_fx_curve_error_e`) and the offending point's index |
 | `strategy_request_abort` / `strategy_last_run_status` | Cooperative abort of a run in progress; `0`=completed, `1`=aborted |
 | `strategy_set_realtime_tail` | Live-runtime surface (ABI v4): the array's last bar is a still-forming tail — `barstate.islast=false`, `last_bar_index`/`last_bar_time` frozen at the horizon bar, no range-end row |
 | `strategy_set_probe_suppress_tail_logic` | ABI v4: the last bar runs only the broker's pre-`on_bar` steps (pending-order settlement, intraday-cap/loss checks) and returns — no `on_bar`, no margin-call / POOC second pass / bracket-reissue processing (the range-end row is `strategy_set_realtime_tail`'s to skip; the flags are independent) |
 | `strategy_set_path_order` / `strategy_last_bar_dual_entry_path` | ABI v4: force the intrabar O→H/L→C leg order (`AUTO`/`HIGH_FIRST`/`LOW_FIRST`) for path-dependent fill probing; read which side won a same-bar dual-entry-stop arbitration |
-| `strategy_set_broker_state_hash_recording` / `strategy_broker_state_hash` | ABI v4: toggle a 64-bit broker-state hash appended per script bar to `pf_report_t::broker_state_hash`; read the final state's hash |
+| `strategy_set_broker_state_hash_recording` / `strategy_broker_state_hash` | ABI v4: toggle a 64-bit broker-state hash appended at report points to `pf_report_t::broker_state_hash` (a bare host uses `KernelRecorded`); read the final state's hash |
 | `strategy_pending_orders_len` / `strategy_pending_order_get` / `strategy_pending_order_layout` | ABI v4: the resting pending-order book after the most recent run — count, a POD snapshot per order (`pf_pending_order_v1_t`), and the snapshot's self-describing field layout |
 | `strategy_pending_order_fill_qty` / `_level_resolved` / `_effective_levels` / `strategy_trail_best_price` | ABI v4: engine-computed values for a resting order — the quantity it would open if filled at a given price, whether its relative offsets resolve yet, its resolved stop/limit/trail-activation levels, and the live position's trail extreme |
 | `strategy_position_avg_price` / `strategy_position_cycle_seq` / `strategy_position_size` | ABI v4: the live position's volume-weighted average entry price, its cycle id, and its script-facing signed size |
@@ -481,7 +482,7 @@ strategy. They are additive; no symbol, struct or behaviour above changes, and
 | `strategy_native_events_v1` / `_state_v1` | Poll the recorded event history by ordinal; read the lifecycle and its typed failure |
 | `strategy_native_acknowledge_events_v1` / `strategy_native_event_window_v1` | Under the `WINDOW` event retention: say which events the host has read, so the kernel drops those command events at the next script-bar boundary; read the oldest ordinal a poll can still return |
 | `strategy_native_timeframe_bar_interval_v1` | From inside `on_timeframe_bar`, the delivered bucket's own calendar interval (`pf_native_timeframe_interval_v1`: the C++ `NativeTimeframeBarContext::interval`); `PF_NATIVE_E_STATE` anywhere else |
-| `strategy_native_partial_bar_v1` / `_series_bar_v1` / `_trail_state_v1` / `_liquidation_price_v1` | The four optional reads — the bar so far at the cursor, a declared higher-timeframe series' latest bucket, a live trail's projection, the solved liquidation level. Each answers `PF_NATIVE_ABSENT` where the C++ `std::optional` is empty |
+| `strategy_native_partial_bar_v1` / `_series_bar_v1` / `_trail_state_v1` / `_liquidation_price_v1` | The four optional reads — the bar so far through the last path point consumed, a declared higher-timeframe series' latest bucket, a live trail's projection, the solved liquidation level. Each answers `PF_NATIVE_ABSENT` where the C++ `std::optional` is empty |
 | `strategy_native_risk_state_v1` / `_marked_equity_v1` / `_recalculations_v1` / `_continuation_hash_v1` | The generic risk ledger, marked equity at a mark, the driven/suppressed recalculation counters, and the run's continuation identity |
 | `strategy_native_margin_call_v1` | One margin call's whole economics by its event ordinal (`pf_native_margin_call_v1`: mark, units, the position before and after, the surviving book's equity and requirement, the re-solved liquidation price) |
 | `strategy_native_sized_units_v1` | The units a `PF_NATIVE_INTENT_SIZED` request resolves to under the run's spec — the kernel's own sizing function, as a pure query before submitting |
@@ -502,12 +503,13 @@ declare all fail CI.
 
 Every struct is tagged and size-prefixed (`struct_size`, `version`); an unknown
 size, version or enumerator is refused with a documented negative status and
-mutates nothing. `pf_native_run_spec_ext_v1` has five published lengths — the
+mutates nothing. `pf_native_run_spec_ext_v1` has six published lengths — the
 layout the lane first shipped (`PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE`), the same
 struct with L9's appended risk tail (`PF_NATIVE_RUN_SPEC_EXT_V1_RISK_SIZE`), that
 plus N8's intrabar / policy tail (`PF_NATIVE_RUN_SPEC_EXT_V1_POLICY_SIZE`), the
 auxiliary-feed tail (`PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE`), the event-retention
-tail, and the current layout; `pf_native_callbacks_v1`
+tail (`PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE`), and the current layout with
+K-ULP4's quantity-tolerance tail; `pf_native_callbacks_v1`
 has four — the layout the lane first shipped (`PF_NATIVE_CALLBACKS_V1_BASE_SIZE`),
 that plus its six-hook tail (`PF_NATIVE_CALLBACKS_V1_HOOKS_SIZE`), that plus the
 policy-hook tail (`PF_NATIVE_CALLBACKS_V1_POLICY_SIZE`), and the current one,
@@ -522,7 +524,7 @@ needs no new symbol: the `strategy_stream_*` family takes these handles
 unchanged. Worked example: [`examples/native/hello_kernel_c.c`](examples/native/hello_kernel_c.c);
 reference: [`docs/pages/native-engine.md`](docs/pages/native-engine.md).
 
-POD types `pf_bar_t`, `pf_trade_tick_t`, `pf_trade_t`, `pf_report_t`, `pf_security_diag_t`, `pf_trace_entry_t`, `pf_version_t`, `pf_trade_stats_t`, `pf_equity_stats_t`, `pf_metrics_t`, `pf_equity_point_t`, `pf_pending_order_v1_t`, `pf_field_desc_t` and the `pf_magnifier_distribution_t` enum complete the surface. ABI v2 added computed trading metrics and a per-bar equity curve; ABI v3 added `pf_trade_t::open_at_end`, TradingView's range-end close of a position still open after the last bar; ABI v4 added the live-runtime accessors above plus `pf_report_t::broker_state_hash` / `broker_state_hash_len` (a per-script-bar broker-state hash array, appended after `equity_curve_len`, NULL/0-length unless `strategy_set_broker_state_hash_recording` is on) and the `pf_pending_order_v1_t` generated POD mirror of the engine's resting-order record. Check `pf_abi_version()` before running: the report struct is caller-allocated.
+POD types `pf_bar_t`, `pf_trade_tick_t`, `pf_trade_t`, `pf_report_t`, `pf_security_diag_t`, `pf_trace_entry_t`, `pf_version_t`, `pf_trade_stats_t`, `pf_equity_stats_t`, `pf_metrics_t`, `pf_equity_point_t`, `pf_pending_order_v1_t`, `pf_field_desc_t` and the `pf_magnifier_distribution_t` enum complete the surface. ABI v2 added computed trading metrics and a per-bar equity curve; ABI v3 added `pf_trade_t::open_at_end`, TradingView's range-end close of a position still open after the last bar; ABI v4 added the live-runtime accessors above plus `pf_report_t::broker_state_hash` / `broker_state_hash_len` (a per-report-point broker-state hash array, appended after `equity_curve_len`, NULL/0-length unless recording is on and a report point exists) and the `pf_pending_order_v1_t` generated POD mirror of the engine's resting-order record. Check `pf_abi_version()` before running: the report struct is caller-allocated.
 
 Full flag semantics, string lifetimes and the three L0 evidence lanes behind the ABI v4 live surface: [`docs/pages/live-surface.md`](docs/pages/live-surface.md).
 

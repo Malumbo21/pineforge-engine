@@ -1046,6 +1046,36 @@ static void check_callback_failure_latch(void) {
     CHECK_EQ_INT(state.failure_code, PF_NATIVE_FAILURE_CALLBACK,
                  "failure is not CallbackException");
     CHECK_EQ_INT(calls, 3, "the run continued past the refusing callback");
+    CHECK(strategy_get_last_error(host) && strategy_get_last_error(host)[0] != '\0',
+          "the failed run has no presentation error to clear");
+    CHECK_EQ_INT(strategy_native_state_v1(host, NULL), PF_NATIVE_E_ARGUMENT,
+                 "a NULL state output was not refused");
+    CHECK(strategy_get_last_error(host) && strategy_get_last_error(host)[0] == '\0',
+          "a C-layer state refusal kept the previous run's last_error");
+    strategy_native_host_free(host);
+
+    /* The older configure symbol is implemented in c_abi.cpp rather than
+     * native_c_host.cpp. Its own argument refusal must clear that same stale
+     * presentation text without moving the durable Failed state. */
+    calls = 0;
+    host = strategy_native_host_create_v1(&table);
+    CHECK(host != NULL, "second refusing host create failed");
+    if (!host) return;
+    CHECK_EQ_INT(strategy_configure_native_v1(host, &spec), 0, "second refusing configure");
+    CHECK_EQ_INT(strategy_native_run_v1(host, bars, n, NULL), PF_NATIVE_E_RUN_FAILED,
+                 "second refusing callback did not fail the run");
+    CHECK(strategy_get_last_error(host) && strategy_get_last_error(host)[0] != '\0',
+          "the second failed run has no presentation error to clear");
+    CHECK_EQ_INT(strategy_configure_native_v1(host, NULL), -1,
+                 "a NULL native spec was not refused");
+    CHECK(strategy_get_last_error(host) && strategy_get_last_error(host)[0] == '\0',
+          "a C-layer configure refusal kept the previous run's last_error");
+    memset(&state, 0, sizeof(state));
+    state.struct_size = (uint32_t)sizeof(state);
+    CHECK_EQ_INT(strategy_native_state_v1(host, &state), PF_NATIVE_OK,
+                 "durable failure was not readable after C-layer refusal");
+    CHECK_EQ_INT(state.lifecycle, PF_NATIVE_LIFECYCLE_FAILED,
+                 "the C-layer refusal changed durable Failed state");
     strategy_native_host_free(host);
 }
 
@@ -1199,7 +1229,7 @@ static void check_event_retention(void) {
     const uint32_t current = (uint32_t)sizeof(pf_native_run_spec_ext_v1);
     const uint32_t bit = PF_NATIVE_SPEC_EXT_EVENT_RETENTION;
     retention_run v1, clear, older, full, commands, window, polled, bad_word, bad_reserved,
-        older_bit;
+        older_bit, fifth;
 
     v1 = retention_case(0u, 0u, 0u, 0u, 0);
     clear = retention_case(current, 0u, PF_NATIVE_EVENT_RETENTION_WINDOW, 0u, 0);
@@ -1212,6 +1242,9 @@ static void check_event_retention(void) {
     bad_reserved = retention_case(current, bit, PF_NATIVE_EVENT_RETENTION_FULL, 1u, 0);
     older_bit = retention_case(PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE, bit,
                                PF_NATIVE_EVENT_RETENTION_WINDOW, 0u, 0);
+    /* K-ULP4 appended a sixth layout; the fifth still carries the word. */
+    fifth = retention_case(PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE, bit,
+                           PF_NATIVE_EVENT_RETENTION_COMMANDS, 0u, 0);
 
     /* A caller that does not send the word keeps everything. */
     CHECK_EQ_INT(v1.configure, PF_NATIVE_OK, "the v1 spec was refused");
@@ -1250,11 +1283,430 @@ static void check_event_retention(void) {
     CHECK_EQ_INT(bad_reserved.configure, PF_NATIVE_E_TAG, "a nonzero reserved2 was accepted");
     CHECK_EQ_INT(older_bit.configure, PF_NATIVE_E_STRUCT,
                  "the retention bit was accepted from the fourth layout");
+    CHECK_EQ_INT(fifth.configure, PF_NATIVE_OK, "the fifth layout's retention word was refused");
+    CHECK(fifth.drivers == 0 && fifth.commands == v1.commands,
+          "the fifth layout did not read COMMANDS");
     /* The two symbols refuse what they cannot read. */
     CHECK_EQ_INT(strategy_native_acknowledge_events_v1(NULL, 0u), PF_NATIVE_E_HANDLE,
                  "a NULL handle's acknowledgement was accepted");
     CHECK_EQ_INT(strategy_native_event_window_v1(NULL, NULL), PF_NATIVE_E_HANDLE,
                  "a NULL handle's window read was accepted");
+}
+
+/* ── K-ULP4: the typed quantity refusal and the tolerance tail, from C ─
+ *
+ * Open 1.5, Reduce 1.3, open 2.9: the book is {fl(1.5 - 1.3), 2.9}, and
+ * Reduce 0.2 needs 2^-54 of the 2.9 lot, below half its ulp. The exact
+ * settlement refuses THAT request with a MATCH_REJECTED row whose reason is
+ * PF_NATIVE_MATCH_REJECT_UNREPRESENTABLE_QUANTITY and the run completes (it
+ * failed with code 6 before the lane); under the extension's
+ * quantity-tolerance tail the close ends at the first lot. */
+typedef struct kulp4_state {
+    pf_strategy_t host;
+    int bar;
+    int error;
+    uint64_t last;
+} kulp4_state;
+
+static int kulp4_on_bar(void* user, const pf_bar_t* bar, const pf_native_decision_v1* at) {
+    static const double units[4] = {1.5, 1.3, 2.9, 0.2};
+    static const int reduces[4] = {0, 1, 0, 1};
+    kulp4_state* state = (kulp4_state*)user;
+    const int b = state->bar++;
+    pf_native_request_v1 request;
+    uint64_t incarnation = 0;
+    uint32_t reject = 0;
+    (void)bar;
+    (void)at;
+    if (b % 2 != 0 || b / 2 >= 4) return 0;
+    request = blank_request();
+    request.trigger = PF_NATIVE_TRIGGER_MARKET;
+    request.label = "k-ulp4";
+    request.comment = "";
+    if (reduces[b / 2]) {
+        request.intent = PF_NATIVE_INTENT_REDUCE;
+        request.reduce_size = PF_NATIVE_REDUCE_EXPLICIT_UNITS;
+    } else {
+        request.intent = PF_NATIVE_INTENT_TRANSACT;
+    }
+    request.intent_value = units[b / 2];
+    if (strategy_native_submit_v1(state->host, &request, &incarnation, &reject) != PF_NATIVE_OK
+        && state->error == 0) {
+        state->error = 1;
+    }
+    state->last = incarnation;
+    return 0;
+}
+
+/* size 0 = strategy_configure_native_v1 alone; otherwise the extension at
+ * that size, carrying the tolerance bit when `tolerance` is not 0. Answers the
+ * configure status, the last request's MATCH_REJECTED reason (-1 when it has
+ * none), the book's lot count and the lifecycle. */
+static int kulp4_case(uint32_t size, double tolerance, uint32_t* error, uint32_t* field,
+                      int* reason, int* lots, uint32_t* lifecycle) {
+    static pf_native_event_v1 rows[256];
+    kulp4_state state;
+    pf_native_callbacks_v1 table;
+    pf_native_run_spec_v1 spec = twin_spec();
+    pf_native_run_spec_ext_v1 ext;
+    pf_native_state_v1 run_state;
+    pf_bar_t bars[12];
+    int configure;
+    int got;
+    int i;
+
+    *reason = -1;
+    *lots = -1;
+    *lifecycle = 0;
+    memset(&state, 0, sizeof(state));
+    table = blank_callbacks(&state);
+    table.on_bar = kulp4_on_bar;
+    state.host = strategy_native_host_create_v1(&table);
+    CHECK(state.host != NULL, "K-ULP4 host create failed");
+    if (!state.host) return -100;
+    spec.session_key = "native-c-api-k-ulp4";
+    spec.initial_capital = 1e9;
+    spec.fee_kind = PF_NATIVE_FEE_CASH_PER_EXECUTION;
+    if (size == 0u) {
+        configure = strategy_configure_native_v1(state.host, &spec);
+    } else {
+        memset(&ext, 0, sizeof(ext));
+        ext.struct_size = size;
+        ext.version = PF_NATIVE_API_VERSION;
+        ext.present_mask = PF_NATIVE_SPEC_EXT_EVENT_RETENTION;
+        ext.event_retention = PF_NATIVE_EVENT_RETENTION_FULL;
+        if (tolerance != 0.0) {
+            ext.present_mask |= PF_NATIVE_SPEC_EXT_QUANTITY_TOLERANCE;
+            ext.quantity_tolerance = tolerance;
+        }
+        configure = strategy_configure_native_ext_result_v1(state.host, &spec, &ext, error,
+                                                             field);
+    }
+    if (configure == PF_NATIVE_OK) {
+        for (i = 0; i < 12; ++i) {
+            bars[i].open = bars[i].high = bars[i].low = bars[i].close = 100.0;
+            bars[i].volume = 5.0;
+            bars[i].timestamp = (int64_t)i * 300000;
+        }
+        CHECK_EQ_INT(strategy_native_run_v1(state.host, bars, 12, NULL), PF_NATIVE_OK,
+                     "K-ULP4 run");
+        CHECK_EQ_INT(state.error, 0, "a K-ULP4 submit was refused");
+        memset(&run_state, 0, sizeof(run_state));
+        run_state.struct_size = (uint32_t)sizeof(run_state);
+        run_state.version = PF_NATIVE_API_VERSION;
+        CHECK_EQ_INT(strategy_native_state_v1(state.host, &run_state), PF_NATIVE_OK,
+                     "K-ULP4 state read");
+        *lifecycle = run_state.lifecycle;
+        memset(rows, 0, sizeof(rows));
+        for (i = 0; i < 256; ++i) {
+            rows[i].struct_size = (uint32_t)sizeof(rows[i]);
+            rows[i].version = PF_NATIVE_API_VERSION;
+        }
+        got = strategy_native_events_v1(state.host, 0, rows, 256);
+        for (i = 0; i < got; ++i) {
+            if (rows[i].kind == PF_NATIVE_EVENT_MATCH_REJECTED
+                && rows[i].incarnation == state.last) {
+                *reason = (int)rows[i].reason;
+            }
+        }
+        *lots = strategy_native_open_lot_count_v1(state.host, NAN);
+    }
+    strategy_native_host_free(state.host);
+    return configure;
+}
+
+static void check_unrepresentable_quantity(void) {
+    uint32_t error = 0;
+    uint32_t field = 0;
+    uint32_t lifecycle = 0;
+    int reason = 0;
+    int lots = 0;
+    const uint32_t current = (uint32_t)sizeof(pf_native_run_spec_ext_v1);
+
+    CHECK_EQ_INT(PF_NATIVE_MATCH_REJECT_UNREPRESENTABLE_QUANTITY, 10,
+                 "the typed quantity refusal's word moved");
+    CHECK_EQ_INT(PF_NATIVE_SPEC_FIELD_QUANTITY_TOLERANCE, 65,
+                 "the tolerance's field word moved");
+    CHECK_EQ_INT(PF_NATIVE_SPEC_EXT_QUANTITY_TOLERANCE, 1u << 11,
+                 "the tolerance's mask bit moved");
+    /* Exact: the request is refused, typed; the book is untouched; the run
+     * completes. */
+    CHECK_EQ_INT(kulp4_case(0u, 0.0, &error, &field, &reason, &lots, &lifecycle), PF_NATIVE_OK,
+                 "the K-ULP4 v1 spec was refused");
+    CHECK_EQ_INT(reason, PF_NATIVE_MATCH_REJECT_UNREPRESENTABLE_QUANTITY,
+                 "Reduce 0.2 was not the typed quantity refusal");
+    CHECK_EQ_INT(lifecycle, PF_NATIVE_LIFECYCLE_COMPLETED, "the refusal stopped the run");
+    CHECK_EQ_INT(lots, 2, "the refused close moved the book");
+    /* The tolerance tail: the close ends at the first lot, whole. */
+    CHECK_EQ_INT(kulp4_case(current, 1e-10, &error, &field, &reason, &lots, &lifecycle),
+                 PF_NATIVE_OK, "the tolerance tail was refused");
+    CHECK_EQ_INT(reason, -1, "a close within the tolerance was refused");
+    CHECK_EQ_INT(lifecycle, PF_NATIVE_LIFECYCLE_COMPLETED, "the tolerant run did not complete");
+    CHECK_EQ_INT(lots, 1, "the close within the tolerance did not end at the lot");
+    /* The bit from the fifth layout, which has no field for it, and a bad
+     * value, named by its field. */
+    CHECK_EQ_INT(kulp4_case(PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE, 1e-10, &error, &field,
+                            &reason, &lots, &lifecycle),
+                 PF_NATIVE_E_STRUCT, "the tolerance bit was accepted from the fifth layout");
+    error = 0;
+    field = 0;
+    CHECK(kulp4_case(current, -1.0, &error, &field, &reason, &lots, &lifecycle) != PF_NATIVE_OK,
+          "a negative tolerance was accepted");
+    CHECK_EQ_INT(error, PF_NATIVE_SPEC_ERROR_NOT_FINITE_POSITIVE,
+                 "a negative tolerance named another error");
+    CHECK_EQ_INT(field, PF_NATIVE_SPEC_FIELD_QUANTITY_TOLERANCE,
+                 "a negative tolerance named another field");
+}
+
+/* ── R5 lane K-ULP5: an OCA-Reduce deduction binary64 cannot take ───
+ *
+ * K-ULP4's p5b probe through the C surface. A book {0.5, fl(1000.1 - 1000)}
+ * and three members of one OCA-Reduce group: a resting Reduce 1000 (a sell
+ * limit at 150 the run never reaches), a market Reduce 0.3 and a market
+ * ScopeFraction 1. The 0.3 fill lowers the resting member to fl(1000 - 0.3)
+ * and becomes the fraction's pending deduction; the fraction then closes
+ * 2.2759572004815709e-14, below half an ulp of 999.7. That deduction is
+ * absorbed -- a RESERVATION_REDUCED row whose closed_units is 0, the resting
+ * member's remaining units unchanged -- and the run completes (it failed with
+ * code 6 before the lane). The pending case: a bracket child waiting on an
+ * owner that never fills holds 2^60 pending, and a fill of 1 is absorbed into
+ * it -- a DEFERRED_GROUP row whose closed_units is 0. */
+typedef struct kulp5_state {
+    pf_strategy_t host;
+    int bar;
+    int error;
+    int pending_case;
+    uint64_t open1000;
+    int64_t cycle;
+    uint64_t resting;
+    uint64_t fraction;
+    uint64_t owner;
+    uint64_t child;
+} kulp5_state;
+
+static uint64_t kulp5_submit(kulp5_state* state, const pf_native_request_v1* request) {
+    uint64_t incarnation = 0;
+    uint32_t reject = 0;
+    if (strategy_native_submit_v1(state->host, request, &incarnation, &reject) != PF_NATIVE_OK
+        && state->error == 0) {
+        state->error = 1;
+    }
+    return incarnation;
+}
+
+static pf_native_request_v1 kulp5_request(uint32_t intent, uint32_t reduce_size, double value,
+                                          int64_t cohort) {
+    pf_native_request_v1 request = blank_request();
+    request.intent = intent;
+    request.reduce_size = reduce_size;
+    request.intent_value = value;
+    if (cohort != 0) {
+        request.group_kind = PF_NATIVE_GROUP_MEMBER;
+        request.group_effect = PF_NATIVE_GROUP_REDUCE;
+        request.group_id = 9;
+        request.group_cohort = cohort;
+    }
+    request.label = "k-ulp5";
+    request.comment = "";
+    return request;
+}
+
+static int kulp5_on_bar(void* user, const pf_bar_t* bar, const pf_native_decision_v1* at) {
+    kulp5_state* state = (kulp5_state*)user;
+    const int b = state->bar++;
+    pf_native_request_v1 request;
+    (void)bar;
+    (void)at;
+    if (state->pending_case) {
+        if (b == 0) {
+            request = kulp5_request(PF_NATIVE_INTENT_TRANSACT, 0u, 1.0, 0);
+            request.trigger = PF_NATIVE_TRIGGER_STOP;
+            request.p1 = 200.0;
+            state->owner = kulp5_submit(state, &request);
+            request = kulp5_request(PF_NATIVE_INTENT_REDUCE, PF_NATIVE_REDUCE_OWNER_OPENED, 0.0, 2);
+            request.owner = PF_NATIVE_OWNER_WAIT_FOR_APPLIED;
+            request.owner_n = 1u;
+            request.owner_incarnations = &state->owner;
+            state->child = kulp5_submit(state, &request);
+            request = kulp5_request(PF_NATIVE_INTENT_TRANSACT, 0u, 0x1p60, 1);
+            (void)kulp5_submit(state, &request);
+        } else if (b == 2) {
+            request = kulp5_request(PF_NATIVE_INTENT_FLATTEN, 0u, 0.0, 0);
+            (void)kulp5_submit(state, &request);
+        } else if (b == 4) {
+            request = kulp5_request(PF_NATIVE_INTENT_TRANSACT, 0u, 1.0, 3);
+            (void)kulp5_submit(state, &request);
+        }
+        return 0;
+    }
+    if (b == 0) {
+        request = kulp5_request(PF_NATIVE_INTENT_TRANSACT, 0u, 0.5, 0);
+        (void)kulp5_submit(state, &request);
+    } else if (b == 2) {
+        request = kulp5_request(PF_NATIVE_INTENT_TRANSACT, 0u, 1000.1, 0);
+        state->open1000 = kulp5_submit(state, &request);
+    } else if (b == 4) {
+        request = kulp5_request(PF_NATIVE_INTENT_REDUCE, PF_NATIVE_REDUCE_EXPLICIT_UNITS, 1000.0, 0);
+        request.owner = PF_NATIVE_OWNER_BIND_OPENING;
+        request.owner_n = 1u;
+        request.owner_incarnations = &state->open1000;
+        request.owner_cycle = state->cycle;
+        (void)kulp5_submit(state, &request);
+    } else if (b == 6) {
+        request = kulp5_request(PF_NATIVE_INTENT_REDUCE, PF_NATIVE_REDUCE_EXPLICIT_UNITS, 1000.0, 3);
+        request.trigger = PF_NATIVE_TRIGGER_LIMIT;
+        request.p1 = 150.0;
+        state->resting = kulp5_submit(state, &request);
+        request = kulp5_request(PF_NATIVE_INTENT_REDUCE, PF_NATIVE_REDUCE_EXPLICIT_UNITS, 0.3, 1);
+        (void)kulp5_submit(state, &request);
+        request = kulp5_request(PF_NATIVE_INTENT_REDUCE, PF_NATIVE_REDUCE_SCOPE_FRACTION, 1.0, 2);
+        state->fraction = kulp5_submit(state, &request);
+    }
+    return 0;
+}
+
+static int kulp5_on_applied(void* user, const pf_native_applied_v1* applied,
+                            const pf_native_decision_v1* at) {
+    kulp5_state* state = (kulp5_state*)user;
+    (void)at;
+    if (applied->incarnation == state->open1000) state->cycle = applied->cycle_after;
+    return 0;
+}
+
+/* Runs one case; answers the lifecycle and the rows. */
+static uint32_t kulp5_run(kulp5_state* state, int pending_case, pf_native_event_v1* rows,
+                          int capacity, int* got) {
+    pf_native_callbacks_v1 table;
+    pf_native_run_spec_v1 spec = twin_spec();
+    pf_native_run_spec_ext_v1 ext;
+    pf_native_state_v1 run_state;
+    pf_bar_t bars[12];
+    int i;
+
+    memset(state, 0, sizeof(*state));
+    state->pending_case = pending_case;
+    table = blank_callbacks(state);
+    table.on_bar = kulp5_on_bar;
+    table.on_applied = kulp5_on_applied;
+    state->host = strategy_native_host_create_v1(&table);
+    CHECK(state->host != NULL, "K-ULP5 host create failed");
+    *got = 0;
+    if (!state->host) return 0u;
+    spec.session_key = pending_case ? "native-c-api-k-ulp5-pending" : "native-c-api-k-ulp5-p5b";
+    spec.initial_capital = 1e9;
+    spec.fee_kind = PF_NATIVE_FEE_CASH_PER_EXECUTION;
+    memset(&ext, 0, sizeof(ext));
+    ext.struct_size = (uint32_t)sizeof(ext);
+    ext.version = PF_NATIVE_API_VERSION;
+    ext.present_mask = PF_NATIVE_SPEC_EXT_EVENT_RETENTION;
+    ext.event_retention = PF_NATIVE_EVENT_RETENTION_FULL;
+    CHECK_EQ_INT(strategy_configure_native_ext_v1(state->host, &spec, &ext), PF_NATIVE_OK,
+                 "the K-ULP5 spec was refused");
+    for (i = 0; i < 12; ++i) {
+        bars[i].open = bars[i].high = bars[i].low = bars[i].close = 100.0;
+        bars[i].volume = 5.0;
+        bars[i].timestamp = (int64_t)i * 300000;
+    }
+    CHECK_EQ_INT(strategy_native_run_v1(state->host, bars, 12, NULL), PF_NATIVE_OK,
+                 "the K-ULP5 run stopped");
+    CHECK_EQ_INT(state->error, 0, "a K-ULP5 submit was refused");
+    memset(&run_state, 0, sizeof(run_state));
+    run_state.struct_size = (uint32_t)sizeof(run_state);
+    run_state.version = PF_NATIVE_API_VERSION;
+    CHECK_EQ_INT(strategy_native_state_v1(state->host, &run_state), PF_NATIVE_OK,
+                 "K-ULP5 state read");
+    memset(rows, 0, sizeof(*rows) * (size_t)capacity);
+    for (i = 0; i < capacity; ++i) {
+        rows[i].struct_size = (uint32_t)sizeof(rows[i]);
+        rows[i].version = PF_NATIVE_API_VERSION;
+    }
+    *got = strategy_native_events_v1(state->host, 0, rows, capacity);
+    return run_state.lifecycle;
+}
+
+static void check_reservation_absorbed(void) {
+    static pf_native_event_v1 rows[256];
+    kulp5_state state;
+    pf_native_working_v1 working;
+    pf_native_open_lot_v1 lot;
+    const double resting_units = 1000.0 - 0.3;
+    const double head = 0.5 - 0.3;                       /* the 0.5 lot after the 0.3 close */
+    const double dust = (head + (1000.1 - 1000.0)) - 0.3; /* the fraction's units net of 0.3 */
+    int got = 0;
+    int i, n;
+    int reduced = 0, absorbed = 0, deferred = 0, applied = 0;
+    double first_reduction = -1.0;
+    uint32_t lifecycle;
+
+    lifecycle = kulp5_run(&state, 0, rows, 256, &got);
+    CHECK_EQ_INT(lifecycle, PF_NATIVE_LIFECYCLE_COMPLETED, "the absorbed deduction stopped the run");
+    for (i = 0; i < got; ++i) {
+        if (rows[i].kind == PF_NATIVE_EVENT_RESERVATION_REDUCED
+            && rows[i].incarnation == state.resting) {
+            CHECK_EQ_INT(rows[i].reason, PF_NATIVE_GROUP_REDUCE, "a reduction named another effect");
+            if (reduced == 0) first_reduction = rows[i].closed_units;
+            if (rows[i].closed_units == 0.0) ++absorbed;
+            ++reduced;
+        }
+        if (rows[i].kind == PF_NATIVE_EVENT_DEFERRED_GROUP && rows[i].incarnation == state.fraction) {
+            CHECK(rows[i].closed_units == 0.3, "the fraction deferred another deduction");
+            ++deferred;
+        }
+    }
+    CHECK_EQ_INT(reduced, 2, "the resting member saw another number of reductions");
+    CHECK(first_reduction == 0.3, "the 0.3 fill was not deducted");
+    CHECK_EQ_INT(absorbed, 1, "the dust fill's deduction was not the absorbed row");
+    CHECK_EQ_INT(deferred, 1, "the fraction saw another number of deferred deductions");
+    n = strategy_native_working_len_v1(state.host);
+    reduced = 0;
+    for (i = 0; i < n; ++i) {
+        memset(&working, 0, sizeof(working));
+        working.struct_size = (uint32_t)sizeof(working);
+        working.version = PF_NATIVE_API_VERSION;
+        if (strategy_native_working_get_v1(state.host, i, &working) != PF_NATIVE_OK) continue;
+        if (working.incarnation != state.resting) continue;
+        CHECK_EQ_INT(working.remaining_kind, PF_NATIVE_REMAINING_UNITS,
+                     "the resting member lost its units");
+        CHECK(working.remaining_units == resting_units,
+              "the absorbed deduction moved the resting member's units");
+        ++reduced;
+    }
+    CHECK_EQ_INT(reduced, 1, "the resting member is no longer working");
+    /* The fraction's fill stands: one APPLIED row closing the dust, taken off
+     * the head lot. */
+    applied = 0;
+    for (i = 0; i < got; ++i) {
+        if (rows[i].kind == PF_NATIVE_EVENT_APPLIED && rows[i].incarnation == state.fraction) {
+            CHECK(rows[i].closed_units == dust, "the fraction closed another quantity");
+            ++applied;
+        }
+    }
+    CHECK_EQ_INT(applied, 1, "the fraction's fill did not stand");
+    CHECK_EQ_INT(strategy_native_open_lot_count_v1(state.host, NAN), 2,
+                 "the book holds another number of lots");
+    memset(&lot, 0, sizeof(lot));
+    lot.struct_size = (uint32_t)sizeof(lot);
+    lot.version = PF_NATIVE_API_VERSION;
+    CHECK_EQ_INT(strategy_native_open_lot_get_v1(state.host, 0, &lot), PF_NATIVE_OK,
+                 "the head lot could not be read");
+    CHECK(lot.signed_units == head - dust, "the dust was not taken off the head lot");
+    strategy_native_host_free(state.host);
+
+    lifecycle = kulp5_run(&state, 1, rows, 256, &got);
+    CHECK_EQ_INT(lifecycle, PF_NATIVE_LIFECYCLE_COMPLETED, "the absorbed pending fill stopped the run");
+    deferred = 0;
+    absorbed = 0;
+    for (i = 0; i < got; ++i) {
+        if (rows[i].kind != PF_NATIVE_EVENT_DEFERRED_GROUP || rows[i].incarnation != state.child) {
+            continue;
+        }
+        if (deferred == 0) CHECK(rows[i].closed_units == 0x1p60, "the first delta was not deferred");
+        if (rows[i].closed_units == 0.0) ++absorbed;
+        ++deferred;
+    }
+    CHECK_EQ_INT(deferred, 2, "the child saw another number of deferred deductions");
+    CHECK_EQ_INT(absorbed, 1, "the fill of 1 was not the absorbed row");
+    strategy_native_host_free(state.host);
 }
 
 /* ── L9's risk limits, read back through the C event history ────── */
@@ -3642,12 +4094,18 @@ typedef struct aux_state {
     int interval_checks;
     int interval_wrong;
     int interval_elsewhere; /* on_bar asked and was refused with E_STATE */
+    int timeframe_command_checked;
+    int timeframe_command_rc;
 } aux_state;
 
 static int aux_on_timeframe_bar(void* user, const pf_bar_t* bar, uint32_t subscription,
                                 uint32_t completion, int64_t delivered_at_ms) {
     aux_state* state = (aux_state*)user;
     pf_native_timeframe_interval_v1 interval;
+    if (!state->timeframe_command_checked) {
+        state->timeframe_command_rc = strategy_native_cancel_all_v1(state->host);
+        state->timeframe_command_checked = 1;
+    }
     memset(&interval, 0, sizeof(interval));
     interval.struct_size = (uint32_t)sizeof(interval);
     interval.version = PF_NATIVE_API_VERSION;
@@ -3827,6 +4285,8 @@ static void check_auxiliary_feed(void) {
     CHECK(state.interval_checks > 0 && state.interval_wrong == 0,
           "on_timeframe_bar did not read the C++ bucket interval");
     CHECK(state.interval_elsewhere > 0, "on_bar never asked for a bucket interval");
+    CHECK(state.timeframe_command_checked && state.timeframe_command_rc >= 0,
+          "on_timeframe_bar refused a command the C++ callback guard allows");
     /* After the run there is no bucket either; a missing or mis-sized output,
      * or a NULL handle, is refused before the phase is judged. */
     {
@@ -3987,6 +4447,7 @@ typedef struct fx_roll_state {
     int economics_rc;
     pf_native_margin_call_v1 economics;
     double position_in_call;
+    int margin_command_rc;
 } fx_roll_state;
 
 static int fx_roll_on_bar(void* user, const pf_bar_t* bar, const pf_native_decision_v1* at) {
@@ -4054,6 +4515,7 @@ static int fx_roll_on_margin_call(void* user, const pf_native_event_v1* call) {
     state->economics_rc =
         strategy_native_margin_call_v1(state->host, call->ordinal, &state->economics);
     strategy_native_position_v1(state->host, &state->position_in_call, NULL, NULL);
+    state->margin_command_rc = strategy_native_cancel_all_v1(state->host);
     return 0;
 }
 
@@ -4071,6 +4533,7 @@ static void check_fx_roll_margin_point(void) {
 
     fx_roll_fill();
     memset(&state, 0, sizeof(state));
+    state.margin_command_rc = PF_NATIVE_E_STATE;
     memset(&report, 0, sizeof(report));
     table = blank_callbacks(&state);
     table.on_bar = fx_roll_on_bar;
@@ -4144,6 +4607,8 @@ static void check_fx_roll_margin_point(void) {
     CHECK_EQ_INT(state.roll_numbers, 1,
                  "the roll's two numbers are not the new rate at the unchanged price");
     CHECK_EQ_INT(state.margin_calls, 1, "the roll's breach called no margin");
+    CHECK(state.margin_command_rc >= 0,
+          "on_margin_call refused a command the C++ callback guard allows");
     CHECK(fabs(state.called_units - FX_ROLL_SLICE) < 1e-9,
           "the liquidation sliced another quantity");
     /* R5 lane E3: the call belongs to the ROLL's instant. The entry fill's own
@@ -5528,7 +5993,13 @@ static void check_spec_word_layout(void) {
                      "the event-retention tail does not start where the auxiliary layout ended");
         CHECK_EQ_INT(PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE, 304,
                      "the auxiliary layout's length moved");
-        CHECK_EQ_INT(sizeof(pf_native_run_spec_ext_v1), 312, "pf_native_run_spec_ext_v1 resized");
+        /* K-ULP4 appends the quantity-tolerance tail: one double where the
+         * retention layout ended, 312 -> 320. */
+        CHECK_EQ_INT(offsetof(pf_native_run_spec_ext_v1, quantity_tolerance), 312,
+                     "the quantity-tolerance tail does not start where the retention layout ended");
+        CHECK_EQ_INT(PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE, 312,
+                     "the retention layout's length moved");
+        CHECK_EQ_INT(sizeof(pf_native_run_spec_ext_v1), 320, "pf_native_run_spec_ext_v1 resized");
     }
 }
 
@@ -5655,6 +6126,7 @@ static int match_reject_named(uint32_t w) {
     case PF_NATIVE_MATCH_REJECT_NO_OPPOSITE_EXPOSURE:
     case PF_NATIVE_MATCH_REJECT_HOST_PRECOMMIT:
     case PF_NATIVE_MATCH_REJECT_RISK_LIMIT:
+    case PF_NATIVE_MATCH_REJECT_UNREPRESENTABLE_QUANTITY:
         return 1;
     default:
         return 0;
@@ -8400,14 +8872,299 @@ static void check_session_day_tail(void) {
     }
 }
 
+typedef struct csurface_configure_state {
+    pf_strategy_t host;
+    pf_native_run_spec_v1 spec;
+    int base_rc;
+    int ext_rc;
+    int fx_rc;
+    int state_rc;
+    int begin_command_rc;
+    int input_command_rc;
+    int input_checked;
+    uint32_t ext_error;
+    uint32_t ext_field;
+    pf_native_fx_curve_error_t fx_error;
+    uint32_t lifecycle_during_hook;
+} csurface_configure_state;
+
+typedef struct csurface_postrun_state {
+    pf_strategy_t host;
+    pf_native_run_spec_v1 next_spec;
+    int saw_completed_hook;
+    int typed_rc;
+    int base_rc;
+    uint32_t typed_error;
+    uint32_t typed_field;
+} csurface_postrun_state;
+
+typedef struct csurface_failure_state {
+    pf_strategy_t host;
+    int submit_rc;
+    int leg_rc;
+    int calculations;
+    uint64_t parent;
+    uint64_t leg;
+} csurface_failure_state;
+
+/* R5 lane K-ULP4 made a quantity the settlement cannot book that request's
+ * typed MatchRejected refusal, so this row takes its settlement failure from
+ * a level the kernel's representability check refuses instead: the host
+ * answers an anchored leg's arm with a negative level (INT25). */
+static int csurface_nonrepresentable_level(void* user, const pf_native_anchored_level_view_v1* view,
+                                           double* level) {
+    (void)user;
+    (void)view;
+    *level = -1.0;
+    return PF_NATIVE_ANSWER_PROVIDED;
+}
+
+static int csurface_nonrepresentable_on_bar(void* user, const pf_bar_t* bar,
+                                            const pf_native_decision_v1* at) {
+    csurface_failure_state* state = (csurface_failure_state*)user;
+    pf_native_request_v1 request;
+    (void)bar;
+    (void)at;
+    if (state->calculations++ != 0) return 0;
+    request = blank_request();
+    request.intent = PF_NATIVE_INTENT_TRANSACT;
+    request.intent_value = 2.0;
+    request.trigger = PF_NATIVE_TRIGGER_MARKET;
+    state->submit_rc = strategy_native_submit_v1(state->host, &request, &state->parent, NULL);
+    request = blank_request();
+    request.intent = PF_NATIVE_INTENT_REDUCE;
+    request.reduce_size = PF_NATIVE_REDUCE_OWNER_OPENED;
+    request.trigger = PF_NATIVE_TRIGGER_LIMIT;
+    request.anchor = PF_NATIVE_ANCHOR_FROM_OWNER_FILL;
+    request.anchor_offset = 2.0;
+    request.owner = PF_NATIVE_OWNER_WAIT_FOR_APPLIED;
+    request.owner_n = 1u;
+    request.owner_incarnations = &state->parent;
+    state->leg_rc = strategy_native_submit_v1(state->host, &request, &state->leg, NULL);
+    return 0;
+}
+
+static void check_csurface_failure_discriminator(void) {
+    csurface_failure_state state;
+    pf_native_callbacks_v1 table;
+    pf_native_run_spec_v1 spec = twin_spec();
+    pf_native_state_v1 result;
+    const pf_bar_t* bars;
+    int n = 0;
+    memset(&state, 0, sizeof(state));
+    table = blank_callbacks(&state);
+    table.on_bar = csurface_nonrepresentable_on_bar;
+    table.on_anchored_level = csurface_nonrepresentable_level;
+    state.host = strategy_native_host_create_v1(&table);
+    CHECK(state.host != NULL, "discriminator host create failed");
+    if (!state.host) return;
+    spec.session_key = "csurface-discriminator";
+    CHECK_EQ_INT(strategy_configure_native_v1(state.host, &spec), 0,
+                 "discriminator host configure failed");
+    bars = pf_twin_bars(&n);
+    CHECK_EQ_INT(strategy_native_run_v1(state.host, bars, n, NULL), PF_NATIVE_E_RUN_FAILED,
+                 "nonrepresentable level did not fail settlement");
+    CHECK_EQ_INT(state.submit_rc, PF_NATIVE_OK,
+                 "the anchored leg's owner was rejected at submission");
+    CHECK_EQ_INT(state.leg_rc, PF_NATIVE_OK,
+                 "the anchored leg was rejected at submission");
+    memset(&result, 0, sizeof(result));
+    result.struct_size = (uint32_t)sizeof(result);
+    CHECK_EQ_INT(strategy_native_state_v1(state.host, &result), PF_NATIVE_OK,
+                 "discriminator state read failed");
+    CHECK_EQ_INT(result.failure_code, PF_NATIVE_FAILURE_SETTLEMENT_FAILURE,
+                 "the failure was not a settlement failure");
+    CHECK_EQ_INT(result.failure_operation, PF_NATIVE_OPERATION_SETTLEMENT,
+                 "the failure operation was not settlement");
+    CHECK(result.failure_discriminator != 0u,
+          "the C state dropped the kernel's nonzero failure discriminator");
+    strategy_native_host_free(state.host);
+}
+
+static int csurface_postrun_hash_hook(void* user, uint64_t* digest) {
+    csurface_postrun_state* state = (csurface_postrun_state*)user;
+    pf_native_state_v1 lifecycle;
+    pf_native_run_spec_ext_v1 ext;
+    (void)digest;
+    memset(&lifecycle, 0, sizeof(lifecycle));
+    lifecycle.struct_size = (uint32_t)sizeof(lifecycle);
+    if (strategy_native_state_v1(state->host, &lifecycle) != PF_NATIVE_OK
+        || lifecycle.lifecycle != PF_NATIVE_LIFECYCLE_COMPLETED
+        || state->saw_completed_hook) {
+        return PF_NATIVE_ANSWER_DEFAULT;
+    }
+    state->saw_completed_hook = 1;
+    memset(&ext, 0, sizeof(ext));
+    ext.struct_size = (uint32_t)sizeof(ext);
+    ext.version = PF_NATIVE_API_VERSION;
+    state->typed_rc = strategy_configure_native_ext_result_v1(
+        state->host, &state->next_spec, &ext, &state->typed_error, &state->typed_field);
+    state->base_rc = strategy_configure_native_v1(state->host, &state->next_spec);
+    return PF_NATIVE_ANSWER_DEFAULT;
+}
+
+static int csurface_configure_in_begin(void* user) {
+    csurface_configure_state* state = (csurface_configure_state*)user;
+    pf_native_run_spec_ext_v1 ext;
+    pf_native_fx_curve_v1 curve;
+    pf_native_state_v1 lifecycle;
+    memset(&ext, 0, sizeof(ext));
+    ext.struct_size = (uint32_t)sizeof(ext);
+    ext.version = PF_NATIVE_API_VERSION;
+    memset(&curve, 0, sizeof(curve));
+    curve.struct_size = (uint32_t)sizeof(curve);
+    state->base_rc = strategy_configure_native_v1(state->host, &state->spec);
+    state->ext_rc = strategy_configure_native_ext_result_v1(
+        state->host, &state->spec, &ext, &state->ext_error, &state->ext_field);
+    state->fx_rc = strategy_configure_native_fx_curve_ext_v1(
+        state->host, &curve, &state->fx_error, NULL);
+    memset(&lifecycle, 0, sizeof(lifecycle));
+    lifecycle.struct_size = (uint32_t)sizeof(lifecycle);
+    state->state_rc = strategy_native_state_v1(state->host, &lifecycle);
+    state->lifecycle_during_hook = lifecycle.lifecycle;
+    state->begin_command_rc = strategy_native_cancel_all_v1(state->host);
+    return 0;
+}
+
+static int csurface_command_in_input(void* user, const pf_bar_t* bar, int32_t input_index,
+                                     int32_t completes_script_interval) {
+    csurface_configure_state* state = (csurface_configure_state*)user;
+    (void)bar;
+    (void)input_index;
+    (void)completes_script_interval;
+    if (!state->input_checked) {
+        state->input_command_rc = strategy_native_cancel_all_v1(state->host);
+        state->input_checked = 1;
+    }
+    return 0;
+}
+
+static void check_csurface_create_and_configure_refusals(void) {
+    pf_native_callbacks_v1 table = blank_callbacks(NULL);
+    pf_strategy_t host;
+    csurface_configure_state state;
+    pf_native_state_v1 lifecycle;
+    const pf_bar_t* bars;
+    int n = 0;
+
+    table.reserved1 = 1u;
+    host = strategy_native_host_create_v1(&table);
+    CHECK(host == NULL, "a nonzero callback-table reserved1 marker was accepted");
+    if (host) strategy_native_host_free(host);
+
+    /* The pre-existing base-ABI Ready misuse still goes to the kernel and
+     * latches Contract. Running and Completed hash-hook calls use the new
+     * early refusal. */
+    table = blank_callbacks(NULL);
+    host = strategy_native_host_create_v1(&table);
+    CHECK(host != NULL, "Ready-contract host create failed");
+    if (host) {
+        pf_native_run_spec_v1 ready_spec = twin_spec();
+        ready_spec.session_key = "csurface-ready-contract";
+        CHECK_EQ_INT(strategy_configure_native_v1(host, &ready_spec), 0,
+                     "Ready-contract initial setup failed");
+        CHECK_EQ_INT(strategy_configure_native_v1(host, &ready_spec), -1,
+                     "base configure accepted a Ready host");
+        memset(&lifecycle, 0, sizeof(lifecycle));
+        lifecycle.struct_size = (uint32_t)sizeof(lifecycle);
+        CHECK_EQ_INT(strategy_native_state_v1(host, &lifecycle), PF_NATIVE_OK,
+                     "Ready-contract state read failed");
+        CHECK_EQ_INT(lifecycle.lifecycle, PF_NATIVE_LIFECYCLE_FAILED,
+                     "base Ready misuse lost its kernel Contract latch");
+        CHECK_EQ_INT(lifecycle.failure_code, PF_NATIVE_FAILURE_CONTRACT,
+                     "base Ready misuse latched another failure");
+        strategy_native_host_free(host);
+    }
+
+    memset(&state, 0, sizeof(state));
+    state.spec = twin_spec();
+    state.spec.session_key = "csurface-configure-hook";
+    table = blank_callbacks(&state);
+    table.on_run_begin = csurface_configure_in_begin;
+    table.on_input = csurface_command_in_input;
+    state.host = strategy_native_host_create_v1(&table);
+    CHECK(state.host != NULL, "configure-hook host create failed");
+    if (!state.host) return;
+    CHECK_EQ_INT(strategy_configure_native_v1(state.host, &state.spec), 0,
+                 "configure-hook initial setup failed");
+    bars = pf_twin_bars(&n);
+    CHECK_EQ_INT(strategy_native_run_v1(state.host, bars, n, NULL), PF_NATIVE_OK,
+                 "a refused configure inside on_run_begin failed the run");
+    CHECK_EQ_INT(state.base_rc, -1, "base configure was accepted inside a hook frame");
+    CHECK_EQ_INT(state.ext_rc, PF_NATIVE_E_STATE,
+                 "extended configure was accepted inside a hook frame");
+    CHECK_EQ_INT(state.ext_error, PF_NATIVE_SPEC_ERROR_WRONG_PHASE,
+                 "extended configure did not name WrongPhase");
+    CHECK_EQ_INT(state.ext_field, PF_NATIVE_SPEC_FIELD_NONE,
+                 "extended configure named a field inside a hook frame");
+    CHECK_EQ_INT(state.fx_rc, -1, "FX curve configure was accepted inside a hook frame");
+    CHECK_EQ_INT(state.fx_error, PF_NATIVE_FX_CURVE_ERROR_WRONG_PHASE,
+                 "FX curve configure did not name WrongPhase");
+    CHECK_EQ_INT(state.state_rc, PF_NATIVE_OK, "hook could not read its native state");
+    CHECK_EQ_INT(state.lifecycle_during_hook, PF_NATIVE_LIFECYCLE_RUNNING,
+                 "a refused configure changed the hook's Running state");
+    CHECK(state.begin_command_rc >= 0,
+          "on_run_begin refused a command the C++ callback guard allows");
+    CHECK(state.input_checked && state.input_command_rc >= 0,
+          "on_input refused a command the C++ callback guard allows");
+    memset(&lifecycle, 0, sizeof(lifecycle));
+    lifecycle.struct_size = (uint32_t)sizeof(lifecycle);
+    CHECK_EQ_INT(strategy_native_state_v1(state.host, &lifecycle), PF_NATIVE_OK,
+                 "configure-hook final state read failed");
+    CHECK_EQ_INT(lifecycle.lifecycle, PF_NATIVE_LIFECYCLE_COMPLETED,
+                 "a hook-frame configure refusal failed the host");
+    strategy_native_host_free(state.host);
+
+    /* A hash read can call the C hook after the host reached Completed. This
+     * frame must also refuse both configure routes and leave the read pure. */
+    {
+        csurface_postrun_state postrun;
+        pf_native_run_spec_v1 first = twin_spec();
+        memset(&postrun, 0, sizeof(postrun));
+        first.session_key = "csurface-postrun-hook";
+        postrun.next_spec = first;
+        postrun.next_spec.run_number = 2;
+        table = blank_callbacks(&postrun);
+        table.on_hash_extension = csurface_postrun_hash_hook;
+        postrun.host = strategy_native_host_create_v1(&table);
+        CHECK(postrun.host != NULL, "postrun-hook host create failed");
+        if (!postrun.host) return;
+        CHECK_EQ_INT(strategy_configure_native_v1(postrun.host, &first), 0,
+                     "postrun-hook initial setup failed");
+        CHECK_EQ_INT(strategy_native_run_v1(postrun.host, bars, n, NULL), PF_NATIVE_OK,
+                     "postrun-hook initial run failed");
+        (void)strategy_broker_state_hash(postrun.host);
+        CHECK(postrun.saw_completed_hook, "the Completed hash read did not call its C hook");
+        CHECK_EQ_INT(postrun.typed_rc, PF_NATIVE_E_STATE,
+                     "typed configure was accepted from a Completed hash hook");
+        CHECK_EQ_INT(postrun.typed_error, PF_NATIVE_SPEC_ERROR_WRONG_PHASE,
+                     "Completed hash hook did not name WrongPhase");
+        CHECK_EQ_INT(postrun.typed_field, PF_NATIVE_SPEC_FIELD_NONE,
+                     "Completed hash hook named a field");
+        CHECK_EQ_INT(postrun.base_rc, -1,
+                     "base configure was accepted from a Completed hash hook");
+        memset(&lifecycle, 0, sizeof(lifecycle));
+        lifecycle.struct_size = (uint32_t)sizeof(lifecycle);
+        CHECK_EQ_INT(strategy_native_state_v1(postrun.host, &lifecycle), PF_NATIVE_OK,
+                     "postrun-hook state read failed");
+        CHECK_EQ_INT(lifecycle.lifecycle, PF_NATIVE_LIFECYCLE_COMPLETED,
+                     "a hash read mutated the Completed native state");
+        strategy_native_host_free(postrun.host);
+    }
+}
+
 int pf_native_c_api_checks(void) {
     failures = 0;
+    check_csurface_create_and_configure_refusals();
+    check_csurface_failure_discriminator();
     check_struct_and_tag_refusals();
     check_spec_extension();
     check_lifecycle_round_trips();
     check_callback_failure_latch();
     check_event_polling();
     check_event_retention();
+    check_unrepresentable_quantity();
+    check_reservation_absorbed();
     check_risk_event();
     check_absent_accessors();
     check_live_accessors();

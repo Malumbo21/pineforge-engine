@@ -101,10 +101,14 @@ static_assert(PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE
                   == PF_NATIVE_RUN_SPEC_EXT_V1_POLICY_SIZE + 3u * sizeof(void*)
                          + 2u * sizeof(std::uint32_t),
               "the pf_native_run_spec_ext_v1 auxiliary tail moved");
-/* And the event-retention tail, last of the four: two words past it. */
-static_assert(sizeof(pf_native_run_spec_ext_v1)
+/* And the event-retention tail: two words past it. */
+static_assert(PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE
                   == PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE + 2u * sizeof(std::uint32_t),
               "the pf_native_run_spec_ext_v1 event-retention tail moved");
+/* And the quantity-tolerance tail, last of the five: one double past it. */
+static_assert(sizeof(pf_native_run_spec_ext_v1)
+                  == PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE + sizeof(double),
+              "the pf_native_run_spec_ext_v1 quantity-tolerance tail moved");
 static_assert(static_cast<int>(pineforge::NativeEventRetention::Window)
                       == PF_NATIVE_EVENT_RETENTION_WINDOW
                   && static_cast<int>(pineforge::NativeEventRetention::Full)
@@ -473,6 +477,8 @@ PF_PIN_WORD(no::MatchRejectReason::NoOppositeExposure,
             PF_NATIVE_MATCH_REJECT_NO_OPPOSITE_EXPOSURE);
 PF_PIN_WORD(no::MatchRejectReason::HostPrecommit, PF_NATIVE_MATCH_REJECT_HOST_PRECOMMIT);
 PF_PIN_WORD(no::MatchRejectReason::RiskLimit, PF_NATIVE_MATCH_REJECT_RISK_LIMIT);
+PF_PIN_WORD(no::MatchRejectReason::UnrepresentableQuantity,
+            PF_NATIVE_MATCH_REJECT_UNREPRESENTABLE_QUANTITY);
 PF_PIN_WORD(no::ActivationKind::Stop, PF_NATIVE_ACTIVATION_STOP);
 PF_PIN_WORD(no::ActivationKind::StopLimit, PF_NATIVE_ACTIVATION_STOP_LIMIT);
 PF_PIN_WORD(no::ActivationKind::TrailArm, PF_NATIVE_ACTIVATION_TRAIL_ARM);
@@ -780,6 +786,8 @@ PF_PIN_WORD(pineforge::NativeRunSpecField::AuxiliaryFeedBars,
 PF_PIN_WORD(pineforge::NativeRunSpecField::SubscriptionSource,
             PF_NATIVE_SPEC_FIELD_SUBSCRIPTION_SOURCE);
 PF_PIN_WORD(pineforge::NativeRunSpecField::EventRetention, PF_NATIVE_SPEC_FIELD_EVENT_RETENTION);
+PF_PIN_WORD(pineforge::NativeRunSpecField::QuantityTolerance,
+            PF_NATIVE_SPEC_FIELD_QUANTITY_TOLERANCE);
 PF_PIN_WORD(pineforge::NativeFxCurveError::None, PF_NATIVE_FX_CURVE_ERROR_NONE);
 PF_PIN_WORD(pineforge::NativeFxCurveError::LengthMismatch,
             PF_NATIVE_FX_CURVE_ERROR_LENGTH_MISMATCH);
@@ -916,6 +924,7 @@ constexpr std::uint32_t c_word(no::MatchRejectReason value) noexcept {
     case V::NoOppositeExposure: return PF_NATIVE_MATCH_REJECT_NO_OPPOSITE_EXPOSURE;
     case V::HostPrecommit: return PF_NATIVE_MATCH_REJECT_HOST_PRECOMMIT;
     case V::RiskLimit: return PF_NATIVE_MATCH_REJECT_RISK_LIMIT;
+    case V::UnrepresentableQuantity: return PF_NATIVE_MATCH_REJECT_UNREPRESENTABLE_QUANTITY;
     }
     return static_cast<std::uint32_t>(value);
 }
@@ -1217,6 +1226,7 @@ constexpr std::uint32_t c_word(pineforge::NativeRunSpecField value) noexcept {
     case V::AuxiliaryFeedBars: return PF_NATIVE_SPEC_FIELD_AUXILIARY_FEED_BARS;
     case V::SubscriptionSource: return PF_NATIVE_SPEC_FIELD_SUBSCRIPTION_SOURCE;
     case V::EventRetention: return PF_NATIVE_SPEC_FIELD_EVENT_RETENTION;
+    case V::QuantityTolerance: return PF_NATIVE_SPEC_FIELD_QUANTITY_TOLERANCE;
     }
     return static_cast<std::uint32_t>(value);
 }
@@ -1355,6 +1365,23 @@ private:
     bool outer_;
 };
 
+/* Running callbacks are covered by the kernel lifecycle check at configure.
+ * The hash hook can also run during a read of a Completed host, so that
+ * frame needs its own C-boundary mark. */
+class HookFlagFrame {
+public:
+    explicit HookFlagFrame(bool& inside) noexcept : inside_(inside), outer_(inside) {
+        inside_ = true;
+    }
+    ~HookFlagFrame() { inside_ = outer_; }
+    HookFlagFrame(const HookFlagFrame&) = delete;
+    HookFlagFrame& operator=(const HookFlagFrame&) = delete;
+
+private:
+    bool& inside_;
+    bool outer_;
+};
+
 /* The bucket interval is borrowed only for one C timeframe callback. Restore
  * the outer frame even when the callback raises CallbackFailure. */
 class TimeframeIntervalFrame {
@@ -1398,6 +1425,12 @@ public:
     }
 
     const pf_native_callbacks_v1& table() const noexcept { return table_; }
+
+    /* A C validation refusal is a status, not a new kernel diagnostic. Keep
+     * presentation text from a previous operation from masquerading as its
+     * reason; the durable native failure record is left untouched. */
+    void clear_c_refusal_error() noexcept { last_error_.clear(); }
+    bool in_postrun_hook_frame() const noexcept { return in_hash_extension_; }
 
     bool timeframe_interval(pf_native_timeframe_interval_v1& out) const noexcept {
         if (!timeframe_interval_) return false;
@@ -1630,6 +1663,7 @@ private:
     void hash_host_extension(pineforge::BrokerStateHashSink& sink) const override {
         BacktestEngine::hash_host_extension(sink);
         if (!table_.on_hash_extension) return;
+        const HookFlagFrame frame(in_hash_extension_);
         std::uint64_t digest = 0;
         if (table_.on_hash_extension(table_.user, &digest) == PF_NATIVE_ANSWER_DEFAULT) return;
         sink.s("native-c-host:extension");
@@ -1716,6 +1750,9 @@ private:
     /* True while the C `on_applied` runs. Host-side, like the two caches:
      * never durable engine state, never hashed. */
     bool in_applied_ = false;
+    /* A Completed host may invoke this hook from a read-only hash query.
+     * Host-side transport state only; never folded into the broker hash. */
+    mutable bool in_hash_extension_ = false;
 };
 
 pf_native_decision_v1 CCallbackHost::decision(
@@ -1745,9 +1782,9 @@ pf_native_decision_v1 CCallbackHost::decision(
         out.price = point->price;
         out.quote_kind = c_byte(c_word(point->quote_kind));
     }
-    /* A table of an earlier published length is presented the base layout
-     * its header compiled, and nothing past it is computed. */
-    if (caller_table_size_ != sizeof(pf_native_callbacks_v1)) {
+    /* The policy-hook layout first published the decision's session tail.
+     * The later lot-facts marker changes only that other presented POD. */
+    if (caller_table_size_ < PF_NATIVE_CALLBACKS_V1_POLICY_SIZE) {
         out.struct_size = PF_NATIVE_DECISION_V1_BASE_SIZE;
         return out;
     }
@@ -2362,6 +2399,11 @@ CCallbackHost* host_of(pf_strategy_t s) {
     if (!s) return nullptr;
     auto* engine = static_cast<pineforge::BacktestEngine*>(s);
     return dynamic_cast<CCallbackHost*>(engine);
+}
+
+int c_refuse(CCallbackHost* host, int status) noexcept {
+    host->clear_c_refusal_error();
+    return status;
 }
 
 /* The staged/running specification's identity, which every RequestHandle a C
@@ -3076,8 +3118,8 @@ int translate_subscriptions(const pf_native_subscription_v1* rows, std::uint32_t
 
 int apply_spec_ext(pineforge::NativeRunSpec& spec, const pf_native_run_spec_ext_v1& ext,
                    bool has_risk_tail, bool has_policy_tail, bool has_auxiliary_tail,
-                   bool has_retention_tail) {
-    if (ext.present_mask & ~0x7ffu) return PF_NATIVE_E_TAG;
+                   bool has_retention_tail, bool has_tolerance_tail) {
+    if (ext.present_mask & ~0xfffu) return PF_NATIVE_E_TAG;
     if ((ext.present_mask & PF_NATIVE_SPEC_EXT_RISK) && !has_risk_tail) {
         return PF_NATIVE_E_STRUCT;
     }
@@ -3086,6 +3128,14 @@ int apply_spec_ext(pineforge::NativeRunSpec& spec, const pf_native_run_spec_ext_
     }
     if ((ext.present_mask & PF_NATIVE_SPEC_EXT_EVENT_RETENTION) && !has_retention_tail) {
         return PF_NATIVE_E_STRUCT;
+    }
+    if ((ext.present_mask & PF_NATIVE_SPEC_EXT_QUANTITY_TOLERANCE) && !has_tolerance_tail) {
+        return PF_NATIVE_E_STRUCT;
+    }
+    /* K-ULP4: the tolerance is set only under its bit; the value itself is
+     * judged by validate_native_run_spec (QuantityTolerance). */
+    if (ext.present_mask & PF_NATIVE_SPEC_EXT_QUANTITY_TOLERANCE) {
+        spec.quantity_tolerance = ext.quantity_tolerance;
     }
     /* V19-B: without the bit the base translation's FULL stands. */
     if (ext.present_mask & PF_NATIVE_SPEC_EXT_EVENT_RETENTION) {
@@ -3269,6 +3319,18 @@ int apply_spec_ext(pineforge::NativeRunSpec& spec, const pf_native_run_spec_ext_
 
 }  // namespace
 
+namespace pineforge {
+/* Internal bridge for the older configure symbols implemented in c_abi.cpp.
+ * It reaches only the C callback host and adds no public ABI symbol. */
+void clear_native_c_host_refusal_error(BacktestEngine* engine) noexcept {
+    if (auto* host = dynamic_cast<CCallbackHost*>(engine)) host->clear_c_refusal_error();
+}
+bool native_c_host_in_postrun_hook_frame(BacktestEngine* engine) noexcept {
+    if (auto* host = dynamic_cast<CCallbackHost*>(engine)) return host->in_postrun_hook_frame();
+    return false;
+}
+}  // namespace pineforge
+
 extern "C" {
 
 PF_API int strategy_native_api_version(void) { return PF_NATIVE_API_VERSION; }
@@ -3289,6 +3351,10 @@ PF_API pf_strategy_t strategy_native_host_create_v1(const pf_native_callbacks_v1
             return nullptr;
         }
         if (callbacks->version != PF_NATIVE_API_VERSION) return nullptr;
+        /* Only the current layout carries this marker. Older callers end
+         * before it and are not read beyond their published length. */
+        if (caller_size == sizeof(pf_native_callbacks_v1)
+            && callbacks->reserved1 != 0u) return nullptr;
         pf_native_callbacks_v1 table;
         std::memset(&table, 0, sizeof(table));
         std::memcpy(&table, callbacks, callbacks->struct_size);
@@ -3319,7 +3385,7 @@ PF_API int strategy_native_run_v1(pf_strategy_t s, const pf_bar_t* bars, int n,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (n < 0 || (n > 0 && !bars)) return PF_NATIVE_E_ARGUMENT;
+        if (n < 0 || (n > 0 && !bars)) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         host->run(reinterpret_cast<const Bar*>(bars), n);
         if (out) host->fill_report(reinterpret_cast<pineforge::ReportC*>(out));
         return host->native_state().kind == pineforge::NativeLifecycleKind::Completed
@@ -3341,11 +3407,13 @@ PF_API int strategy_native_submit_v1(pf_strategy_t s, const pf_native_request_v1
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!request) return PF_NATIVE_E_ARGUMENT;
+        if (!request) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         const auto* run = run_identity(*host);
-        if (!run) return PF_NATIVE_E_STATE;
+        if (!run) return c_refuse(host, PF_NATIVE_E_STATE);
         no::Request translated;
-        if (int rc = translate_request(*request, *run, translated); rc != PF_NATIVE_OK) return rc;
+        if (int rc = translate_request(*request, *run, translated); rc != PF_NATIVE_OK) {
+            return c_refuse(host, rc);
+        }
         const auto result = host->submit(translated);
         if (result.status == no::SubmitStatus::Accepted) {
             if (incarnation && result.handle) *incarnation = result.handle->incarnation;
@@ -3362,11 +3430,13 @@ PF_API int strategy_native_replace_ext_v1(pf_strategy_t s, uint64_t incarnation,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!request) return PF_NATIVE_E_ARGUMENT;
+        if (!request) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         const auto* run = run_identity(*host);
-        if (!run) return PF_NATIVE_E_STATE;
+        if (!run) return c_refuse(host, PF_NATIVE_E_STATE);
         no::Request translated;
-        if (int rc = translate_request(*request, *run, translated); rc != PF_NATIVE_OK) return rc;
+        if (int rc = translate_request(*request, *run, translated); rc != PF_NATIVE_OK) {
+            return c_refuse(host, rc);
+        }
         const auto result = host->replace(no::RequestHandle{*run, incarnation}, translated);
         switch (result.status) {
         case no::ReplaceStatus::Replaced:
@@ -3398,7 +3468,7 @@ PF_API int strategy_native_cancel_v1(pf_strategy_t s, uint64_t incarnation) {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
         const auto* run = run_identity(*host);
-        if (!run) return PF_NATIVE_E_STATE;
+        if (!run) return c_refuse(host, PF_NATIVE_E_STATE);
         const auto result = host->cancel(no::RequestHandle{*run, incarnation});
         switch (result.status) {
         case no::CancelStatus::Cancelled: return PF_NATIVE_OK;
@@ -3424,7 +3494,7 @@ PF_API int strategy_native_cancel_where_v1(pf_strategy_t s, const char* text, ui
         // NULL is not the empty string here: "" is the text every request
         // that carries no comment or label matches, so a caller that meant
         // one and passed the other would cancel a different set.
-        if (!text) return PF_NATIVE_E_ARGUMENT;
+        if (!text) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         pineforge::NativeRequestField selector = pineforge::NativeRequestField::Comment;
         switch (field) {
         case PF_NATIVE_FIELD_COMMENT:
@@ -3434,7 +3504,7 @@ PF_API int strategy_native_cancel_where_v1(pf_strategy_t s, const char* text, ui
             selector = pineforge::NativeRequestField::Label;
             break;
         default:
-            return PF_NATIVE_E_TAG;
+            return c_refuse(host, PF_NATIVE_E_TAG);
         }
         return static_cast<int>(host->cancel_where(std::string_view(text), selector));
     });
@@ -3446,7 +3516,7 @@ PF_API int strategy_native_execute_current_v1(pf_strategy_t s, uint64_t incarnat
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
         const auto* run = run_identity(*host);
-        if (!run) return PF_NATIVE_E_STATE;
+        if (!run) return c_refuse(host, PF_NATIVE_E_STATE);
         pineforge::NativeCurrentExecution selection;
         selection.target = no::RequestHandle{*run, incarnation};
         switch (price_rule) {
@@ -3457,7 +3527,7 @@ PF_API int strategy_native_execute_current_v1(pf_strategy_t s, uint64_t incarnat
             selection.price_rule = pineforge::NativeCurrentPriceRule::NearestTick;
             break;
         default:
-            return PF_NATIVE_E_TAG;
+            return c_refuse(host, PF_NATIVE_E_TAG);
         }
         const auto result = host->execute_current(selection);
         return std::visit([&](const auto& outcome) -> int {
@@ -3505,7 +3575,7 @@ PF_API int strategy_native_working_get_v1(pf_strategy_t s, int index,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         /* Three published layouts: the base one the L13 lane first shipped,
          * that plus the arm-presence tail, and the current one with the
          * relation tail. An earlier caller's struct ends at its own length,
@@ -3514,11 +3584,11 @@ PF_API int strategy_native_working_get_v1(pf_strategy_t s, int index,
         if (struct_size != sizeof(pf_native_working_v1)
             && struct_size != PF_NATIVE_WORKING_V1_ARM_SIZE
             && struct_size != PF_NATIVE_WORKING_V1_BASE_SIZE) {
-            return PF_NATIVE_E_STRUCT;
+            return c_refuse(host, PF_NATIVE_E_STRUCT);
         }
         const auto& cache = host->working_cache();
         if (index < 0 || static_cast<std::size_t>(index) >= cache.size()) {
-            return PF_NATIVE_E_ARGUMENT;
+            return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         }
         pf_native_working_v1 row;
         fill_working(cache[static_cast<std::size_t>(index)], row);
@@ -3542,11 +3612,11 @@ PF_API int strategy_native_open_lot_get_v1(pf_strategy_t s, int index,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
-        if (out->struct_size != sizeof(pf_native_open_lot_v1)) return PF_NATIVE_E_STRUCT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
+        if (out->struct_size != sizeof(pf_native_open_lot_v1)) return c_refuse(host, PF_NATIVE_E_STRUCT);
         const auto& cache = host->open_lot_cache();
         if (index < 0 || static_cast<std::size_t>(index) >= cache.size()) {
-            return PF_NATIVE_E_ARGUMENT;
+            return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         }
         fill_open_lot(cache[static_cast<std::size_t>(index)], *out);
         return PF_NATIVE_OK;
@@ -3558,7 +3628,7 @@ PF_API int strategy_native_events_v1(pf_strategy_t s, uint64_t after_ordinal,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (cap < 0 || (cap > 0 && !out)) return PF_NATIVE_E_ARGUMENT;
+        if (cap < 0 || (cap > 0 && !out)) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         const auto events = host->native_events(after_ordinal);
         int written = 0;
         std::size_t consumed = 0;
@@ -3592,8 +3662,8 @@ PF_API int strategy_native_state_v1(pf_strategy_t s, pf_native_state_v1* out) {
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
-        if (out->struct_size != sizeof(pf_native_state_v1)) return PF_NATIVE_E_STRUCT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
+        if (out->struct_size != sizeof(pf_native_state_v1)) return c_refuse(host, PF_NATIVE_E_STRUCT);
         const auto state = host->native_state();
         const std::uint32_t struct_size = out->struct_size;
         std::memset(out, 0, sizeof(*out));
@@ -3619,14 +3689,14 @@ PF_API int strategy_native_declare_subscriptions_ext_v1(pf_strategy_t s,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (n < 0 || (n > 0 && !rows)) return PF_NATIVE_E_ARGUMENT;
+        if (n < 0 || (n > 0 && !rows)) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         std::vector<pineforge::NativeTimeframeSubscription> declared;
         /* NULL sources build every series from the input, exactly as the
          * run spec's own subscription block does without its source column. */
         if (int rc = translate_subscriptions(rows, static_cast<std::uint32_t>(n), sources,
                                              declared);
             rc != PF_NATIVE_OK) {
-            return rc;
+            return c_refuse(host, rc);
         }
         const auto result = host->declare_timeframe_subscriptions_result(std::move(declared));
         write_validation(result.validation, error, field);
@@ -3649,7 +3719,7 @@ PF_API int strategy_native_declare_auxiliary_feed_v1(pf_strategy_t s, const char
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (n < 0 || (n > 0 && !bars)) return PF_NATIVE_E_ARGUMENT;
+        if (n < 0 || (n > 0 && !bars)) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         std::optional<pineforge::NativeAuxiliaryFeed> feed;
         if (tf) {
             pineforge::NativeAuxiliaryFeed declared;
@@ -3659,7 +3729,7 @@ PF_API int strategy_native_declare_auxiliary_feed_v1(pf_strategy_t s, const char
             feed = std::move(declared);
         } else if (n != 0 || bars) {
             /* A withdrawal names no feed, so it can carry no bars either. */
-            return PF_NATIVE_E_ARGUMENT;
+            return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         }
         const auto result = host->declare_auxiliary_feed_result(std::move(feed));
         write_validation(result.validation, error, field);
@@ -3672,7 +3742,7 @@ PF_API int strategy_native_partial_bar_v1(pf_strategy_t s, pf_bar_t* out) {
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         const auto bar = host->current_partial_bar();
         if (!bar) return PF_NATIVE_ABSENT;
         std::memcpy(out, &*bar, sizeof(pf_bar_t));
@@ -3696,10 +3766,10 @@ PF_API int strategy_native_trail_state_v1(pf_strategy_t s, uint64_t incarnation,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
-        if (out->struct_size != sizeof(pf_native_trail_state_v1)) return PF_NATIVE_E_STRUCT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
+        if (out->struct_size != sizeof(pf_native_trail_state_v1)) return c_refuse(host, PF_NATIVE_E_STRUCT);
         const auto* run = run_identity(*host);
-        if (!run) return PF_NATIVE_E_STATE;
+        if (!run) return c_refuse(host, PF_NATIVE_E_STATE);
         const auto state = host->trail_state(no::RequestHandle{*run, incarnation});
         if (!state) return PF_NATIVE_ABSENT;
         const std::uint32_t struct_size = out->struct_size;
@@ -3719,7 +3789,7 @@ PF_API int strategy_native_series_bar_v1(pf_strategy_t s, uint32_t subscription,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         const auto bar = host->native_series_bar(static_cast<std::size_t>(subscription));
         if (!bar) return PF_NATIVE_ABSENT;
         std::memcpy(out, &*bar, sizeof(pf_bar_t));
@@ -3732,8 +3802,8 @@ PF_API int strategy_native_timeframe_bar_interval_v1(
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
-        if (out->struct_size != sizeof(pf_native_timeframe_interval_v1)) return PF_NATIVE_E_STRUCT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
+        if (out->struct_size != sizeof(pf_native_timeframe_interval_v1)) return c_refuse(host, PF_NATIVE_E_STRUCT);
         return host->timeframe_interval(*out) ? PF_NATIVE_OK : PF_NATIVE_E_STATE;
     });
 }
@@ -3742,7 +3812,7 @@ PF_API int strategy_native_marked_equity_v1(pf_strategy_t s, double mark, double
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         *out = host->native_marked_equity(mark);
         return PF_NATIVE_OK;
     });
@@ -3752,7 +3822,7 @@ PF_API int strategy_native_liquidation_price_v1(pf_strategy_t s, double* out) {
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         const auto price = host->native_liquidation_price();
         if (!price) {
             *out = kNaN;
@@ -3769,7 +3839,7 @@ PF_API int strategy_native_sized_units_v1(pf_strategy_t s, const pf_native_reque
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!sized || !units) return PF_NATIVE_E_ARGUMENT;
+        if (!sized || !units) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         /* The sizing block is read by the one translation a submit uses. A
          * SIZED request names no handle, so before configure -- when the run
          * has no identity yet -- an empty one serves, and the kernel's own
@@ -3779,10 +3849,10 @@ PF_API int strategy_native_sized_units_v1(pf_strategy_t s, const pf_native_reque
         no::Request translated;
         if (int rc = translate_request(*sized, run ? *run : none, translated);
             rc != PF_NATIVE_OK) {
-            return rc;
+            return c_refuse(host, rc);
         }
         const auto* basis = std::get_if<no::Sized>(&translated.intent);
-        if (!basis) return PF_NATIVE_E_ARGUMENT;
+        if (!basis) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         const auto answer = host->native_sized_units(*basis, price, equity, fx);
         if (!answer) {
             *units = kNaN;
@@ -3797,8 +3867,8 @@ PF_API int strategy_native_risk_state_v1(pf_strategy_t s, pf_native_risk_state_v
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
-        if (out->struct_size != sizeof(pf_native_risk_state_v1)) return PF_NATIVE_E_STRUCT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
+        if (out->struct_size != sizeof(pf_native_risk_state_v1)) return c_refuse(host, PF_NATIVE_E_STRUCT);
         const auto state = host->native_risk_state();
         const std::uint32_t struct_size = out->struct_size;
         std::memset(out, 0, sizeof(*out));
@@ -3824,8 +3894,8 @@ PF_API int strategy_native_margin_call_v1(pf_strategy_t s, uint64_t ordinal,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
-        if (out->struct_size != sizeof(pf_native_margin_call_v1)) return PF_NATIVE_E_STRUCT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
+        if (out->struct_size != sizeof(pf_native_margin_call_v1)) return c_refuse(host, PF_NATIVE_E_STRUCT);
         if (ordinal == 0u) return PF_NATIVE_ABSENT;
         /* The history is ordered by ordinal, so the call is the first row at
          * or past it, or it is not there at all. */
@@ -3854,7 +3924,7 @@ PF_API int strategy_native_event_window_v1(pf_strategy_t s, uint64_t* out_first_
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out_first_ordinal) return PF_NATIVE_E_ARGUMENT;
+        if (!out_first_ordinal) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         *out_first_ordinal = host->native_event_window_start();
         return PF_NATIVE_OK;
     });
@@ -3864,7 +3934,7 @@ PF_API int strategy_native_continuation_hash_v1(pf_strategy_t s, uint64_t* out) 
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!out) return PF_NATIVE_E_ARGUMENT;
+        if (!out) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         *out = host->native_continuation_hash();
         return PF_NATIVE_OK;
     });
@@ -3874,7 +3944,7 @@ PF_API int strategy_native_cohort_open_v1(pf_strategy_t s, uint64_t* cohort) {
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!cohort) return PF_NATIVE_E_ARGUMENT;
+        if (!cohort) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         *cohort = host->cohort_open().value;
         return PF_NATIVE_OK;
     });
@@ -3886,8 +3956,8 @@ PF_API int strategy_native_cohort_add_v1(pf_strategy_t s, uint64_t cohort,
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
         const auto* run = run_identity(*host);
-        if (!run) return PF_NATIVE_E_STATE;
-        if (cohort == 0u) return PF_NATIVE_E_ARGUMENT;
+        if (!run) return c_refuse(host, PF_NATIVE_E_STATE);
+        if (cohort == 0u) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         host->cohort_add(no::CohortHandle{cohort}, no::RequestHandle{*run, incarnation});
         return PF_NATIVE_OK;
     });
@@ -3899,8 +3969,8 @@ PF_API int strategy_native_cohort_remove_v1(pf_strategy_t s, uint64_t cohort,
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
         const auto* run = run_identity(*host);
-        if (!run) return PF_NATIVE_E_STATE;
-        if (cohort == 0u) return PF_NATIVE_E_ARGUMENT;
+        if (!run) return c_refuse(host, PF_NATIVE_E_STATE);
+        if (cohort == 0u) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         host->cohort_remove(no::CohortHandle{cohort}, no::RequestHandle{*run, incarnation});
         return PF_NATIVE_OK;
     });
@@ -3912,14 +3982,17 @@ PF_API int strategy_configure_native_ext_result_v1(
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!base || !ext) return PF_NATIVE_E_ARGUMENT;
-        if (base->struct_size != sizeof(pf_native_run_spec_v1)) return PF_NATIVE_E_STRUCT;
-        /* Five published layouts, and only five: the base one the lane
+        if (!base || !ext) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
+        if (base->struct_size != sizeof(pf_native_run_spec_v1)) return c_refuse(host, PF_NATIVE_E_STRUCT);
+        /* Six published layouts, and only six: the base one the lane
          * first shipped, that plus L9's risk tail, that plus N8's intrabar /
-         * policy tail, that plus the auxiliary-feed tail, and the current one
-         * with V19-B's event-retention tail behind it. Anything else is a
-         * caller this runtime cannot read. */
-        const bool has_retention_tail = ext->struct_size == sizeof(pf_native_run_spec_ext_v1);
+         * policy tail, that plus the auxiliary-feed tail, that plus V19-B's
+         * event-retention tail, and the current one with K-ULP4's
+         * quantity-tolerance tail behind it. Anything else is a caller this
+         * runtime cannot read. */
+        const bool has_tolerance_tail = ext->struct_size == sizeof(pf_native_run_spec_ext_v1);
+        const bool has_retention_tail =
+            has_tolerance_tail || ext->struct_size == PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE;
         const bool has_auxiliary_tail =
             has_retention_tail || ext->struct_size == PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE;
         const bool has_policy_tail =
@@ -3928,7 +4001,12 @@ PF_API int strategy_configure_native_ext_result_v1(
             has_policy_tail || ext->struct_size == PF_NATIVE_RUN_SPEC_EXT_V1_RISK_SIZE;
         if ((!has_risk_tail && ext->struct_size != PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE)
             || ext->version != PF_NATIVE_API_VERSION) {
-            return PF_NATIVE_E_STRUCT;
+            return c_refuse(host, PF_NATIVE_E_STRUCT);
+        }
+        if (host->in_postrun_hook_frame()) {
+            write_validation({pineforge::NativeRunSpecError::WrongPhase,
+                              pineforge::NativeRunSpecField::None}, error, field);
+            return c_refuse(host, PF_NATIVE_E_STATE);
         }
         /* The established spelling configures an Unconfigured host only, so
          * its pre-kernel readiness check keeps every refusal non-mutating. The
@@ -3946,14 +4024,17 @@ PF_API int strategy_configure_native_ext_result_v1(
         if (!reusable || (!typed && lifecycle.kind != pineforge::NativeLifecycleKind::Unconfigured)) {
             write_validation({pineforge::NativeRunSpecError::WrongPhase,
                               pineforge::NativeRunSpecField::None}, error, field);
-            return PF_NATIVE_E_STATE;
+            return c_refuse(host, PF_NATIVE_E_STATE);
         }
         pineforge::NativeRunSpec spec;
-        if (int rc = translate_base_spec(*base, spec); rc != PF_NATIVE_OK) return rc;
+        if (int rc = translate_base_spec(*base, spec); rc != PF_NATIVE_OK) {
+            return c_refuse(host, rc);
+        }
         if (int rc = apply_spec_ext(spec, *ext, has_risk_tail, has_policy_tail,
-                                    has_auxiliary_tail, has_retention_tail);
+                                    has_auxiliary_tail, has_retention_tail,
+                                    has_tolerance_tail);
             rc != PF_NATIVE_OK) {
-            return rc;
+            return c_refuse(host, rc);
         }
         /* The kernel FAILS a host whose specification its validation
          * refuses, so the same validation runs here first: a rejected
@@ -3962,7 +4043,7 @@ PF_API int strategy_configure_native_ext_result_v1(
          * cannot disagree. */
         const auto validation = pineforge::validate_native_run_spec(spec);
         write_validation(validation, error, field);
-        if (!validation) return PF_NATIVE_E_ARGUMENT;
+        if (!validation) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         const auto result = host->configure_native(spec);
         write_validation(result.validation, error, field);
         return result.status == pineforge::NativeSetupStatus::Applied
@@ -3983,7 +4064,7 @@ PF_API int strategy_native_append_auxiliary_bars_ext_v1(pf_strategy_t s, const p
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (n < 0 || (n > 0 && !bars)) return PF_NATIVE_E_ARGUMENT;
+        if (n < 0 || (n > 0 && !bars)) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         const auto result = host->append_auxiliary_bars_result(
             reinterpret_cast<const Bar*>(bars), static_cast<std::size_t>(n));
         if (error) *error = c_word(result.error);
@@ -4007,7 +4088,7 @@ PF_API int strategy_native_declare_opened_lot_entry_bar_mask_v1(pf_strategy_t s,
     return guarded([&] {
         auto* host = host_of(s);
         if (!host) return PF_NATIVE_E_HANDLE;
-        if (!entry_bar) return PF_NATIVE_E_ARGUMENT;
+        if (!entry_bar) return c_refuse(host, PF_NATIVE_E_ARGUMENT);
         pineforge::OpenedLotFillPoint point = pineforge::OpenedLotFillPoint::OnPath;
         switch (fill_point) {
         case PF_NATIVE_OPENED_LOT_FILL_POINT_ON_PATH:
@@ -4017,7 +4098,7 @@ PF_API int strategy_native_declare_opened_lot_entry_bar_mask_v1(pf_strategy_t s,
             point = pineforge::OpenedLotFillPoint::AfterPath;
             break;
         default:
-            return PF_NATIVE_E_TAG;
+            return c_refuse(host, PF_NATIVE_E_TAG);
         }
         return host->declare_entry_bar_mask(entry_incarnation,
                                             *reinterpret_cast<const Bar*>(entry_bar), point)

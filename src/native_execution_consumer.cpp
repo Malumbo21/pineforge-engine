@@ -329,6 +329,13 @@ void hash_spec(F& f, const NativeRunSpec& spec,
     if (spec.event_retention != NativeEventRetention::Window) {
         f.u(static_cast<uint64_t>(spec.event_retention));
     }
+    // K-ULP4: the quantity tolerance folds only where a host declared one, so
+    // every spec that declares none keeps its digest; a tag word first, so the
+    // value's bits can never read as another optional fold's word.
+    if (spec.quantity_tolerance) {
+        f.u(0x4b554c5034544f4cULL);  // "KULP4TOL"
+        f.d(*spec.quantity_tolerance);
+    }
 }
 
 template <class F>
@@ -455,10 +462,23 @@ bool explicit_reduction_units_representable(double units, double exposure) noexc
     return order_action::plan(exposure, order_action::Reduce{units}).has_value();
 }
 
+// A request that settles its units in one fill, all of them: no point budget
+// splits them and no group deduction is pending against them. Only such a
+// request's units can be the book's own quantity, closed as it stands
+// (R5 lane K-ULP4).
+bool settles_in_one_fill(const native_order::LiveRequest& live) noexcept {
+    return std::holds_alternative<native_order::ImmediateRemaining>(live.request().capacity)
+        && !std::holds_alternative<native_order::PendingDeferred>(live.pending);
+}
+
+// `own_quantity`: the answered units are the book's own -- a closing size,
+// settled in one fill, equal to its scope's held total (which a fraction of one
+// resolves to) -- which the quantity grid admits as they stand (R5 lane K-ULP4).
 bool execution_terms_grid_representable(
         const native_order::ExecutionTerms& terms,
         const native_order::HostSized* host_sized, bool unresolved,
-        double scope_exposure_units, const NativeRunSpec* spec) noexcept {
+        double scope_exposure_units, const NativeRunSpec* spec,
+        bool own_quantity) noexcept {
     if (!valid_execution_grid_policy(terms.grid_policy)) return false;
     if (terms.grid_policy == native_order::ExecutionGridPolicy::ExplicitUnits) {
         return unresolved && host_sized
@@ -470,7 +490,8 @@ bool execution_terms_grid_representable(
     }
     if (!terms.units || !(*terms.units > 0.0)) return true;
     return spec && (!spec->quantity_grid
-        || native_order::quantity_on_grid(*terms.units, *spec->quantity_grid));
+        || native_order::quantity_on_grid(*terms.units, *spec->quantity_grid)
+        || own_quantity);
 }
 
 bool path_uses_high_first(const Bar& bar, NativePathOrder order) noexcept {
@@ -592,8 +613,8 @@ std::optional<double> representable_units(double units,
 // fee reserve.
 //
 // NativeRunSpec::fee_value is a PERCENT for NativeFeeKind::Percent
-// (native_run_spec.hpp:560): the charge is fee_value / 100 of the account
-// notional (engine.hpp calc_commission). The reserve is the exact inverse of
+// (native_run_spec.hpp:589): the charge is fee_value / 100 of the account
+// notional. The reserve is the exact inverse of
 // that charge, so it divides by 1 + fee_value / 100 and a 0.1 % fee reserves
 // 0.1 %, not 10 %.
 std::optional<double> sized_basis_units(const native_order::Sized& sized, double price,
@@ -1030,6 +1051,7 @@ template <class F>
 void hash_coordinate(F& f, const NativeCoordinate& c) noexcept {
     f.u(c.ordinal);
     f.i(c.interval_index);
+    f.i(c.input_interval_index);
     f.i(c.open_ms);
     f.i(c.eligible_open_ms);
     f.i(c.last_traded_close_ms);
@@ -1568,6 +1590,7 @@ uint64_t NativeExecutionConsumer::continuation_hash() const noexcept {
     f.b(processing_input_);
     f.u(static_cast<uint64_t>(input_mode_));
     f.i(next_interval_index_);
+    f.i(next_script_index_);
     // Declared higher-timeframe series carry their own delivery cursors, and
     // a stream's warmup boundary is where its live phase starts -- neither is
     // recoverable from the input count alone. Folded only for a run that
@@ -1709,6 +1732,7 @@ uint64_t NativeExecutionConsumer::continuation_hash() const noexcept {
     f.i(script_.first_open_ms);
     f.i(script_.first_source_time_ms);
     f.i(script_.latest_close_ms);
+    f.i(script_.script_index);
     f.i(script_.first_index);
     f.i(script_.last_index);
     f.b(script_.modeled_ohlc);
@@ -1740,7 +1764,7 @@ uint64_t NativeExecutionConsumer::continuation_hash() const noexcept {
         }
         f.u(margin_point_ordinal_);
         f.u(margin_point_calls_);
-        // v19-B: the last two driver points' instants, which the FX-roll
+        // v19-B: the last two walked driver points' instants, which the FX-roll
         // check reads for its previous point now that no driver log is
         // kept. Only a staged curve reads them, so only it folds them.
         if (staged_fx_curve_) {
@@ -1901,6 +1925,7 @@ bool NativeExecutionConsumer::apply_spec(BacktestEngine& engine, const NativeRun
     engine.syminfo_mintick_ = spec.price_tick;
     engine.commission_type_ = fee_to_commission(spec.fee_kind);
     engine.commission_value_ = spec.fee_value;
+    engine.native_quantity_tolerance_ = spec.quantity_tolerance ? *spec.quantity_tolerance : 0.0;
     engine.syminfo_.ticker = spec.ticker;
     engine.syminfo_.tickerid = spec.tickerid;
     engine.syminfo_.type = spec.type;
@@ -2242,6 +2267,7 @@ bool NativeExecutionConsumer::begin_ready(BacktestEngine& engine, NativeRunPhase
     consuming_request_ = false;
     draining_notifications_ = false;
     next_interval_index_ = 0;
+    next_script_index_ = 0;
     current_input_open_.reset();
     observed_input_cursor_.reset();
     next_tradable_synthesis_cursor_.reset();
@@ -2502,11 +2528,12 @@ void NativeExecutionConsumer::raise_floor(int64_t t) {
 
 NativeCoordinate NativeExecutionConsumer::coordinate_from(
         const native_calendar::NativeInterval& interval,
-        int index, int64_t effective,
+        int script_index, int input_index, int64_t effective,
         NativePriceProvenance provenance,
         NativePathPhase phase) const {
     NativeCoordinate c;
-    c.interval_index = index;
+    c.interval_index = script_index;
+    c.input_interval_index = input_index;
     c.open_ms = interval.open_ms;
     c.eligible_open_ms = interval.eligible_open_ms;
     c.last_traded_close_ms = interval.last_traded_close_ms;
@@ -2519,16 +2546,27 @@ NativeCoordinate NativeExecutionConsumer::coordinate_from(
     return c;
 }
 
+int NativeExecutionConsumer::script_index_for_input(
+        const native_calendar::NativeInterval& interval) const noexcept {
+    const auto script = script_interval_at(interval.open_ms);
+    if (script && script_.has_data && script_.key == script->open_ms)
+        return script_.script_index;
+    return next_script_index_;
+}
+
 void NativeExecutionConsumer::record_driver(const NativeDriverPoint& point) {
     // Every driver point is a point the journal window may close at under the
     // stress switch (set_retire_every_point); by default it closes at
     // script-bar boundaries only.
     if (retire_every_point_) retire_journal();
-    // The FX-roll check's previous point, and the stream's high water, are
-    // kept whatever the retention.
-    driver_marks_[0] = driver_marks_[1];
-    driver_marks_[1] = DriverMark{point.coordinate.ordinal, point.coordinate.effective_time_ms};
-    if (driver_mark_count_ < 2) ++driver_mark_count_;
+    // FX rolls compare successive walked path points. A synchronous current
+    // execution has its own cursor (sometimes at the decision floor ahead of
+    // this path point), so it cannot become the path's FX predecessor.
+    if (point.coordinate.provenance != NativePriceProvenance::CurrentExecution) {
+        driver_marks_[0] = driver_marks_[1];
+        driver_marks_[1] = DriverMark{point.coordinate.ordinal, point.coordinate.effective_time_ms};
+        if (driver_mark_count_ < 2) ++driver_mark_count_;
+    }
     last_driver_ordinal_ = point.coordinate.ordinal;
     // The driver log is an owning readback surface (native_events), kept only
     // under NativeEventRetention::Full; since v19 no hash folds it.
@@ -2806,6 +2844,19 @@ native_order::CommandContext NativeExecutionConsumer::make_command_context(
         ? current_frame_->point.decision.coordinate.effective_time_ms : decision_floor();
     if (const auto* spec = spec_ptr()) {
         ctx.quantity_grid = spec->quantity_grid;
+        // A Reduce whose units are a FIFO boundary of its scope is on the grid
+        // as it stands (CommandContext::units_are_scope_boundary; R5 lane
+        // K-ULP4) -- one that closes in one fill, so the candidate can hold
+        // what it settles to the same test (grid_boundary_holds).
+        if (spec->quantity_grid && engine.position_side_ != PositionSide::FLAT
+            && std::holds_alternative<native_order::ImmediateRemaining>(request.capacity)) {
+            if (const auto* reduce = std::get_if<native_order::Reduce>(&request.intent)) {
+                if (const auto* units = std::get_if<native_order::ExplicitUnits>(&reduce->size)) {
+                    ctx.units_are_scope_boundary =
+                        scope_boundary_units(engine, request, units->units, false);
+                }
+            }
+        }
         // A Sized request freezes its sizing price here when it asked for the
         // signal rule, and a Sized{AtAcceptance} additionally freezes its
         // units against that price, the marked equity there and the activated
@@ -3449,9 +3500,10 @@ void NativeExecutionConsumer::calculation_margin_check_at(
 //
 // The account converts at account_currency_fx_at(effective time), so the rate
 // a driver point is walked under is a function of the immutable curve and of
-// that point alone. A roll is a point whose rate is not its predecessor's in
-// the driver log -- both already durable, digested state, so the detection
-// adds none of its own and no continuation identity moves. The point is
+// that point alone. A roll is a walked point whose rate is not its walked
+// predecessor's -- both already durable, digested state, so the detection
+// adds no new state. Its existing folded predecessor marks change in v19
+// only when a current execution occurred under a staged curve. The point is
 // offered immediately before it is matched, where the walk still stands: a
 // discrete point at its own price, a segment at its origin with its
 // destination among the waypoints that remain, so a level the new rate moved
@@ -4622,6 +4674,60 @@ bool NativeExecutionConsumer::admit_placement_units(
                                  nullptr);
 }
 
+bool NativeExecutionConsumer::grid_boundary_holds(const BacktestEngine& engine,
+                                                  const native_order::LiveRequest& live,
+                                                  const native_order::MatchCursor& cursor) const {
+    const auto* spec = spec_ptr();
+    if (!spec || !spec->quantity_grid) return true;
+    const auto* reduce = std::get_if<native_order::Reduce>(&live.request().intent);
+    const auto* units = reduce ? std::get_if<native_order::ExplicitUnits>(&reduce->size) : nullptr;
+    if (!units || native_order::quantity_on_grid(units->units, *spec->quantity_grid)) return true;
+    // Admitted only as a FIFO boundary of its scope. What this candidate
+    // settles -- the remaining units, which an OCA-Reduce sibling's fill can
+    // lower, capped as inspect_candidate caps them -- must still close whole
+    // lots: be on the grid, a boundary of the scope as it stands, or at least
+    // its whole held total.
+    const auto* remaining = std::get_if<native_order::RemainingUnits>(&live.remaining);
+    if (!remaining) return true;
+    double qty = remaining->q;
+    if (const auto* allowance = std::get_if<native_order::AllowanceUnits>(&live.allowance)) {
+        if (allowance->point_ordinal == cursor.point.ordinal) qty = std::min(qty, allowance->left);
+    }
+    if (native_order::quantity_on_grid(qty, *spec->quantity_grid)) return true;
+    return scope_boundary_units(engine, live.request(), qty, /*or_whole_scope=*/true);
+}
+
+bool NativeExecutionConsumer::scope_boundary_units(const BacktestEngine& engine,
+                                                   const native_order::Request& request,
+                                                   double units, bool or_whole_scope) noexcept {
+    const auto* one = std::get_if<native_order::BindOpening>(&request.owner);
+    const auto* many = std::get_if<native_order::BindOpenings>(&request.owner);
+    if (!one && !many && !std::holds_alternative<native_order::Independent>(request.owner)) {
+        return false;
+    }
+    if ((one && one->cycle != engine.position_cycle_seq_)
+        || (many && many->cycle != engine.position_cycle_seq_)) {
+        return false;
+    }
+    double sum = 0.0;
+    for (const auto& lot : engine.pyramid_entries_) {
+        const std::uint64_t incarnation = lot.entry_incarnation;
+        if (one && incarnation != one->opening.incarnation) continue;
+        if (many && std::none_of(many->openings.begin(), many->openings.end(),
+                                 [&](const native_order::RequestHandle& opening) {
+                                     return opening.incarnation == incarnation;
+                                 })) {
+            continue;
+        }
+        sum += lot.qty;
+        if (sum == units) return true;
+    }
+    // At least the scope's whole held total closes every lot of it whole: the
+    // walk takes each lot while the rest exceeds it, and a bound scope's close
+    // is capped to what the scope holds.
+    return or_whole_scope && units >= sum;
+}
+
 std::optional<double> NativeExecutionConsumer::resolve_sized_units(
         const BacktestEngine& engine, const native_order::LiveRequest& live,
         const NativeExecutionTermsFacts& facts) const {
@@ -4662,8 +4768,20 @@ std::optional<double> NativeExecutionConsumer::resolve_sized_units(
     // units = scope * fraction, one binary64 multiplication. A percent-spelled
     // caller converts percent -> fraction itself, so no second rounding step
     // enters here.
-    return representable_units(scope * fraction->fraction,
-                               native_order::ExecutionGridPolicy::SnapToGrid,
+    const double units = scope * fraction->fraction;
+    // A fraction whose product is its scope's own held total -- fraction 1,
+    // "close it all", of the gross scope as it stands -- resolves to that
+    // total, which the grid does not floor, for a request that settles it in
+    // one fill. The total is the binary64 fold of the book's own lots, which
+    // settlement arithmetic moves off any decimal grid: floored, the close fell
+    // up to a whole step short, left a dust lot, or found nothing to close. A
+    // scope net of siblings' claims or frozen at another total, a point budget
+    // and a pending group deduction settle something else, and are floored as
+    // before (R5 lane K-ULP4).
+    if (units == scope && scope == facts.scope_exposure_units && settles_in_one_fill(live)) {
+        return scope;
+    }
+    return representable_units(units, native_order::ExecutionGridPolicy::SnapToGrid,
                                spec->quantity_grid);
 }
 
@@ -4856,9 +4974,11 @@ std::optional<NativeCurrentExecutionResult> NativeExecutionConsumer::consume_mat
         if (terms.units && (!std::isfinite(*terms.units) || *terms.units < 0.0)) {
             return terminal(native_order::MatchRejectReason::InvalidTerms, terms);
         }
+        const bool own_quantity = closing_size && terms.units && settles_in_one_fill(*live)
+            && *terms.units == terms_facts.scope_exposure_units;
         if (!execution_terms_grid_representable(
                 terms, host_sized, unresolved, terms_facts.scope_exposure_units,
-                spec_ptr())) {
+                spec_ptr(), own_quantity)) {
             return terminal(native_order::MatchRejectReason::InvalidTerms, terms);
         }
 
@@ -5019,10 +5139,27 @@ std::optional<NativeCurrentExecutionResult> NativeExecutionConsumer::consume_mat
             }
         }
 
+        // An off-grid Reduce the grid admitted at submit as a FIFO boundary of
+        // its scope settles only what still closes whole lots: if its book or
+        // remaining units changed so that closing them would split a lot off
+        // the grid, it ends here with the same typed refusal (R5 lane K-ULP4).
+        if (!grid_boundary_holds(engine, *live, evaluation.cursor)) {
+            return terminal(native_order::MatchRejectReason::UnrepresentableQuantity,
+                            nonidentity_attempt);
+        }
         auto candidate = inspect_candidate(engine, *live, evaluation.cursor, resolved_price,
                                            execution_fx, plan ? &*plan : nullptr);
         const auto& inspect = candidate.inspect;
         if (inspect.status == execution::Status::NoEffect) return terminal(std::nullopt);
+        // A quantity the settlement cannot book exactly on this book is that
+        // request's refusal, not the run's failure: the request ends with a
+        // typed MatchRejected and nothing moves (R5 lane K-ULP4). Every other
+        // non-Applied inspection is a broken book, price or accounting, and
+        // still stops the run.
+        if (inspect.status == execution::Status::UnrepresentableQuantity) {
+            return terminal(native_order::MatchRejectReason::UnrepresentableQuantity,
+                            nonidentity_attempt);
+        }
         if (inspect.status != execution::Status::Applied) {
             fail(engine, NativeFailure{NativeFailureCode::SettlementFailure,
                 NativeFailureOperation::Settlement, P, static_cast<uint32_t>(inspect.status)});
@@ -5051,9 +5188,21 @@ std::optional<NativeCurrentExecutionResult> NativeExecutionConsumer::consume_mat
         // settlement; the pair holds a token across it.
         std::optional<native_order::PreparedExecution> token;
         bool ready = false;
+        // A fill the request's own units cannot absorb -- a scope of dust
+        // closed by a far larger request, whose remaining units the close
+        // cannot move -- is the same typed refusal, before anything is
+        // written: the request core checks and prepares without a mutation
+        // (R5 lane K-ULP4).
+        const auto unrepresentable = [](const native_order::PreparationError& error) {
+            return error.code == native_order::CoreFailure::NonrepresentableQuantity;
+        };
         if (direct_mutation_) {
             auto checked = requests_.check_execution(handle, proposal, next_timeline_ordinal_);
             if (const auto* error = std::get_if<native_order::PreparationError>(&checked)) {
+                if (unrepresentable(*error)) {
+                    return terminal(native_order::MatchRejectReason::UnrepresentableQuantity,
+                                    nonidentity_attempt);
+                }
                 fail_preparation(engine, *error, NativeFailureOperation::Settlement);
                 return std::nullopt;
             }
@@ -5061,6 +5210,10 @@ std::optional<NativeCurrentExecutionResult> NativeExecutionConsumer::consume_mat
         } else {
             auto prepared = requests_.prepare_execution(handle, proposal, next_timeline_ordinal_);
             if (const auto* error = std::get_if<native_order::PreparationError>(&prepared)) {
+                if (unrepresentable(*error)) {
+                    return terminal(native_order::MatchRejectReason::UnrepresentableQuantity,
+                                    nonidentity_attempt);
+                }
                 fail_preparation(engine, *error, NativeFailureOperation::Settlement);
                 return std::nullopt;
             }
@@ -6369,8 +6522,11 @@ NativeCurrentExecutionPreview NativeExecutionConsumer::inspect_current_execution
         out.terms_rejection = native_order::MatchRejectReason::InvalidTerms;
         return out;
     }
+    const bool own_quantity = closing_size && terms.units && settles_in_one_fill(*live)
+        && *terms.units == facts.scope_exposure_units;
     if (!execution_terms_grid_representable(
-            terms, host_sized, unresolved, facts.scope_exposure_units, spec_ptr())) {
+            terms, host_sized, unresolved, facts.scope_exposure_units, spec_ptr(),
+            own_quantity)) {
         out.terms_rejection = native_order::MatchRejectReason::InvalidTerms;
         return out;
     }
@@ -7105,12 +7261,10 @@ void NativeExecutionConsumer::invoke_callback(BacktestEngine& engine, const Bar&
 // HOLDS on that side when it holds one -- the pumped batch input or stream
 // warmup -- because the input, not the schedule, says where a trading day
 // actually stopped (an early close the session string does not declare, a
-// holiday). With nothing held, the neighbour is the calendar's slot one script
-// width away, except at the run's own edges: its first bar opens its session
-// day, and a batch's final bar closes it, because a batch is complete input.
-// A stream's bars read on, because the stream continues. "Opens" reads the bar
-// before exactly as "closes" reads the bar after, so every path that holds a
-// bar agrees on the pair by construction.
+// holiday). With nothing held, the neighbour is the calendar's previous or
+// next eligible input slot, except at the run's own edges: its first bar opens
+// its session day, and a batch's final bar closes it because batch input is
+// complete. A stream reads on. A declared break does not split a session day.
 void NativeExecutionConsumer::present_session_day(NativeDecisionContext& context,
                                                   int64_t label) const {
     context.in_session = false;
@@ -7126,22 +7280,25 @@ void NativeExecutionConsumer::present_session_day(NativeDecisionContext& context
         context.closes_session_day_open_ended = true;
         return;
     }
-    const SessionPoint here = session_point(label);
+    // The nominal script label may itself be in a declared break (an hourly
+    // interval can reopen at 13:30 while its grid label is 13:00). Resolve
+    // its first eligible instant and next input opening from the calendar,
+    // even when a FeedTolerant host partitions by raw provider labels.
+    const auto slot = native_calendar::interval_containing(
+        calendar_, script_tf_, input_tf_, label, calendar_memo_);
+    const int64_t here_ms = slot ? slot->eligible_open_ms : label;
+    const SessionPoint here = session_point(here_ms);
     if (!here.in_session) return;
     context.in_session = true;
     // In session on this bar's own session day.
     const auto same_day = [&](int64_t other) {
-        const SessionPoint there = session_point(other);
+        const auto other_slot = native_calendar::interval_containing(
+            calendar_, script_tf_, input_tf_, other, calendar_memo_);
+        const SessionPoint there = session_point(
+            other_slot ? other_slot->eligible_open_ms : other);
         return there.in_session && there.ordinal && here.ordinal
             && *there.ordinal == *here.ordinal;
     };
-    const int64_t width = script_width_ms();
-    std::optional<int64_t> step_before;
-    std::optional<int64_t> step_after;
-    if (width > 0) {
-        if (label >= std::numeric_limits<int64_t>::min() + width) step_before = label - width;
-        if (label <= std::numeric_limits<int64_t>::max() - width) step_after = label + width;
-    }
     // The bucket this bar's inputs went into, when any have: its first and
     // last input indices place it in the run. A stream whose warmup ended
     // inside a script bar seals that bar in realtime, and it is still the
@@ -7156,7 +7313,31 @@ void NativeExecutionConsumer::present_session_day(NativeDecisionContext& context
             ? std::optional<int64_t>(pumped_last_label_)
             : pumped_script_label(script_.first_index - 1);
     }
-    if (!run_start && !before) before = step_before;
+    if (!run_start && !before && slot) {
+        // A previous eligible input slot ON THIS session day suffices to
+        // establish that this bar does not open it. If none exists, the
+        // predecessor is on another day (or absent). Walk this day's spans
+        // backwards, skipping any declared closed window, then resolve the
+        // slot at the last eligible instant before this script interval.
+        if (!session_day_memo_ || !session_day_memo_->holds(here_ms)) {
+            session_day_memo_ = native_calendar::session_day_at(
+                calendar_, here_ms, calendar_memo_);
+        }
+        if (session_day_memo_) {
+            for (auto it = session_day_memo_->spans.rbegin();
+                 it != session_day_memo_->spans.rend(); ++it) {
+                if (it->first >= here_ms) continue;
+                const int64_t end = std::min(here_ms, it->second);
+                if (end <= it->first) continue;
+                const int64_t instant = end - 1;
+                const auto previous = native_calendar::interval_containing(
+                    calendar_, input_tf_, instant, calendar_memo_);
+                if (previous && previous->eligible_open_ms < here_ms)
+                    before = previous->eligible_open_ms;
+                break;
+            }
+        }
+    }
     context.opens_session_day = run_start || !before || !same_day(*before);
 
     std::optional<int64_t> after;
@@ -7175,9 +7356,9 @@ void NativeExecutionConsumer::present_session_day(NativeDecisionContext& context
         context.closes_session_day = !same_day(*after);
         context.closes_session_day_open_ended = context.closes_session_day;
     } else {
-        // Nothing held after the bar: the calendar's next slot, which is also
-        // the open-ended reading of a batch's final bar.
-        const bool scheduled = step_after && !same_day(*step_after);
+        // Nothing held after the bar: the calendar's next eligible input
+        // slot, which jumps across a declared break without ending the day.
+        const bool scheduled = slot && !same_day(slot->next_input_open_ms);
         context.closes_session_day = run_end || scheduled;
         context.closes_session_day_open_ended = scheduled;
     }
@@ -7225,16 +7406,6 @@ std::optional<int64_t> NativeExecutionConsumer::pumped_script_label(int index) c
     const auto script = script_interval_at(input->open_ms);
     if (!script) return std::nullopt;
     return script->open_ms;
-}
-
-// One script bar's width on a fixed (second / minute) timeframe, 0 otherwise.
-int64_t NativeExecutionConsumer::script_width_ms() const noexcept {
-    if (!script_tf_.valid() || !script_tf_.is_fixed()) return 0;
-    const int64_t unit = script_tf_.unit() == native_calendar::TimeframeUnit::Second
-        ? 1000 : 60'000;
-    const int64_t count = script_tf_.count();
-    if (count <= 0 || count > std::numeric_limits<int64_t>::max() / unit) return 0;
-    return count * unit;
 }
 
 void NativeExecutionConsumer::deliver_confirmed_script(BacktestEngine& engine, const Bar& bar,
@@ -7652,11 +7823,13 @@ void NativeExecutionConsumer::record_script_report_point(
 // read the curve. Recording is still the kernel's: the host names when, not
 // what. Inert under every other policy, so a host that records its own
 // report, or one that asked for the per-calculation cadence, is unaffected.
-void NativeExecutionConsumer::mark_script_report_point(
+bool NativeExecutionConsumer::mark_script_report_point(
         BacktestEngine& engine, int64_t script_bar_ts) const {
     const auto* spec = spec_ptr();
-    if (!spec || spec->report_policy != NativeReportPolicy::KernelRecordedAtHostMarks) return;
+    if (!std::holds_alternative<NativeRunning>(state_) || !spec
+        || spec->report_policy != NativeReportPolicy::KernelRecordedAtHostMarks) return false;
     record_report_point(engine, script_bar_ts);
+    return true;
 }
 
 // The fold and the append together, at one instant: the shape a policy whose
@@ -7805,7 +7978,8 @@ bool NativeExecutionConsumer::seal_stale_script(BacktestEngine& engine,
 void NativeExecutionConsumer::seal_script(BacktestEngine& engine, NativeCompletionKind kind) {
     if (!script_.has_data || script_.sealed) return;
     NativeCoordinate base;
-    base.interval_index = script_.first_index;
+    base.interval_index = script_.script_index;
+    base.input_interval_index = script_.first_index;
     base.open_ms = script_.interval.open_ms;
     base.eligible_open_ms = script_.interval.eligible_open_ms;
     base.last_traded_close_ms = script_.interval.last_traded_close_ms;
@@ -7823,6 +7997,17 @@ void NativeExecutionConsumer::seal_script(BacktestEngine& engine, NativeCompleti
     }
     script_.sealed = true;
     script_.has_data = false;
+    ++next_script_index_;
+}
+
+bool NativeExecutionConsumer::final_script_session_closed() const noexcept {
+    // A nominally unfinished bucket can be complete at the calendar's final
+    // traded input. Its last contributor reaches the script interval's
+    // last-traded close; a feed that merely stops mid-interval does not.
+    return script_.has_data && !script_.sealed && last_accepted_input_
+        && script_.interval.last_traded_close_ms > script_.interval.eligible_open_ms
+        && last_accepted_input_->last_traded_close_ms
+            >= script_.interval.last_traded_close_ms;
 }
 
 bool NativeExecutionConsumer::contribute_input(
@@ -7852,6 +8037,7 @@ bool NativeExecutionConsumer::contribute_input(
         script_.first_open_ms = interval.open_ms;
         script_.first_source_time_ms = source_open;
         script_.latest_close_ms = source_close;
+        script_.script_index = next_script_index_;
         script_.first_index = index;
         script_.last_index = index;
         script_.sealed = false;
@@ -7886,7 +8072,8 @@ bool NativeExecutionConsumer::contribute_input(
         script_ = ScriptBucket{};
     }
     engine.current_bar_ = bar;
-    engine.bar_index_ = index;
+    engine.bar_index_ = script_.has_data
+        ? script_.script_index : std::max(0, next_script_index_ - 1);
     next_interval_index_ = index + 1;
     if (!failed() && kind != InputContribution::QuietCarried)
         ++engine.diag_input_bars_processed_;
@@ -8873,6 +9060,15 @@ void NativeExecutionConsumer::pump_batch(BacktestEngine& engine, const Bar* bars
             if (!check_abort(engine, NativeFailureOperation::Input)) return;
             presize_logs(static_cast<std::size_t>(i) + 1);
         }
+        // stream_begin uses this pump for Warmup too. Its pending bucket must
+        // carry into Realtime; only a complete batch ends its input here.
+        const auto* running = std::get_if<NativeRunning>(&state_);
+        if (running && running->phase == NativeRunPhase::Batch
+            && final_script_session_closed()) {
+            seal_script(engine, NativeCompletionKind::Confirmed);
+            if (failed()) return;
+            script_ = ScriptBucket{};
+        }
     }
     (void)check_abort_or_projection(engine, NativeFailureOperation::Input);
 }
@@ -9214,7 +9410,8 @@ bool NativeExecutionConsumer::emit_quiet_carried_open(
     if (!has_last_price_) return true;
     if (next_tradable_synthesis_cursor_ == interval.open_ms) return true;
     NativeDriverPoint point;
-    point.coordinate = coordinate_from(interval, next_interval_index_,
+    point.coordinate = coordinate_from(interval, script_index_for_input(interval),
+                                       next_interval_index_,
                                        interval.eligible_open_ms,
                                        NativePriceProvenance::CarriedOpen,
                                        NativePathPhase::Open);
@@ -9242,7 +9439,8 @@ bool NativeExecutionConsumer::finalize_observed_tick_slot(
         const bool equal = pairing_.pairing == native_calendar::TimeframePairing::Passthrough;
         if (equal) {
             NativeCoordinate calc;
-            calc.interval_index = next_interval_index_;
+            calc.interval_index = script_index_for_input(interval);
+            calc.input_interval_index = next_interval_index_;
             calc.open_ms = interval.open_ms;
             calc.eligible_open_ms = interval.eligible_open_ms;
             calc.last_traded_close_ms = interval.last_traded_close_ms;
@@ -9336,7 +9534,8 @@ bool NativeExecutionConsumer::deliver_tick(BacktestEngine& engine, const TradeTi
         return false;
     }
     NativeDriverPoint point;
-    point.coordinate = coordinate_from(*interval, next_interval_index_, tick.timestamp,
+    point.coordinate = coordinate_from(*interval, script_index_for_input(*interval),
+                                       next_interval_index_, tick.timestamp,
                                        NativePriceProvenance::ObservedPrint,
                                        NativePathPhase::None);
     point.coordinate.ordinal = take_ordinal(engine);
@@ -9503,15 +9702,24 @@ bool NativeExecutionConsumer::stream_end(BacktestEngine& engine, bool finalize_p
             return false;
         }
         if (!check_abort_or_projection(engine, NativeFailureOperation::Stream)) return false;
-        if (finalize_partial_input_bar && has_forming_) {
+        if (finalize_partial_input_bar) {
             PumpScope pump(*this);
-            auto forming_interval = native_calendar::interval_containing(
-                calendar_, input_tf_, forming_.timestamp, calendar_memo_);
-            if (forming_interval) {
-                if (!finalize_observed_tick_slot(engine, *forming_interval,
-                                                 NativeCompletionKind::PartialFinalized)) {
-                    return false;
+            if (has_forming_) {
+                auto forming_interval = native_calendar::interval_containing(
+                    calendar_, input_tf_, forming_.timestamp, calendar_memo_);
+                if (forming_interval) {
+                    if (!finalize_observed_tick_slot(engine, *forming_interval,
+                                                     NativeCompletionKind::PartialFinalized)) {
+                        return false;
+                    }
                 }
+            }
+            if (final_script_session_closed()) {
+                processing_input_ = true;
+                seal_script(engine, NativeCompletionKind::Confirmed);
+                processing_input_ = false;
+                if (failed()) return false;
+                script_ = ScriptBucket{};
             }
         }
         if (failed()) return false;
@@ -10337,6 +10545,10 @@ NativeCurrentExecutionPreview NativeStrategyHost::inspect_current_execution(
 
 NativeCurrentExecutionResult NativeStrategyHost::execute_current(const NativeCurrentExecution& command) {
     return NativeExecutionConsumer::bound(*this).execute_current(*this, command);
+}
+
+bool NativeStrategyHost::mark_native_report_point(int64_t report_ts) {
+    return NativeExecutionConsumer::bound(*this).mark_script_report_point(*this, report_ts);
 }
 
 NativePhysicalPosition NativeStrategyHost::physical_position() const {

@@ -225,9 +225,9 @@ struct TradeC {
     double pnl;
     double pnl_pct;
     int is_long;
-    // Max Adverse/Favorable Excursion expressed as $ move per unit qty.
-    // max_runup is peak favorable move (price travel in direction of trade).
-    // max_drawdown is peak adverse move (price travel against trade).
+    // Max Adverse/Favorable Excursion for the whole trade in account currency,
+    // net of entry fees. max_runup is the peak favorable amount;
+    // max_drawdown is the peak adverse amount.
     double max_runup;
     double max_drawdown;
     double qty;
@@ -2079,16 +2079,17 @@ public:
     // realtime tick-driven bar after strategy_stream_begin.
     int64_t script_bars_processed() const { return diag_script_bars_processed_; }
 
-    // ABI v4 live-runtime surface (task 6): when on, every script bar's
-    // report point appends broker_state_hash() to broker_state_hashes_
+    // ABI v4 live-runtime surface (task 6): when on, every report point
+    // appends broker_state_hash() to broker_state_hashes_
     // immediately after that bar's record_equity_point() call -- under
     // KernelRecorded the execution consumer's record_script_report_point,
     // which every script calculation it delivers reaches (confirmed,
     // intrabar and aggregated bars, in a batch run and across a stream's
     // warmup and realtime legs); a host that records or marks its own report
-    // points appends its own row at each -- so the recorded array's length
-    // matches script_bars_processed and pf_report_t::broker_state_hash_len
-    // 1:1 -- including on strategy_stream_fill_report, whose report is the
+    // points appends its own row at each -- so a completed run's recorded
+    // array has one row per report point (and, under KernelRecorded, matches
+    // script_bars_processed and pf_report_t::broker_state_hash_len 1:1) --
+    // including on strategy_stream_fill_report, whose report is the
     // cumulative warmup + realtime run. Default off: broker_state_hashes_
     // stays empty, fill_report emits a null/zero-length array, and every
     // historical run stays byte-identical to before this flag existed.
@@ -2113,7 +2114,7 @@ public:
     //   * different driving -- run(), stream_begin(warmup=1)+push and
     //     stream_begin(warmup=all) over the same bars booking the same trades
     //     record different rows from index 0; only the length identity above
-    //     survives. Two streams share exactly their common Warmup prefix.
+    //     survives. Without subscriptions, streams share their Warmup prefix.
     //   * the broker half alone IS driving-mode invariant: factor the
     //     continuation out with broker_state_hash_from_execution_hash(fixed)
     //     and the remaining fold is identical at every bar in every driving.
@@ -2167,6 +2168,15 @@ public:
     void trace(const std::string& name, double value);
     void trace(const std::string& name, bool value)  { trace(name, value ? 1.0 : 0.0); }
     void trace(const std::string& name, int value)   { trace(name, static_cast<double>(value)); }
+
+private:
+    // The run spec's quantity tolerance (NativeRunSpec::quantity_tolerance),
+    // 0 when the run declares none, which keeps the settlement exact. The FIFO
+    // close walk and the opening beside a surviving book read it
+    // (src/engine_execution.cpp); the execution consumer, a friend, projects
+    // it from the spec at every begin, and the spec digest folds the spec's
+    // value. Private, so no host writes it (R5 lane K-ULP4).
+    double native_quantity_tolerance_ = 0.0;
 };
 
 } // inline namespace engine_script_run_v19

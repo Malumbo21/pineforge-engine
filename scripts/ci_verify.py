@@ -226,7 +226,20 @@ SANITIZER_FLAG = '-fsanitize=address,undefined'
 # dual-entry witness reach the source layer (see RELEASE_MIN_TESTS), and
 # B-C-SURFACE and B-DOCS add no row. 272 registered, 271 run: the WebSocket
 # row still skips on a system libcurl.
-KERNEL_MIN_TESTS = 271
+# 277 run = those 271 plus the six source-free TUs of wave G (INT25) --
+# measured on the integrated tree (ctest -N), not summed from the lanes' own
+# bases:
+#   +1 C-SURFACE-1 test_native_c_api_int23_header (the INT23 frozen-header
+#                  decision-tail witness)
+#   +1 KERNEL-EDGE test_native_kernel_edge
+#   +2 K-ULP4      test_native_unrepresentable_refusal,
+#                  test_native_quantity_tolerance
+#   +1 K-ULP5      test_native_group_absorption
+#   +1 DOC-TRUTH-4 test_native_engine_complete_host (the guide's Complete host,
+#                  extracted from the page and run)
+# All six register in release too; RATIO-HARDEN, V19-FIX and K-IDX add no row.
+# 278 registered, 277 run: the WebSocket row still skips on a system libcurl.
+KERNEL_MIN_TESTS = 277
 # Release-row floor, the same gate for the default profile. Before lane P7
 # only the kernel profile had one, so a row that left release alone (a
 # source-bound TU dropped from TEST_SOURCES, a deleted twin or ABI row) left a
@@ -327,13 +340,35 @@ KERNEL_MIN_TESTS = 271
 #                test_adapter_margin_revival_cancel
 #   +1 INT24     test_adapter_dual_entry_tie (the ruling on B-ADAPTER's
 #                finding 1)
-# B-C-SURFACE's new witnesses are rows inside test_native_c_api. No release row
-# skips, so 672 registered is 672 run.
-RELEASE_MIN_TESTS = 672
-# PR-only registration floors. These are the complete CTest populations at
-# 91d65ad6 (INT24); the ordinary full-run floors above remain unchanged.
-# An excluded run must still discover at least this many rows before -LE.
-EXCLUDED_REGISTERED_MIN = {'debug': 653, 'sanitizers': 653, 'native': 662}
+# B-C-SURFACE's witnesses are rows inside test_native_c_api.
+# 678 = those 672 plus the six wave-G (INT25) rows KERNEL_MIN_TESTS lists
+# above -- C-SURFACE-1 +1, KERNEL-EDGE +1, K-ULP4 +2, K-ULP5 +1, DOC-TRUTH-4 +1
+# -- which register here too, counted with ctest -N on the integrated tree; no
+# wave-G lane adds a source-bound row (the K-ULP4 and K-ULP5 C checks and
+# V19-FIX's scaling rows are rows inside existing TUs). No release row skips,
+# so 678 registered is 678 run.
+RELEASE_MIN_TESTS = 678
+# PR-only registration floors: the complete CTest populations of the three
+# excluded profiles at INT25, counted with ctest -N on the integrated tree --
+# 653/653/662 at 91d65ad6 (INT24) plus wave G's six rows (C-SURFACE-1 +1,
+# KERNEL-EDGE +1, K-ULP4 +2, K-ULP5 +1, DOC-TRUTH-4 +1) in each. An excluded
+# run must still discover at least this many rows before -LE.
+EXCLUDED_REGISTERED_MIN = {'debug': 659, 'sanitizers': 659, 'native': 668}
+# The ctest stage's bound. A full sanitizers run (push to main, a manual
+# dispatch, the maintainers' verification) ran out of its 30 minutes twice on
+# main's four-core runner before every row had finished, so it gets an hour; a
+# run that excludes a label (the PR set) and every other profile keep 30
+# minutes.
+CTEST_TIMEOUT = 1800
+SANITIZERS_FULL_CTEST_TIMEOUT = 3600
+
+
+def ctest_timeout(cfg: 'VerifyConfig') -> int:
+    if cfg.profile.sanitizers and not cfg.exclude_label:
+        return SANITIZERS_FULL_CTEST_TIMEOUT
+    return CTEST_TIMEOUT
+
+
 # CTest's closing summary: '100% tests passed out of N' when nothing failed,
 # '97% tests passed, 3 tests failed out of N' otherwise. N includes a skipped
 # row (counted as passed) and a row CTest could not start (counted as
@@ -364,6 +399,7 @@ SOURCE_GUARD_SCRIPTS = (
     ('source-guard-native-c-surface', ['scripts/check_native_c_api_surface.py']),
     ('source-guard-aggregate-versions', ['scripts/check_aggregate_cpp_versions.py']),
     ('source-guard-adapter-spec-shadowing', ['scripts/check_adapter_spec_shadowing.py']),
+    ('source-guard-dangling-comment-names', ['scripts/check_dangling_comment_names.py']),
 )
 NATIVE_INCLUDE_INDEPENDENCE_PROFILES = frozenset(('release', 'native', 'kernel'))
 # The kernel-only archive must name no TradingView vocabulary outside ADR-0001's
@@ -1456,7 +1492,8 @@ class Driver:
             ctest += ['-LE', self.cfg.exclude_label]
         if ctest_supports_junit(self.cfg.runner):
             ctest += ['--output-junit', str(self.cfg.build_dir / 'ctest-junit.xml')]
-        ran = self.invoke('ctest', ctest, extra_env=self.sanitizer_env(), timeout=1800)
+        ran = self.invoke('ctest', ctest, extra_env=self.sanitizer_env(),
+                          timeout=ctest_timeout(self.cfg))
         self.enforce_test_floor(ran, registered=registered, selected=selected)
 
         installed = self.invoke(

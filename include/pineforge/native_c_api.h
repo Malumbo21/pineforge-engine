@@ -103,6 +103,8 @@
  *                                          strategy_native_execute_current_v1 answers the same verdicts as
  *                                          pf_native_execute_outcome_e and pf_native_refusal_e
  *   [C]  execute_current                   strategy_native_execute_current_v1
+ *   [--] mark_native_report_point          the C spec does not name KernelRecordedAtHostMarks,
+ *                                          so a C host cannot select its mark cadence
  *   [C]  native_series_bar                 strategy_native_series_bar_v1
  *   [C]  declare_timeframe_subscriptions   strategy_native_declare_subscriptions_v1 -- a row is
  *                                          pf_native_subscription_v1, whose `lookahead` / `gaps` bools are
@@ -284,8 +286,10 @@ extern "C" {
 /** @defgroup pf_native_c_status Status codes
  *  @brief Every `int`-returning symbol here answers 0 or one of these.
  *
- *  Negative values are errors and never mutate run state.  Non-negative
- *  values are outcomes: 0 is success everywhere, and
+ *  Negative values are errors. A C-layer validation refusal does not mutate
+ *  native run state; a kernel-origin refusal can latch Failed, as the
+ *  configure-reuse and reentrant-append contracts below specify.
+ *  Non-negative values are outcomes: 0 is success everywhere, and
  *  #strategy_native_execute_current_v1 additionally answers the positive
  *  #pf_native_execute_outcome_t codes.
  *  @{ */
@@ -299,8 +303,8 @@ extern "C" {
 #define PF_NATIVE_E_REJECTED        -6   /**< The kernel rejected the request (reason written out). */
 #define PF_NATIVE_E_UNSUPPORTED     -7   /**< A tag this API version cannot represent. */
 #define PF_NATIVE_E_EXCEPTION       -8   /**< A C++ exception was contained at the boundary. */
-#define PF_NATIVE_E_NOT_WORKING     -9   /**< The target handle was issued by this run but is no longer live. */
-#define PF_NATIVE_E_INVALID_TARGET -10   /**< The target handle was never issued by this run (a foreign or unknown incarnation). */
+#define PF_NATIVE_E_NOT_WORKING     -9   /**< A nonzero target incarnation is not live, whether it was retired or never issued. */
+#define PF_NATIVE_E_INVALID_TARGET -10   /**< Malformed target: incarnation 0. C commands pair an incarnation with this handle's current run identity, so they cannot pass a foreign run identity. */
 #define PF_NATIVE_E_RUN_FAILED     -11   /**< The run did not reach Completed; read the state. */
 #define PF_NATIVE_E_REFUSED        -12   /**< execute_current refused; see pf_native_refusal_e. */
 /** Non-negative outcome: the kernel HAS no answer here and the output was
@@ -745,7 +749,12 @@ typedef enum pf_native_spec_ext_mask_e {
      *  set this bit; a caller sending any earlier layout is refused with
      *  PF_NATIVE_E_STRUCT. Without it the run keeps
      *  #PF_NATIVE_EVENT_RETENTION_FULL. */
-    PF_NATIVE_SPEC_EXT_EVENT_RETENTION = 1u << 10
+    PF_NATIVE_SPEC_EXT_EVENT_RETENTION = 1u << 10,
+    /** The settlement's quantity tolerance (`quantity_tolerance`). Only a
+     *  caller whose pf_native_run_spec_ext_v1 carries the tolerance tail may
+     *  set this bit; a caller sending any earlier layout is refused with
+     *  PF_NATIVE_E_STRUCT. Without it the settlement stays exact. */
+    PF_NATIVE_SPEC_EXT_QUANTITY_TOLERANCE = 1u << 11
 } pf_native_spec_ext_mask_t;
 
 /** What a run keeps of its event record — `NativeRunSpec::event_retention`,
@@ -1062,8 +1071,13 @@ typedef enum pf_native_match_reject_e {
     PF_NATIVE_MATCH_REJECT_INVALID_TERMS         = 6,
     PF_NATIVE_MATCH_REJECT_NO_OPPOSITE_EXPOSURE  = 7,
     PF_NATIVE_MATCH_REJECT_HOST_PRECOMMIT        = 8,
-    PF_NATIVE_MATCH_REJECT_RISK_LIMIT            = 9  /**< An opening refused while a risk
+    PF_NATIVE_MATCH_REJECT_RISK_LIMIT            = 9, /**< An opening refused while a risk
                                                        *   limit blocks. */
+    PF_NATIVE_MATCH_REJECT_UNREPRESENTABLE_QUANTITY = 10 /**< A quantity the settlement
+                                                          *   cannot book exactly on
+                                                          *   this book: the request
+                                                          *   ends, nothing moves and
+                                                          *   the run goes on. */
 } pf_native_match_reject_t;
 
 /** Which trigger a price reached — `native_order::ActivationKind`: the
@@ -1292,7 +1306,8 @@ typedef enum pf_native_spec_field_e {
     PF_NATIVE_SPEC_FIELD_AUXILIARY_FEED_TIMEFRAME    = 61,
     PF_NATIVE_SPEC_FIELD_AUXILIARY_FEED_BARS         = 62,
     PF_NATIVE_SPEC_FIELD_SUBSCRIPTION_SOURCE         = 63,
-    PF_NATIVE_SPEC_FIELD_EVENT_RETENTION             = 64
+    PF_NATIVE_SPEC_FIELD_EVENT_RETENTION             = 64,
+    PF_NATIVE_SPEC_FIELD_QUANTITY_TOLERANCE          = 65
 } pf_native_spec_field_t;
 
 /** Why an append was refused — `NativeAuxiliaryAppendError`: the `error`
@@ -1398,13 +1413,12 @@ typedef enum pf_native_anchored_trigger_e {
  *  `price` is `current_execution_point()`'s price (the bar's own close at its
  *  close calculation) and NaN only where that answers nullopt.
  *
- *  It has TWO published layouts, and the runtime PRESENTS the one the
- *  caller's callback table was published with: a table sent at the current
- *  length is handed the whole struct, with its session tail; a table sent at
- *  an earlier published length is handed `struct_size` =
- *  #PF_NATIVE_DECISION_V1_BASE_SIZE — the sizeof that caller's own header
- *  compiled — and nothing past it is filled. So an older caller's exact-size
- *  check keeps holding, and a caller reads a field only below `struct_size`.
+ *  It has TWO published layouts. A callback table sent at
+ *  #PF_NATIVE_CALLBACKS_V1_POLICY_SIZE or the current `sizeof` receives the
+ *  whole struct and its session tail. A table sent at an earlier published
+ *  length receives `struct_size` = #PF_NATIVE_DECISION_V1_BASE_SIZE — the
+ *  sizeof that earlier caller's header compiled — and nothing past it is
+ *  filled. A caller reads a field only below the presented `struct_size`.
  *
  *  The four session-day bytes after `quote_kind` (R5 lane F5) sit in what
  *  was the base layout's tail padding: its size and every offset before them
@@ -1459,8 +1473,8 @@ typedef struct pf_native_decision_v1 {
     uint8_t  opens_session_day;  /**< It opens its session day. */
     uint8_t  closes_session_day; /**< It closes its session day. */
 
-    /* ── The additive session tail (R5 lane F4). Presented only to a callback
-     * table of the current layout; see the struct note. ── */
+    /* ── The additive session tail (R5 lane F4). Presented to a callback
+     * table with the policy-hook tail or its successor; see above. ── */
     int64_t  script_interval_open_ms;             /**< The script interval's nominal origin. */
     int64_t  script_interval_eligible_open_ms;    /**< Its first in-session instant. */
     int64_t  script_interval_last_traded_close_ms; /**< Its exclusive end of trading. */
@@ -1487,8 +1501,9 @@ typedef struct pf_native_decision_v1 {
 
 /** Byte length of #pf_native_decision_v1 as the L13 lane first published it,
  *  before the session tail was appended — the `struct_size` a callback table
- *  of an earlier published length is presented. It is the offset of the first
- *  appended field, which is that layout's sizeof on every target (it ended in
+ *  shorter than #PF_NATIVE_CALLBACKS_V1_POLICY_SIZE is presented. It is the
+ *  offset of the first appended field, which is that layout's sizeof on every
+ *  target (it ended in
  *  padding the tail's first 8-byte field begins after). */
 #define PF_NATIVE_DECISION_V1_BASE_SIZE \
     ((uint32_t)offsetof(pf_native_decision_v1, script_interval_open_ms))
@@ -1551,7 +1566,9 @@ typedef struct pf_native_applied_v1 {
  *     bound to, `cycle_after` its cycle, cursor fields.
  *   - RESERVATION_REDUCED / DEFERRED_GROUP: `incarnation` is the recipient,
  *     `reason` its #pf_native_group_effect_t, `closed_units` the deduction
- *     (applied, or deferred).
+ *     (applied, or deferred); 0 when it was absorbed -- too small to move the
+ *     recipient's remaining units, or its pending total, in binary64, which
+ *     stay as they were (R5 lane K-ULP5).
  *   - QUANTITY_BOUND: `incarnation`, `opened_units` = the source units.
  *   - TERMS_RESOLVED: `raw_price`, `resolved_price` (= `price`), cursor fields.
  *   - MARGIN_CALL: `reason` is the #pf_native_side_t of the liquidated
@@ -1744,8 +1761,10 @@ typedef struct pf_native_state_v1 {
                                 *   PF_NATIVE_FAILURE_CALLBACK_EXCEPTION for a callback
                                 *   that returned non-zero. */
     uint32_t failure_operation; /**< #pf_native_failure_operation_t. */
-    uint32_t failure_discriminator; /**< Reserved beside the code: the kernel records no
-                                     *   discriminator on this surface, so it reads 0. */
+    uint32_t failure_discriminator; /**< The kernel's opaque durable failure
+                                     *   discriminator; 0 when no more specific
+                                     *   reason was recorded. Settlement
+                                     *   failures can carry a nonzero core reason. */
     uint64_t failure_ordinal;  /**< The point the failure was latched at, 0 when absent. */
     uint64_t consumed_high_water;
     int64_t  decision_floor_ms;
@@ -2227,22 +2246,24 @@ typedef struct pf_native_subscription_v1 {
  *  #pf_native_run_spec_v1 now travels here. The one deliberate omission is
  *  `identity`, which the base spec owns.
  *
- *  This struct has FIVE published layouts and the runtime accepts any of
+ *  This struct has SIX published layouts and the runtime accepts any of
  *  them: the base layout the L13 lane first shipped
  *  (#PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE); that layout plus L9's `risk_*`
  *  tail (#PF_NATIVE_RUN_SPEC_EXT_V1_RISK_SIZE); that one plus N8's intrabar
  *  path, the four feed-shape and presentation policies, and the margin
  *  model's equity basis, level base and liquidation strings
  *  (#PF_NATIVE_RUN_SPEC_EXT_V1_POLICY_SIZE); that one plus the
- *  `auxiliary_*` tail (#PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE); and the
- *  current one, which appends the `event_retention` tail after them. A
- *  caller compiled against an earlier layout keeps working unchanged and
- *  simply cannot set the mask bits its struct has no fields for
- *  (#PF_NATIVE_SPEC_EXT_RISK, #PF_NATIVE_SPEC_EXT_INTRABAR,
- *  #PF_NATIVE_SPEC_EXT_FEED_POLICY, #PF_NATIVE_SPEC_EXT_AUXILIARY_FEED,
- *  #PF_NATIVE_SPEC_EXT_EVENT_RETENTION): doing so is PF_NATIVE_E_STRUCT. Any
- *  other `struct_size` is PF_NATIVE_E_STRUCT too. Every tail is append-only:
- *  nothing above them moved. */
+ *  `auxiliary_*` tail (#PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE); that one
+ *  plus the `event_retention` tail
+ *  (#PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE); and the current one, which
+ *  appends the `quantity_tolerance` tail after them. A caller compiled
+ *  against an earlier layout keeps working unchanged and simply cannot set
+ *  the mask bits its struct has no fields for (#PF_NATIVE_SPEC_EXT_RISK,
+ *  #PF_NATIVE_SPEC_EXT_INTRABAR, #PF_NATIVE_SPEC_EXT_FEED_POLICY,
+ *  #PF_NATIVE_SPEC_EXT_AUXILIARY_FEED, #PF_NATIVE_SPEC_EXT_EVENT_RETENTION,
+ *  #PF_NATIVE_SPEC_EXT_QUANTITY_TOLERANCE): doing so is PF_NATIVE_E_STRUCT.
+ *  Any other `struct_size` is PF_NATIVE_E_STRUCT too. Every tail is
+ *  append-only: nothing above them moved. */
 typedef struct pf_native_run_spec_ext_v1 {
     uint32_t struct_size;    /**< sizeof(pf_native_run_spec_ext_v1). */
     uint32_t version;        /**< PF_NATIVE_API_VERSION. */
@@ -2355,6 +2376,16 @@ typedef struct pf_native_run_spec_ext_v1 {
      * runs under PF_NATIVE_EVENT_RETENTION_FULL. ── */
     uint32_t event_retention;  /**< #pf_native_event_retention_t. */
     uint32_t reserved2;        /**< Must be 0. */
+
+    /* ── The additive quantity-tolerance tail (K-ULP4). Read only when
+     * `present_mask` carries PF_NATIVE_SPEC_EXT_QUANTITY_TOLERANCE; a caller
+     * sending an earlier layout stops at `reserved2` or above and keeps the
+     * exact settlement, in which a quantity it cannot book exactly is that
+     * request's #PF_NATIVE_MATCH_REJECT_UNREPRESENTABLE_QUANTITY. ── */
+    double   quantity_tolerance; /**< Units, finite and positive:
+                                  *   `NativeRunSpec::quantity_tolerance`, two
+                                  *   quantities within it of each other are
+                                  *   one quantity to the settlement. */
 } pf_native_run_spec_ext_v1;
 
 /** Byte length of #pf_native_run_spec_ext_v1 as the L13 lane first published
@@ -2367,23 +2398,30 @@ typedef struct pf_native_run_spec_ext_v1 {
     ((uint32_t)offsetof(pf_native_run_spec_ext_v1, risk_has_max_drawdown))
 
 /** Byte length of #pf_native_run_spec_ext_v1 with L9's risk tail but without
- *  N8's intrabar / policy tail — the second of its four published layouts. */
+ *  N8's intrabar / policy tail — the second of its six published layouts. */
 #define PF_NATIVE_RUN_SPEC_EXT_V1_RISK_SIZE \
     ((uint32_t)offsetof(pf_native_run_spec_ext_v1, intrabar_kind))
 
 /** Byte length of #pf_native_run_spec_ext_v1 with N8's intrabar / policy tail
- *  but before the `auxiliary_*` tail was appended — the third of its four
+ *  but before the `auxiliary_*` tail was appended — the third of its six
  *  published layouts. It is the offset of the first auxiliary field, for the
  *  same reason #PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE is an offset. */
 #define PF_NATIVE_RUN_SPEC_EXT_V1_POLICY_SIZE \
     ((uint32_t)offsetof(pf_native_run_spec_ext_v1, auxiliary_tf))
 
 /** Byte length of #pf_native_run_spec_ext_v1 with the `auxiliary_*` tail but
- *  before the `event_retention` tail was appended — the fourth of its five
+ *  before the `event_retention` tail was appended — the fourth of its six
  *  published layouts, an offset for the same reason
  *  #PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE is. */
 #define PF_NATIVE_RUN_SPEC_EXT_V1_AUXILIARY_SIZE \
     ((uint32_t)offsetof(pf_native_run_spec_ext_v1, event_retention))
+
+/** Byte length of #pf_native_run_spec_ext_v1 with the `event_retention` tail
+ *  but before the `quantity_tolerance` tail was appended — the fifth of its
+ *  six published layouts, an offset for the same reason
+ *  #PF_NATIVE_RUN_SPEC_EXT_V1_BASE_SIZE is. */
+#define PF_NATIVE_RUN_SPEC_EXT_V1_RETENTION_SIZE \
+    ((uint32_t)offsetof(pf_native_run_spec_ext_v1, quantity_tolerance))
 
 /** The C host's strategy logic.
  *
@@ -2403,10 +2441,11 @@ typedef struct pf_native_run_spec_ext_v1 {
  *  a failure raised there could not be latched without unwinding through
  *  them. A host that must abort does it from an observation callback.
  *
- *  Commands are legal inside `on_bar_open`, `on_bar`, `on_tick` and
- *  `on_applied`. `on_run_begin`, `on_input`, `on_timeframe_bar` and
- *  `on_margin_call` are observation-only: a command there answers
- *  PF_NATIVE_E_STATE and changes nothing.
+ *  Commands follow the C++ host's callback guard: they are legal in every
+ *  callback while the kernel is Running, including `on_timeframe_bar` and
+ *  `on_margin_call`. The kernel may still reject a particular request or
+ *  current-execution action for its own reason. The answering hooks must
+ *  only answer their question; they run on paths without the callback guard.
  *  #strategy_native_declare_opened_lot_entry_bar_mask_v1 is legal inside
  *  `on_applied` alone.
  *
@@ -2553,7 +2592,8 @@ typedef struct pf_native_callbacks_v1 {
 
     /* The trailing layout marker lets the runtime distinguish the policy-hook
      * layout published by F4 from this layout, whose lot-excursion facts carry
-     * the additive entry_commission tail. It is reserved and must be zero. */
+     * the additive entry_commission tail. It is reserved and must be zero;
+     * host creation refuses a nonzero value. */
     uint64_t reserved1;
 } pf_native_callbacks_v1;
 
@@ -2592,8 +2632,9 @@ PF_API int strategy_native_api_version(void);
  *  #strategy_configure_native_v1, the whole `strategy_stream_*` family and the
  *  read-only accessors all take it unchanged.
  *
- *  @return The handle, or NULL for a NULL/mis-sized table or on allocation
- *  failure. Release it with #strategy_native_host_free — never
+ *  @return The handle, or NULL for a NULL/mis-sized table, a nonzero
+ *  `reserved1` in the current layout, or an allocation failure. Release it
+ *  with #strategy_native_host_free — never
  *  #strategy_free, which does not own this allocation. */
 PF_API pf_strategy_t strategy_native_host_create_v1(const pf_native_callbacks_v1* callbacks);
 
@@ -2921,11 +2962,15 @@ PF_API int strategy_native_declare_auxiliary_feed_v1(pf_strategy_t s, const char
                                                      const pf_bar_t* bars, int32_t n,
                                                      uint32_t* error, uint32_t* field);
 
-/** The bar so far at the current cursor — `current_partial_bar()`.
+/** The bar so far — `current_partial_bar()`.
  *
  *  Open of the script bar's first modeled point, running high/low, close at
- *  the cursor; volume is the activity actually consumed so far. Valid in the
- *  bar-open, applied, tick, sub-bar and recalculation callbacks.
+ *  the last path point the walk has consumed: the cursor itself at a discrete
+ *  point (the open of the bar or of a sub-bar, a distribution sample, an
+ *  observed print), and the segment's origin at a fill inside a segment,
+ *  whose `on_applied` and ORDER_FILL recalculation read the bar before the
+ *  fill price is folded in. Volume is the activity actually consumed so far.
+ *  Valid in the bar-open, applied, tick, sub-bar and recalculation callbacks.
  *  @return PF_NATIVE_OK when @p out was written, #PF_NATIVE_ABSENT outside a
  *  path walk — including in the bar's own close calculation, where the
  *  callback already holds the complete bar — leaving @p out untouched. */
@@ -3083,7 +3128,8 @@ PF_API int strategy_configure_native_ext_v1(pf_strategy_t s,
  *    #strategy_configure_native_v1 reuses a host. A Ready or Running handle,
  *    and a handle Failed by anything but an abort, answer #PF_NATIVE_E_STATE
  *    with #PF_NATIVE_SPEC_ERROR_WRONG_PHASE / #PF_NATIVE_SPEC_FIELD_NONE,
- *    without mutation.
+ *    without mutation. A call from a C hook frame is refused the same way,
+ *    including `on_hash_extension` during a hash read of a Completed host.
  *
  *  On an accepted handle the specification is validated before the kernel
  *  sees it: a refused value answers #PF_NATIVE_E_ARGUMENT with its pair and
@@ -3098,10 +3144,11 @@ PF_API int strategy_configure_native_ext_v1(pf_strategy_t s,
  *  again; an aborted handle keeps its abort and may be configured again.
  *  #PF_NATIVE_OK writes NONE / NONE and leaves the handle Ready.
  *
- *  A NULL handle (#PF_NATIVE_E_HANDLE), a NULL @p base or @p ext
- *  (#PF_NATIVE_E_ARGUMENT), a mis-sized struct (#PF_NATIVE_E_STRUCT) and an
- *  unknown enumerator on an accepted handle (#PF_NATIVE_E_TAG) leave both
- *  out-parameters untouched.
+ *  C-layer shape refusals leave both out-parameters untouched: a NULL handle
+ *  (#PF_NATIVE_E_HANDLE); NULL @p base, @p ext, or required string member;
+ *  a negative auxiliary count or a NULL subscription timeframe
+ *  (#PF_NATIVE_E_ARGUMENT); a mis-sized struct (#PF_NATIVE_E_STRUCT); or an
+ *  unknown enumerator on an accepted handle (#PF_NATIVE_E_TAG).
  *
  *  Exercised by `tests/test_native_c_api.c`. */
 PF_API int strategy_configure_native_ext_result_v1(

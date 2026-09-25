@@ -854,6 +854,9 @@ list(APPEND TEST_SOURCES test_native_bare_host_contracts)
 # overnight Tokyo session, streams and a fill recalculation. Source-free, so
 # it also runs in the kernel-only profile.
 list(APPEND TEST_SOURCES test_native_session_day_facts)
+# Wave G KERNEL-EDGE: one source-free row with fail-before witnesses for FX
+# rolls, session-day neighbours, final calendar-closed buckets and host marks.
+list(APPEND TEST_SOURCES test_native_kernel_edge)
 
 # R5 F5: the Pine adapter selects those facts instead of computing its own:
 # the same tapes flag for flag through the adapter, its live-probe tail
@@ -1164,6 +1167,31 @@ list(APPEND TEST_SOURCES test_native_partial_close_split)
 # and the refusals of unrepresentable splits are controls. Source-free, so it
 # also runs in the kernel-only profile.
 list(APPEND TEST_SOURCES test_native_exact_sum_close)
+# R5 lane K-ULP4: a request the settlement cannot book exactly on its book --
+# a close split binary64 cannot hold, a reduction the position absorbs, an
+# opening beside a dust lot -- ends with a typed
+# MatchRejected(UnrepresentableQuantity) and the run goes on (it stopped with
+# code 6 / discriminator 5 on 91d65ad6), staged and direct, execute_current
+# and its preview, a C host; on a quantity grid a whole-scope fraction and a
+# close of one lot's own size are the book's own quantities and settle.
+# Source-free, so it also runs in the kernel-only profile.
+list(APPEND TEST_SOURCES test_native_unrepresentable_refusal)
+# R5 lane K-ULP4 (ruling part b): NativeRunSpec::quantity_tolerance -- a close
+# within the tolerance of a FIFO boundary ends at it, charged its request; a
+# dust lot a close meets at the head of the book closes whole; a dust book
+# beside an opening stays; an overshoot opens nothing -- staged and direct,
+# fused and staged-only, the spec's validation and digest (unchanged when
+# absent, pinned from 91d65ad6), and the C extension's tail. Source-free, so it
+# also runs in the kernel-only profile.
+list(APPEND TEST_SOURCES test_native_quantity_tolerance)
+# R5 lane K-ULP5: an OCA-Reduce deduction binary64 cannot take off its
+# recipient -- off its remaining units, into its pending total, at its terms or
+# at its owner's fill -- is absorbed and the run goes on (it stopped with code 6
+# / discriminator 7 on f1af50dc): K-ULP4's p5b probe, each of the four sites,
+# a pending total that rounds into a later fill, the overflow that still stops,
+# and a seeded battery of OCA-Reduce groups at ulp scale, staged and direct.
+# Source-free, so it also runs in the kernel-only profile.
+list(APPEND TEST_SOURCES test_native_group_absorption)
 # R5 lane D2-A (PB): the consumer's O(1) has_command_after against the two
 # journal searches the Pine adapter's quiet receipt read compared, for every
 # kind of cursor, at every callback of windowed randomized runs
@@ -1273,8 +1301,9 @@ list(APPEND TEST_SOURCES test_adapter_range_end_fx)
 list(APPEND TEST_SOURCES test_native_script_bucket_completions)
 # R5 lane B-ADAPTER (item 7, V19D-P1): a margin call revives a dormant exit
 # the script left standing and never one it cancelled -- the lab tv tapes
-# badapter-v19dp1-control / -cancel replayed on their NYSE:F bars.
-# Source-bound.
+# badapter-v19dp1-control / -cancel replayed on their NYSE:F bars; R5 lane
+# V19-FIX adds the tapes v19fix-cancel-before-pair / -at-1000 (an exit
+# cancelled while live) and the other cancel spellings. Source-bound.
 list(APPEND TEST_SOURCES test_adapter_margin_revival_cancel)
 # R5 lane B-ADAPTER (item 5, F3 finding 2): a current execution converts at its
 # cursor's rate, threaded through the terms facts, inspection, preview and
@@ -2135,6 +2164,17 @@ endif()
 pineforge_add_twin_test(test_native_c_api test_native_c_api)
 pineforge_add_twin_test(test_native_c_api_frozen_header test_native_c_api_frozen_header)
 
+# C-SURFACE-1: an INT23 object compiled with the db98990c C header closure
+# must receive the decision tail its 168-byte policy-hook table published.
+# The fixture include path precedes the live headers for this target only.
+add_executable(test_native_c_api_int23_header test_native_c_api_int23_header.c)
+target_include_directories(test_native_c_api_int23_header BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/native_c_api/int23)
+set_target_properties(test_native_c_api_int23_header PROPERTIES LINKER_LANGUAGE CXX)
+target_link_libraries(test_native_c_api_int23_header PRIVATE pineforge)
+target_compile_options(test_native_c_api_int23_header PRIVATE -UNDEBUG)
+pineforge_add_twin_test(test_native_c_api_int23_header test_native_c_api_int23_header)
+
 # R5 lane F4: the public C headers as a strict C99 consumer compiles them --
 # ADR-0001's P2c portability note. The one C11 construct they hold, the
 # anonymous union behind sharpe_tv / sortino_tv, is PF_ANONYMOUS_UNION; with
@@ -2224,6 +2264,30 @@ if(PINEFORGE_ENABLE_COVERAGE)
     target_compile_options(test_pine_to_native_worked PRIVATE ${_pf_cov_test_flags})
 endif()
 add_test(NAME test_pine_to_native_worked COMMAND test_pine_to_native_worked)
+
+# DOC-TRUTH-4: compile the guide's Complete host block verbatim. The CTest
+# wrapper also checks that the built source still matches the live page.
+set(_pf_ne_page ${PROJECT_SOURCE_DIR}/docs/pages/native-engine.md)
+set(_pf_ne_complete ${CMAKE_CURRENT_BINARY_DIR}/native_engine_complete_host.cpp)
+add_custom_command(
+    OUTPUT ${_pf_ne_complete}
+    COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/extract_native_engine_complete_host.py
+            --page ${_pf_ne_page} --out ${_pf_ne_complete}
+    DEPENDS ${_pf_ne_page} ${CMAKE_CURRENT_SOURCE_DIR}/extract_native_engine_complete_host.py
+    COMMENT "Extracting Complete host from docs/pages/native-engine.md"
+    VERBATIM)
+add_executable(test_native_engine_complete_host ${_pf_ne_complete})
+target_link_libraries(test_native_engine_complete_host PRIVATE PineForge::kernel)
+target_compile_options(test_native_engine_complete_host PRIVATE -ffp-contract=off -UNDEBUG)
+if(PINEFORGE_ENABLE_COVERAGE)
+    target_compile_options(test_native_engine_complete_host PRIVATE ${_pf_cov_test_flags})
+endif()
+add_test(NAME test_native_engine_complete_host
+    COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/extract_native_engine_complete_host.py
+            --page ${_pf_ne_page} --out ${_pf_ne_complete}
+            --run $<TARGET_FILE:test_native_engine_complete_host>)
 
 # Independent native vertical contract fixture identity.
 file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/test_native_market_vertical_contract.cpp"
@@ -2390,6 +2454,7 @@ set(PINEFORGE_PR_SLOW_TESTS
     test_native_definition_index
     test_native_direct_mutation
     test_native_event_retention
+    test_native_group_absorption
     test_native_handle_stable_replace
     test_native_host_reads
     test_native_lookup_memos

@@ -50,6 +50,7 @@ void bit_helper_controls() {
 bool same_coordinate_bits(const NativeCoordinate& a, const NativeCoordinate& b) {
     return a.ordinal == b.ordinal
         && a.interval_index == b.interval_index
+        && a.input_interval_index == b.input_interval_index
         && a.open_ms == b.open_ms
         && a.eligible_open_ms == b.eligible_open_ms
         && a.last_traded_close_ms == b.last_traded_close_ms
@@ -590,7 +591,16 @@ void host_price_cannot_breach_active_limit() {
     CHECK(events<no::TermsResolvedEvent>(host).empty());
 }
 
-void a_t4d_authenticated_unrepresentable_deduction() {
+// A host-sized opening with 0.1 pending resolves 1e16 units, and fl(1e16 - 0.1)
+// is 1e16. Since R5 lane K-ULP5 that deduction is absorbed: the authentic
+// deferred receipt is spent by a TermsResolvedEvent whose pending_total is 0.1
+// and whose effective_deduction is 0, the 1e16 units stand, and the run goes on
+// -- the 1e16 opening beside the 0.1 lot then meets the settlement's own typed
+// refusal (K-ULP4: the opening absorbs the book). Before K-ULP5 the queued path
+// failed the run with UnrepresentableReservation at prepare_terms, and the
+// current path's preview threw "native host-sized deduction is not
+// representable" before execution failed the same way.
+void a_t4d_authenticated_absorbed_deduction() {
     auto configure_terms = [](TermsHost& host) {
         host.resolver = [](const NativeExecutionTermsFacts& facts) {
             if (std::holds_alternative<no::HostSized>(facts.definition->request.intent)) {
@@ -602,8 +612,8 @@ void a_t4d_authenticated_unrepresentable_deduction() {
         };
     };
 
-    // The queued path obtains its error only through prepare_terms after an
-    // authentic deferred-group receipt has been installed.
+    // The queued path reaches prepare_terms after an authentic deferred-group
+    // receipt has been installed.
     TermsHost queued;
     configure_terms(queued);
     no::RequestHandle queued_b;
@@ -617,20 +627,27 @@ void a_t4d_authenticated_unrepresentable_deduction() {
         queued_b = put(h, b);
     };
     run(queued, spec("terms-numeric-queued"), {100});
-    CHECK(queued.native_state().kind == NativeLifecycleKind::Failed);
-    CHECK(queued.native_state().failure.code == NativeFailureCode::SettlementFailure);
-    CHECK(queued.native_state().failure.discriminator
-          == static_cast<std::uint32_t>(no::CoreFailure::UnrepresentableReservation));
+    completed(queued);
     const auto deferred = last_event<no::DeferredGroupAdjustmentEvent>(queued);
     REQUIRE(deferred);
     CHECK(deferred->recipient == queued_b);
     CHECK(bits(deferred->pending_after.total) == bits(0.1));
-    CHECK(events<no::TermsResolvedEvent>(queued).empty());
+    const auto resolved = last_event<no::TermsResolvedEvent>(queued);
+    REQUIRE(resolved);
+    CHECK(resolved->definition && resolved->definition->handle == queued_b);
+    CHECK(bits(resolved->pending_total) == bits(0.1));
+    CHECK(resolved->prior_adjustment_ids.size() == 1);
+    CHECK(resolved->effective_deduction == 0.0);
+    CHECK(std::get<no::RemainingProjectionUnits>(resolved->remaining_after).q == 1e16);
+    const auto refused = last_event<no::MatchRejectedEvent>(queued);
+    REQUIRE(refused);
+    CHECK(refused->handle() == queued_b);
+    CHECK(refused->reason == no::MatchRejectReason::UnrepresentableQuantity);
     CHECK(events<no::ExecutionAppliedEvent>(queued).size() == 1);
     CHECK(accounts(queued) == 1);
 
-    // The current preview throws unlatched, then execution follows the same
-    // hard-failure mapping and leaves the pending chain intact.
+    // The current preview answers without throwing, and execution follows the
+    // same absorption.
     TermsHost current;
     configure_terms(current);
     bool reached = false;
@@ -650,30 +667,36 @@ void a_t4d_authenticated_unrepresentable_deduction() {
         bool preview_threw = false;
         try {
             (void)h.inspect_current_execution(command(b_target));
-        } catch (const std::overflow_error& error) {
-            preview_threw = std::string(error.what())
-                == "native host-sized deduction is not representable";
+        } catch (const std::exception&) {
+            preview_threw = true;
         }
-        CHECK(preview_threw);
+        CHECK(!preview_threw);
         CHECK(h.native_state().kind == NativeLifecycleKind::Running);
         CHECK(h.native_continuation_hash() == hash);
         CHECK(h.validator_calls == 1);
         bool execute_threw = false;
+        bool refused_typed = false;
         try {
-            (void)h.execute_current(command(b_target));
-        } catch (const std::runtime_error& error) {
-            execute_threw = std::string(error.what()) == "native current execution failed";
+            const auto result = h.execute_current(command(b_target));
+            const auto* refused = std::get_if<no::MatchRejectedEvent>(&result);
+            refused_typed = refused
+                && refused->reason == no::MatchRejectReason::UnrepresentableQuantity;
+        } catch (const std::exception&) {
+            execute_threw = true;
         }
-        CHECK(execute_threw);
-        CHECK(h.native_state().kind == NativeLifecycleKind::Failed);
-        CHECK(h.native_state().failure.code == NativeFailureCode::SettlementFailure);
-        CHECK(h.native_state().failure.discriminator
-              == static_cast<std::uint32_t>(no::CoreFailure::UnrepresentableReservation));
+        CHECK(!execute_threw);
+        CHECK(refused_typed);
+        CHECK(h.native_state().kind == NativeLifecycleKind::Running);
+        const auto terms = last_event<no::TermsResolvedEvent>(h);
+        REQUIRE(terms);
+        CHECK(bits(terms->pending_total) == bits(0.1) && terms->effective_deduction == 0.0);
+        CHECK(std::get<no::RemainingProjectionUnits>(terms->remaining_after).q == 1e16);
         CHECK(h.validator_calls == 1);
         reached = true;
     };
     run(current, spec("terms-numeric-current"), {100});
     CHECK(reached);
+    completed(current);
 }
 
 void a_t5_terms_rejections_retain_attempted_terms() {
@@ -1988,7 +2011,7 @@ int main() {
     test("host NaN attempted terms", host_nan_price_is_rejected_without_a_receipt);
     test("A-T11d host-sized NaN rows", a_t11d_host_sized_nan_rows);
     test("host price limit fence", host_price_cannot_breach_active_limit);
-    test("A-T4d authenticated unrepresentable deduction", a_t4d_authenticated_unrepresentable_deduction);
+    test("A-T4d authenticated absorbed deduction", a_t4d_authenticated_absorbed_deduction);
     test("A-T5 terms rejections retain attempts", a_t5_terms_rejections_retain_attempted_terms);
     test("A-T5 bound host-sized rematch units", a_t5_bound_host_sized_rematch_rejects_units);
     test("explicit reduction grid policy both ways", explicit_reduction_grid_policy_both_ways);

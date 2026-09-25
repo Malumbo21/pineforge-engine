@@ -321,8 +321,8 @@ public:
     // Report truth at the host's own cadence
     // (NativeReportPolicy::KernelRecordedAtHostMarks): the host marks the
     // script bar it has just published and the kernel records the point.
-    // Reporting only, and inert under every other policy.
-    void mark_script_report_point(BacktestEngine& engine, int64_t script_bar_ts) const;
+    // Reporting only; false outside a running HostMarks run.
+    bool mark_script_report_point(BacktestEngine& engine, int64_t script_bar_ts) const;
     std::optional<Bar> series_bar(std::size_t subscription) const;
     // NativeStrategyHost::declare_timeframe_subscriptions_result: replace the
     // staged list from inside on_native_run_begin, before the kernel
@@ -596,6 +596,24 @@ private:
     std::optional<double> resolve_sized_units(
         const BacktestEngine& engine, const native_order::LiveRequest& live,
         const NativeExecutionTermsFacts& facts) const;
+    // Whether `units` is a FIFO boundary of the request's scope -- the binary64
+    // sum of the scope's lots, in book order, through one of them: the head
+    // lot's own size, a prefix, the whole scope -- or, with `or_whole_scope`,
+    // at least the whole scope's held total. The scope is the book for an
+    // Independent request and the bound openings' lots for BindOpening /
+    // BindOpenings; any other owner has none here. The quantity grid admits
+    // such a Reduce as it stands (R5 lane K-ULP4).
+    static bool scope_boundary_units(const BacktestEngine& engine,
+                                     const native_order::Request& request,
+                                     double units, bool or_whole_scope) noexcept;
+    // What an off-grid Reduce{ExplicitUnits} (admitted at submit as a FIFO
+    // boundary of its scope) settles at this candidate still closes whole lots:
+    // it is on the grid, a boundary of the scope as it stands, or at least the
+    // scope's whole held total. Every other request, and any run without a
+    // quantity grid, answers true (R5 lane K-ULP4).
+    bool grid_boundary_holds(const BacktestEngine& engine,
+                             const native_order::LiveRequest& live,
+                             const native_order::MatchCursor& cursor) const;
     double sibling_claimed_units(const native_order::LiveRequest& live) const noexcept;
     // L3b placement-time sizing. sizing_point_price answers the price a Sized
     // request's basis converts at when it is accepted; placement_scope_units
@@ -643,6 +661,7 @@ private:
         int64_t first_open_ms = 0;
         int64_t first_source_time_ms = 0;
         int64_t latest_close_ms = 0;
+        int script_index = 0;
         int first_index = 0;
         int last_index = 0;
         bool sealed = false;
@@ -928,6 +947,7 @@ private:
                         bool preserve_status = false);
     bool preflight_intrabar_path(BacktestEngine& engine);
     void pump_batch(BacktestEngine& engine, const Bar* bars, int n);
+    int script_index_for_input(const native_calendar::NativeInterval& interval) const noexcept;
     bool consume_confirmed_input(BacktestEngine& engine, const Bar& bar, int index, bool last);
     bool contribute_input(BacktestEngine& engine, const Bar& bar,
                           const native_calendar::NativeInterval& interval,
@@ -969,6 +989,7 @@ private:
     // was to seal or the sealed calculation succeeded.
     bool seal_stale_script(BacktestEngine& engine, std::int64_t script_key);
     void seal_script(BacktestEngine& engine, NativeCompletionKind kind);
+    bool final_script_session_closed() const noexcept;
     void deliver_confirmed_script(BacktestEngine& engine, const Bar& bar, const NativeCoordinate& base);
     void deliver_intrabar_script(BacktestEngine& engine, const Bar& bar,
                                  const NativeCoordinate& base);
@@ -978,7 +999,7 @@ private:
     // opening at `label`. When the script_ bucket is that bar, its input
     // indices place it in the run, and inside pump_batch its held neighbours
     // are the pumped inputs around it; everything else reads its neighbours
-    // off the calendar, one script width away.
+    // off the calendar's previous or next eligible input slot.
     void present_session_day(NativeDecisionContext& context, int64_t label) const;
     struct SessionPoint {
         bool in_session = false;
@@ -1000,7 +1021,6 @@ private:
         SessionPoint point;
     };
     std::optional<int64_t> pumped_script_label(int index) const;
-    int64_t script_width_ms() const noexcept;
     int64_t calculation_time(const NativeCoordinate& base) const noexcept;
     // Report truth at the kernel's own cadence, one per script calculation.
     // Reporting-only throughout: these mark equity and synthesize report
@@ -1311,7 +1331,7 @@ private:
     NativeEventRetention retention() const noexcept;
     void retire_journal() noexcept;
     NativeCoordinate coordinate_from(const native_calendar::NativeInterval& interval,
-                                     int index, int64_t effective,
+                                     int script_index, int input_index, int64_t effective,
                                      NativePriceProvenance provenance,
                                      NativePathPhase phase) const;
     bool preflight_ticks(BacktestEngine& engine, const TradeTick* ticks, int n);
@@ -1444,6 +1464,7 @@ private:
     bool processing_input_ = false;
     InputMode input_mode_ = InputMode::Unselected;
     int next_interval_index_ = 0;
+    int next_script_index_ = 0;
     std::optional<int64_t> current_input_open_;
     std::optional<int64_t> observed_input_cursor_;
     std::optional<int64_t> next_tradable_synthesis_cursor_;
@@ -1532,7 +1553,7 @@ private:
     // V19-B: the newest driver point and account observation the run
     // produced, retained or not -- the stream's high water, which
     // event_high_water() answers under every retention -- and the instants
-    // of the last two driver points, the only driver facts a decision reads
+    // of the last two walked driver points, the only driver facts a decision reads
     // (fx_roll_margin_check's previous point). The high waters are readback
     // state and fold nowhere; the two instants fold with the margin state
     // they serve.

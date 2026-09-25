@@ -23,8 +23,8 @@ inline namespace engine_script_run_v19 {
 /// Unconfigured is a fresh host, Ready a staged spec, Running a consumed begin
 /// (with NativeRunPhase saying which driving), Completed a finished run whose
 /// lots and live requests stay visible but not actionable, and Failed a durable
-/// first failure: discard the host, replay on a fresh instance, never reconfigure
-/// in place. Pinned by tests/test_native_host_repairs.cpp.
+/// first failure. Cooperative Aborted permits same-key, higher-run reuse;
+/// other failures need a new host. Pinned by tests/test_native_host_repairs.cpp.
 enum class NativeLifecycleKind : std::uint8_t {
     Unconfigured = 0,
     Ready = 1,
@@ -58,8 +58,8 @@ enum class NativeCompletion : std::uint8_t {
 /// driver refused, UnsupportedSource a source-only setter or command on a bare
 /// host, CallbackException a host callback that threw or a C callback that
 /// returned non-zero, and Aborted a cooperative abort. The rest are internal
-/// exhaustion states with no rollback promise. Set once and latched: later run /
-/// stream_* / configure_native calls refuse.
+/// exhaustion states with no rollback promise. Later run/stream_* calls refuse;
+/// only Aborted permits configure_native with the same key and higher run.
 enum class NativeFailureCode : std::uint16_t {
     None = 0,
     InvalidSpecification = 1,
@@ -700,7 +700,14 @@ struct NativeCurrentExecution {
 
 /// Recomputed observations, never an apply token. Readiness is the financial
 /// pre-source preparation boundary, independent of account projection validity
-/// and excluding opening admission and late counter/lifecycle checks.
+/// and excluding opening admission and late counter/lifecycle checks. A
+/// readiness of execution::Status::UnrepresentableQuantity is a quantity the
+/// settlement cannot book exactly on this book, which execute_current answers
+/// as a MatchRejectedEvent with MatchRejectReason::UnrepresentableQuantity;
+/// the run goes on. The request core's check that the fill can be taken off
+/// the request's own units, and the quantity grid's re-check of a boundary
+/// Reduce, are made at execution only, so a request whose preview is Applied
+/// can still be refused that way.
 struct NativeCurrentExecutionPreview {
     std::optional<NativeCurrentRefusal> refusal;
     std::optional<execution::Status> settlement_readiness;
@@ -888,7 +895,8 @@ public:
     /// `bar` is the bar the calculation is about: the script bar under
     /// delivery in batch, the print's value bar for a stream Tick. It is the
     /// COMPLETE script bar even mid-path; current_partial_bar() is the
-    /// lookahead-free bar so far at this cursor. Commands and
+    /// lookahead-free bar so far, through the last path point consumed (at an
+    /// OrderFill inside a segment, the segment's origin). Commands and
     /// execute_current are legal here exactly as in on_native_applied.
     virtual void on_native_recalculate(const Bar& bar, const NativeDecisionContext& ctx,
                                        NativeCalculationReason reason,
@@ -1034,15 +1042,22 @@ public:
     /// declares it.
     void declare_native_precommit_hook(bool implemented);
 
-    /// The bar so far at the current cursor, folded from the modeled points
-    /// this script bar has already presented: open of its first point,
-    /// running high/low, close at the cursor. Volume is the activity actually
-    /// consumed so far — the completed lower-timeframe sub-bars of an
-    /// intrabar path, or the prints of an observed stream — and stays 0 for a
-    /// modeled path with no intrabar volume of its own. Valid in the bar-open,
-    /// applied, tick, sub-bar and recalculation callbacks; nullopt outside a
-    /// path walk, including in the bar's own close calculation, where the host
-    /// already holds the complete bar.
+    /// The bar so far, folded from the path points this script bar has
+    /// already consumed: open of its first point, running high/low, close at
+    /// the last point consumed. A discrete point — the open of the bar or of a
+    /// sub-bar, a distribution sample, an observed print — is folded before
+    /// its callbacks run, so there the bar closes at the cursor. A fill inside
+    /// a segment (a trigger crossed between two path points) comes before the
+    /// walk reaches the segment's destination: its on_native_applied and its
+    /// OrderFill recalculation read a bar that still ends at the segment's
+    /// origin and does not hold the fill price. It never runs ahead of the
+    /// cursor. Volume is the activity actually consumed so far — the completed
+    /// lower-timeframe sub-bars of an intrabar path, or the prints of an
+    /// observed stream — and stays 0 for a modeled path with no intrabar
+    /// volume of its own. Valid in the bar-open, applied, tick, sub-bar and
+    /// recalculation callbacks; nullopt outside a path walk, including in the
+    /// bar's own close calculation, where the host already holds the complete
+    /// bar.
     std::optional<Bar> current_partial_bar() const;
     /// How many recalculations the kernel has driven this run, and how many it
     /// suppressed because a point had already spent its
@@ -1075,6 +1090,14 @@ public:
     /// drains are visible before the call returns. Only the named target is consumed.
     /// C spelling: strategy_native_execute_current_v1.
     NativeCurrentExecutionResult execute_current(const NativeCurrentExecution&);
+
+    /// Append one kernel-owned equity point at this host's report mark.
+    /// Returns true only in a running KernelRecordedAtHostMarks run; false
+    /// changes nothing. Call at the desired mark inside a native callback.
+    /// This is reporting only: it does not book cash or place an order. A
+    /// host that records per-point broker hashes still owns those hash rows.
+    /// No C spelling: the C spec cannot select KernelRecordedAtHostMarks.
+    bool mark_native_report_point(int64_t report_ts);
 
     /// The latest completed bucket delivered for a declared subscription, or
     /// nullopt before its first delivery / for an unknown index. Legal inside
