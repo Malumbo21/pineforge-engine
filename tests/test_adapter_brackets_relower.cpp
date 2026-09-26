@@ -1059,13 +1059,20 @@ struct Named {
 // (rel-limit-parent, rel-reissue-changed, the breakout pair, ...), a zero-
 // capacity sibling (rel-two-exits) and an unrepresentable level
 // (rel-negative-short).
+// R5 lane PAR-ORDERS re-pinned the four trailing-offset shapes (rel-trail-
+// offset, rel-short-trail, mag-rel-trail-offset, coof-rel-trail-offset) from
+// {1,1,0} to {0,0,0}: exit() seeds a trailing offset's running best at the
+// activation (Trail::best_seed), the anchored child cannot carry that seed,
+// so the definition is not anchorable and the fill point submits the seeded
+// leg (TradingView's start, tests/test_pending_entry_trail_tapes.cpp). No
+// closed row, equity figure or book digest here moved; only these counts did.
 constexpr Named kShapes[] = {
     {"RelBracketTp", "rel-bracket-tp", Shape::RelBracketTp, 1, {2, 2, 0}},
     {"RelBracketSl", "rel-bracket-sl", Shape::RelBracketSl, 1, {2, 2, 0}},
     {"RelBracketEveryBar", "rel-bracket-every-bar", Shape::RelBracketEveryBar, 1, {2, 2, 0}},
     {"RelExitBeforeEntry", "rel-exit-before-entry", Shape::RelExitBeforeEntry, 1, {4, 4, 0}},
     {"RelTrailOneShot", "rel-trail-one-shot", Shape::RelTrailOneShot, 1, {1, 1, 0}},
-    {"RelTrailOffset", "rel-trail-offset", Shape::RelTrailOffset, 1, {1, 1, 0}},
+    {"RelTrailOffset", "rel-trail-offset", Shape::RelTrailOffset, 1, {0, 0, 0}},
     {"RelTrailZero", "rel-trail-zero", Shape::RelTrailZero, 1, {1, 1, 0}},
     {"RelShort", "rel-short", Shape::RelShort, 1, {2, 2, 0}},
     {"RelThreeWay", "rel-three-way", Shape::RelThreeWay, 1, {2, 2, 0}},
@@ -1087,7 +1094,7 @@ constexpr Named kShapes[] = {
     {"RelNegativeShort", "rel-negative-short", Shape::RelNegativeShort, 1, {2, 1, 1}},
     {"RelTwoExits", "rel-two-exits", Shape::RelTwoExits, 1, {4, 2, 2}},
     {"RelGapFill", "rel-gap-fill", Shape::RelGapFill, 1, {2, 2, 0}},
-    {"RelShortTrail", "rel-short-trail", Shape::RelShortTrail, 1, {1, 1, 0}},
+    {"RelShortTrail", "rel-short-trail", Shape::RelShortTrail, 1, {0, 0, 0}},
     {"RelProfitOnly", "rel-profit-only", Shape::RelProfitOnly, 1, {1, 1, 0}},
     {"RelQtyExplicit", "rel-qty-explicit", Shape::RelQtyExplicit, 1, {0, 0, 0}},
     {"RelReissueChanged", "rel-reissue-changed", Shape::RelReissueChanged, 1, {18, 2, 16}},
@@ -1099,14 +1106,14 @@ constexpr Named kShapes[] = {
      Mode::Magnifier},
     {"MagRelBracketTp", "mag-rel-bracket-tp", Shape::RelBracketTp, 1, {2, 2, 0}, Mode::Magnifier},
     {"MagRelBracketSl", "mag-rel-bracket-sl", Shape::RelBracketSl, 1, {2, 2, 0}, Mode::Magnifier},
-    {"MagRelTrailOffset", "mag-rel-trail-offset", Shape::RelTrailOffset, 1, {1, 1, 0}, Mode::Magnifier},
+    {"MagRelTrailOffset", "mag-rel-trail-offset", Shape::RelTrailOffset, 1, {0, 0, 0}, Mode::Magnifier},
     {"MagRelTrailOneShot", "mag-rel-trail-one-shot", Shape::RelTrailOneShot, 1, {1, 1, 0}, Mode::Magnifier},
     {"MagRelLimitParent", "mag-rel-limit-parent", Shape::RelLimitParent, 1, {12, 4, 8}, Mode::Magnifier},
     {"MagRelStopParent", "mag-rel-stop-parent", Shape::RelStopParent, 1, {2, 2, 0}, Mode::Magnifier},
     {"MagRelShort", "mag-rel-short", Shape::RelShort, 1, {2, 2, 0}, Mode::Magnifier},
     {"MagRelSlippage", "mag-rel-slippage", Shape::RelSlippage, 1, {4, 4, 0}, Mode::Magnifier},
     {"CoofRelBracketTp", "coof-rel-bracket-tp", Shape::RelBracketTp, 1, {2, 2, 0}, Mode::CalcOnOrderFills},
-    {"CoofRelTrailOffset", "coof-rel-trail-offset", Shape::RelTrailOffset, 1, {1, 1, 0}, Mode::CalcOnOrderFills},
+    {"CoofRelTrailOffset", "coof-rel-trail-offset", Shape::RelTrailOffset, 1, {0, 0, 0}, Mode::CalcOnOrderFills},
     {"PoocRelBracketTp", "pooc-rel-bracket-tp", Shape::RelBracketTp, 1, {2, 2, 0}, Mode::ProcessOnClose},
     {"PoocRelShort", "pooc-rel-short", Shape::RelShort, 1, {2, 2, 0}, Mode::ProcessOnClose},
     {"RelPyramidSetOnce", "rel-pyramid-set-once", Shape::RelPyramidSetOnce, 2, {2, 2, 0}},
@@ -1149,6 +1156,11 @@ struct Pinned {
 };
 
 // R4D_PINNED_DATA_BEGIN — harvested on 577315a, unchanged adapter.
+// R5 lane PAR-ORDERS re-harvested the magnified shapes' rows with this same
+// -DPINEFORGE_R4D_HARVEST build on its tree: every fill of an aggregated
+// magnified run is dated at its chart bar's open, as TradingView dates one, so
+// 20 instants of 16 rows (nine Mag* shapes) moved onto their bar's open; no
+// price, quantity, P&L, flag or digest moved.
 constexpr Row kRelBracketTp_rows[] = {
     {1700000060000LL, 1700000240000LL, 100, 102.5, 2, 5, 1, 0},
 };
@@ -1340,50 +1352,50 @@ constexpr Row kRelBreakoutPairSetOnce_rows[] = {
 constexpr Pinned kRelBreakoutPairSetOnce = {kRelBreakoutPairSetOnce_rows, 2, 10006, 0, 0, 0, 0x157cc0001ede7376ULL};
 
 constexpr Row kMagRelBreakoutPair_rows[] = {
-    {420000LL, 540000LL, 101.25, 102.75, 2, 3, 1, 0},
+    {360000LL, 480000LL, 101.25, 102.75, 2, 3, 1, 0},
     {600000LL, 720000LL, 102.75, 104.25, 2, 3, 1, 0},
-    {840000LL, 900000LL, 103.25, 102.25, 2, -2, 1, 0},
-    {960000LL, 1020000LL, 101.25, 100.25, 2, -2, 1, 0},
-    {1080000LL, 1380000LL, 98.25, 99.25, 2, -2, 0, 0},
-    {1440000LL, 1500000LL, 99.25, 100.25, 2, -2, 0, 0},
-    {1620000LL, 1620000LL, 101.25, 102.75, 2, 3, 1, 0},
+    {840000LL, 840000LL, 103.25, 102.25, 2, -2, 1, 0},
+    {960000LL, 960000LL, 101.25, 100.25, 2, -2, 1, 0},
+    {1080000LL, 1320000LL, 98.25, 99.25, 2, -2, 0, 0},
+    {1440000LL, 1440000LL, 99.25, 100.25, 2, -2, 0, 0},
+    {1560000LL, 1560000LL, 101.25, 102.75, 2, 3, 1, 0},
     {1680000LL, 1680000LL, 103, 103, 2, 0, 1, 1},
 };
 constexpr Pinned kMagRelBreakoutPair = {kMagRelBreakoutPair_rows, 8, 10001, 8, 3, 2, 0x03474c49dca8bc04ULL};
 
 constexpr Row kMagRelBracketTp_rows[] = {
-    {120000LL, 540000LL, 100, 102.5, 2, 5, 1, 0},
+    {120000LL, 480000LL, 100, 102.5, 2, 5, 1, 0},
 };
 constexpr Pinned kMagRelBracketTp = {kMagRelBracketTp_rows, 1, 10005, 0, 0, 0, 0x577159c6dba2ac05ULL};
 
 constexpr Row kMagRelBracketSl_rows[] = {
-    {120000LL, 1020000LL, 100, 98.5, 2, -3, 1, 0},
+    {120000LL, 960000LL, 100, 98.5, 2, -3, 1, 0},
 };
 constexpr Pinned kMagRelBracketSl = {kMagRelBracketSl_rows, 1, 9997, 10.5, 0, 0, 0xa65938a0103f1ccdULL};
 
 constexpr Row kMagRelTrailOffset_rows[] = {
-    {120000LL, 780000LL, 100, 103.5, 2, 7, 1, 0},
+    {120000LL, 720000LL, 100, 103.5, 2, 7, 1, 0},
 };
 constexpr Pinned kMagRelTrailOffset = {kMagRelTrailOffset_rows, 1, 10007, 0.5, 0, 0, 0x61c23d6a28f0f142ULL};
 
 constexpr Row kMagRelTrailOneShot_rows[] = {
-    {120000LL, 540000LL, 100, 102.5, 2, 5, 1, 0},
+    {120000LL, 480000LL, 100, 102.5, 2, 5, 1, 0},
 };
 constexpr Pinned kMagRelTrailOneShot = {kMagRelTrailOneShot_rows, 1, 10005, 0, 0, 0, 0x83150528a91d732fULL};
 
 constexpr Row kMagRelLimitParent_rows[] = {
-    {120000LL, 420000LL, 99.75, 101.75, 2, 4, 1, 0},
-    {1020000LL, 1020000LL, 99.75, 98.75, 2, -2, 1, 0},
+    {120000LL, 360000LL, 99.75, 101.75, 2, 4, 1, 0},
+    {960000LL, 960000LL, 99.75, 98.75, 2, -2, 1, 0},
 };
 constexpr Pinned kMagRelLimitParent = {kMagRelLimitParent_rows, 2, 10002, 2, 0, 0, 0x24e46fd2675cf69fULL};
 
 constexpr Row kMagRelStopParent_rows[] = {
-    {300000LL, 540000LL, 100.75, 102.25, 2, 3, 1, 0},
+    {240000LL, 480000LL, 100.75, 102.25, 2, 3, 1, 0},
 };
 constexpr Pinned kMagRelStopParent = {kMagRelStopParent_rows, 1, 10003, 0, 0, 0, 0x9288d52f3e3a8aabULL};
 
 constexpr Row kMagRelShort_rows[] = {
-    {120000LL, 420000LL, 100, 101.5, 2, -3, 0, 0},
+    {120000LL, 360000LL, 100, 101.5, 2, -3, 0, 0},
 };
 constexpr Pinned kMagRelShort = {kMagRelShort_rows, 1, 9997, 3, 0, 0, 0x5ee3f00d56388cacULL};
 
@@ -1419,8 +1431,8 @@ constexpr Row kRelPyramidSetOnce_rows[] = {
 constexpr Pinned kRelPyramidSetOnce = {kRelPyramidSetOnce_rows, 2, 10014.5, 0, 0, 0, 0x3ff244519fd858e8ULL};
 
 constexpr Row kMagRelPyramidSetOnce_rows[] = {
-    {120000LL, 660000LL, 100, 104, 2, 8, 1, 0},
-    {360000LL, 660000LL, 100.75, 104, 2, 6.5, 1, 0},
+    {120000LL, 600000LL, 100, 104, 2, 8, 1, 0},
+    {360000LL, 600000LL, 100.75, 104, 2, 6.5, 1, 0},
 };
 constexpr Pinned kMagRelPyramidSetOnce = {kMagRelPyramidSetOnce_rows, 2, 10014.5, 0, 0, 0, 0xa608f3773ef1c340ULL};
 // R4D_PINNED_DATA_END

@@ -55,7 +55,12 @@ finding to report, not a step to take.
    `nm` over the built `libpineforge_kernel.a`, reads the headers the kernel
    profile installs and the string literals of the kernel's own translation
    units, and fails on a TradingView-shaped name with no row in ADR 0001's
-   residual table.
+   residual table. `scripts/check_kernel_seam_rows.py` fails on a kernel
+   `source_*` seam, or a kernel member or row field the source layer writes,
+   that no ADR 0001 row names in its first cell. The generated-code language
+   runtime (the indicator, formatting and calendar libraries and the
+   header-only runtime) implements Pine built-ins by definition; ADR 0001
+   rule 1 gives the admission test a new built-in must pass to enter it.
 
 2. **A kernel capability is opt-in.** A new `NativeRunSpec` field, a new
    request kind, or a new virtual with an empty default — never a changed
@@ -76,8 +81,11 @@ finding to report, not a step to take.
    site — and holds it against the ruling table.
 
 5. **Every public host member has a C spelling or a recorded reason.** The
-   COVERAGE block at `sha256:993ee68af70ee77c00489a30fe13e94d4cdc631cc572cbc520ee165f51e4d24d` native_c_api.h:45 lists them; a member added without a
-   row, or a row naming a member that no longer exists, fails.
+   COVERAGE comment block (`COVERAGE` `sha256:71e3e35c1a2409524f511b5ee0e02df496852dc5ff629728a78c5c0401cb8ad0` native_c_api.h:52-55) lists them; a member added without a
+   row, or a row naming a member that no longer exists, fails. Every other C++
+   capability the 1.0 C surface lacks is a row of the 1.0 C boundary table
+   (@ref native_engine), and the checker's `C_V1_EXCLUSIONS` row for it fails
+   when the gap closes or its C++ declaration goes.
    *Enforced:* `scripts/check_native_c_api_surface.py`.
 
 6. **The C ABI is append-only within a major version.** Fields and functions
@@ -85,7 +93,7 @@ finding to report, not a step to take.
    `static_assert`s in `src/c_abi.cpp` pin the layouts — if one fails on your
    branch, find what changed in the C++ representation. Adding a runtime
    `PF_API` export means the implementation, the declaration,
-   `EXPECTED_RUNTIME` check_c_abi_runtime.py:28, the ctypes harnesses and the
+   `EXPECTED_RUNTIME` check_c_abi_runtime.py:29, the ctypes harnesses and the
    README table, all in one commit. *Enforced:*
    `scripts/check_c_abi_runtime.py`.
 
@@ -103,11 +111,14 @@ finding to report, not a step to take.
    file's own docstring), `scripts/check_doc_lint.py` for stale epochs,
    roadmap labels and falsified negative claims, and
    `scripts/check_pine_to_native_coverage.py` for the migration page's
-   coverage claim.
+   coverage claim. A sentence leaves a page only when the commit's message
+   names it — the lane or commit that wrote it, or six of its words —
+   and older wording never silently replaces newer: *Enforced:*
+   `scripts/check_doc_reverts.py`.
 
 10. **A test row never silently disappears.** Each profile counts the rows that
-    *ran* against a floor: `KERNEL_MIN_TESTS` ci_verify.py:242 and
-    `RELEASE_MIN_TESTS` ci_verify.py:350. Adding rows means raising the floor
+    *ran* against a floor: `KERNEL_MIN_TESTS` ci_verify.py:260 and
+    `RELEASE_MIN_TESTS` ci_verify.py:393. Adding rows means raising the floor
     in the same commit.
 
 ## The recipe for a lane
@@ -219,12 +230,12 @@ decision, and removing one is a regression:
 
 | Looks duplicated | Why both exist | Ruling of record |
 |---|---|---|
-| the kernel's price grid (`NativeRunSpec::price_grid`) and the adapter's own tick rules | TradingView quantizes per *order kind* — stop and limit legs on the quantized bar, the trail stop and the `calc_on_order_fills` cursors raw — and the kernel grid is one rule for the run. A per-kind mask would spell that inconsistency into the kernel. | ADR 0001 ruling table, row `price_grid`; design `native-feature-parity.md:527` |
-| the kernel's risk limits (`NativeRunSpec::risk`) and the adapter's `strategy.risk.*` | structurally, Pine's risk calls are per-bar statements that arrive after the spec has been digested; substantively, four measured divergences in the latch, the streak, the close price and the day key. | ADR 0001 ruling table, row `risk`; design `native-feature-parity.md:438` |
+| the kernel's price grid (`NativeRunSpec::price_grid`) and the adapter's own tick rules | TradingView quantizes per *order kind* — stop and limit legs on the quantized bar, the trail stop and the `calc_on_order_fills` cursors raw — and the kernel grid is one rule for the run. A per-kind mask would spell that inconsistency into the kernel. | ADR 0001 ruling table, row `price_grid`; design `native-feature-parity.md:532` |
+| the kernel's risk limits (`NativeRunSpec::risk`) and the adapter's `strategy.risk.*` | structurally, Pine's risk calls are per-bar statements that arrive after the spec has been digested; substantively, four measured divergences in the latch, the streak, the close price and the day key. | ADR 0001 ruling table, row `risk`; design `native-feature-parity.md:443` |
 | the kernel's `max_abs_units` and the adapter's `max_position_size` | the kernel caps the *resulting* book, TradingView gates the *live* book before the fill. | ADR 0001 ruling table, row `max_abs_units` |
-| the kernel's `max_open_lots` and Pine's `pyramiding` | Pine counts *entries per cycle*, the kernel counts *physical lots*; a resting source entry must not consume a lot slot before it fills. | ADR 0001 ruling table, row `max_open_lots` |
-| the kernel's margin model and the adapter's money admission | the adapter answers TradingView's ten-significant-digit admission itself and declares a *maintenance-only* model, because a positive initial requirement would decline openings TradingView takes. | ADR 0001 ruling table, row `initial_margin_fraction` |
-| `NativeRunSpec::report_open_position_at_end` and the adapter's range-end rows | TradingView's range-end report re-marks the curve's last point and re-folds every extreme from it: report *shape*, not a mark-to-market row. | ADR 0001 ruling table, row `report_open_position_at_end`; design `native-feature-parity.md:615` |
+| the kernel's `max_open_lots` and Pine's `pyramiding` | the adapter counts *entries per cycle*, the kernel counts *physical lots*. Measured against TradingView the kernel's count is the closer one (14 of 15 tape scenarios against the adapter's 8, `tests/test_pyramiding_count_differential.cpp`): TradingView checks an entry once, at its first eligible point, against the trades then open. Lowered onto the cap, four corpus probes move away from TradingView, for want of that rule, so the adapter keeps its count. | ADR 0001 ruling table, row `max_open_lots` |
+| the kernel's margin model and the adapter's money admission | the adapter answers TradingView's ten-significant-digit admission itself and declares a *maintenance-only* model, because a positive initial requirement would decline openings TradingView takes and admit adds it refuses (measured both ways, `tests/test_adapter_margin_schedule_differential.cpp`). | ADR 0001 ruling table, row `initial_margin_fraction` |
+| `NativeRunSpec::report_open_position_at_end` and the adapter's range-end rows | TradingView's range-end report re-marks the curve's last point and re-folds every extreme from it: report *shape*, not a mark-to-market row. | ADR 0001 ruling table, row `report_open_position_at_end`; design `native-feature-parity.md:629` |
 | `subscriptions` in the spec and the adapter's begin-time declaration | the adapter declares the same kernel subscriptions through a hook instead of the field, so a plain `request.security` site really is a kernel subscription. | ADR 0001 ruling table, row `subscriptions` |
 | the kernel's auxiliary feed and the adapter's auxiliary drive | the adapter's chart slice leaves pre-range coverage inert where the kernel folds by time, and evaluates after the bar's matching pass where the kernel delivers before it. | ADR 0001 ruling table, row `auxiliary_feed` |
 | `FeedTolerant` / `LegacyTolerant`, `NativeFeedTolerance` / `NativeLegacyTolerance` | deprecated spellings kept as exact aliases so existing hosts and the adapter compile unchanged; same value, same hash. | native_run_spec.hpp:311 and native_run_spec.hpp:353 |
@@ -240,8 +251,8 @@ CMakeLists.txt:43 off.
 policy layer that *uses* kernel features. Where every TradingView rule lives.
 
 **front door** — one of the three ways in: PineScript through codegen, C++
-through `NativeStrategyHost` native_host.hpp:833, or C through the
-`strategy_native_*` surface `sha256:1a4d41202e1b32a33ab75c2e42a36285ccb1d061087a8db1c19162b244c5b29f` native_c_api.h:2641.
+through `NativeStrategyHost` native_host.hpp:845, or C through the
+`strategy_native_*` surface (`strategy_native_host_create_v1` native_c_api.h:2658).
 
 **twin** — a test unit compiled twice, once against a frozen historical header
 closure and once against the current one, so a behaviour change has to be
@@ -253,7 +264,7 @@ measurement that produced it, so a later change to it is visible as a change to
 the record, not as an edit to a literal.
 
 **floor** — the minimum number of CTest rows a profile must actually run
-(`KERNEL_MIN_TESTS` ci_verify.py:242, `RELEASE_MIN_TESTS` ci_verify.py:350). It
+(`KERNEL_MIN_TESTS` ci_verify.py:260, `RELEASE_MIN_TESTS` ci_verify.py:393). It
 counts rows that ran, so a skipped row does not pad it.
 
 **receipt** — the recorded evidence an ABI-comparison row needs (a prepared
@@ -280,7 +291,8 @@ no individual regression, and negative movement is outside it.
 ## Where to read next
 
 - [PineScript to native C++](@ref pine_to_native) — every Pine builtin mapped
-  to its C++ and C spelling, with the example that exercises it.
+  to its C++ spelling and, where the 1.0 C surface has one, its C spelling,
+  with the example that exercises it.
 - [Native engine](@ref native_engine) — the lifecycle, the run spec, the
   request vocabulary and the C ABI contract.
 - [ADR 0001](../adr/0001-kernel-adapter-boundary.md) — the boundary, its rules,

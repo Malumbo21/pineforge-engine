@@ -96,28 +96,16 @@ int64_t floor_div(int64_t a, int64_t b) {
     return q;
 }
 
-// Howard Hinnant days_from_civil / civil_from_days.
+// Howard Hinnant's days_from_civil / civil_from_days, in this file's types:
+// native_civil_days / native_civil_date (native_calendar.hpp) are the one copy
+// of the arithmetic.
 int64_t days_from_civil(int y, unsigned m, unsigned d) {
-    y -= m <= 2;
-    const int64_t era = (y >= 0 ? y : y - 399) / 400;
-    const unsigned yoe = static_cast<unsigned>(y - era * 400);
-    const unsigned doy = (153u * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return era * 146097 + static_cast<int64_t>(doe) - 719468;
+    return native_civil_days(y, static_cast<int>(m), static_cast<int>(d));
 }
 
 CivilDate civil_from_days(int64_t z) {
-    z += 719468;
-    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
-    const unsigned doe = static_cast<unsigned>(z - era * 146097);
-    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    int y = static_cast<int>(yoe) + static_cast<int>(era * 400);
-    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    const unsigned mp = (5 * doy + 2) / 153;
-    unsigned d = doy - (153 * mp + 2) / 5 + 1;
-    unsigned m = mp < 10 ? mp + 3 : mp - 9;
-    y += (m <= 2);
-    return CivilDate{y, static_cast<int>(m), static_cast<int>(d)};
+    const NativeCivilDate date = native_civil_date(z);
+    return CivilDate{static_cast<int>(date.year), date.month, date.day};
 }
 
 bool valid_civil_date(int y, int m, int d) {
@@ -1379,6 +1367,23 @@ TimeframeCompatibility compatibility(const Timeframe& input, const Timeframe& sc
     return out;
 }
 
+bool pairing_aggregates(const TimeframeCompatibility& pairing) noexcept {
+    switch (pairing.pairing) {
+    case TimeframePairing::SameUnitMultiple:
+    case TimeframePairing::FixedDivisible:
+    case TimeframePairing::FixedToCalendar:
+    case TimeframePairing::CalendarToCalendar:
+        return true;
+    case TimeframePairing::Passthrough:
+    case TimeframePairing::ScriptFiner:
+    case TimeframePairing::IndivisibleFixed:
+    case TimeframePairing::StreamMonthlyInputRefused:
+    case TimeframePairing::Invalid:
+        return false;
+    }
+    return false;
+}
+
 TimeframeCompatibility stream_compatibility(const Timeframe& input, const Timeframe& script) {
     if (!input.valid() || !script.valid()) {
         TimeframeCompatibility out;
@@ -1597,6 +1602,8 @@ struct SessionDayMemo::State {
     std::size_t next_local = 0;
     std::array<IntervalSlot, kIntervalSlots> intervals{};
     std::size_t next_interval = 0;
+    // Intervals resolved rather than answered from `intervals`.
+    std::uint64_t interval_resolutions = 0;
 };
 
 namespace {
@@ -1893,6 +1900,10 @@ void SessionDayMemo::reset() noexcept {
     calendar_ = nullptr;
 }
 
+std::uint64_t SessionDayMemo::interval_resolutions() const noexcept {
+    return state_ ? state_->interval_resolutions : 0;
+}
+
 SessionDayMemo::State& SessionDayMemo::bind(const SessionCalendar& calendar) {
     auto fresh = std::make_unique<State>();
     fresh->valid = calendar.valid();
@@ -1943,6 +1954,7 @@ std::optional<NativeInterval> interval_containing(const SessionCalendar& calenda
             return slot.interval;
         }
     }
+    ++m.interval_resolutions;
     auto interval = memo_interval_containing(calendar, script_tf, input_tf, ms, m);
     MemoState::IntervalSlot& slot = m.intervals[m.next_interval];
     m.next_interval = (m.next_interval + 1) % MemoState::kIntervalSlots;
@@ -1987,6 +1999,10 @@ bool in_session(const SessionCalendar& calendar, int64_t ms, SessionDayMemo& mem
     const SessionDay* day = memo_session_day_containing(calendar, ms, m);
     if (!day) return false;
     return ms_in_spans(day->spans, ms);
+}
+
+bool utc_calendar(const SessionCalendar& calendar, SessionDayMemo& memo) {
+    return memo.state(calendar).utc;
 }
 
 }  // inline namespace native_calendar_v2

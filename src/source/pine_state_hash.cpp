@@ -4,6 +4,7 @@
 #include "../broker_state_hash_internal.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <type_traits>
 #include <variant>
 
@@ -86,7 +87,6 @@ void hash_placement(BrokerStateHashSink& f, const source::PlacementSnapshot& val
     f.i(value.placement_script_open_ms);
     f.i(value.placement_sub_open_ms); f.i(value.projection_created_bar);
     f.b(value.projection_created_bar_pinned);
-    f.b(value.post_parent_calc_level_fill);
     f.i(value.projection_position_side); f.b(value.projection_after_close);
     f.b(value.projection_over_pyramiding);
     f.b(value.projection_opposite_market_predecessor);
@@ -108,7 +108,12 @@ void hash_placement(BrokerStateHashSink& f, const source::PlacementSnapshot& val
     f.d(value.projection_affordability_held_qty);
     f.d(value.sizing.equity); f.d(value.sizing.price);
     f.d(value.sizing.fx); f.d(value.sizing.mark); f.d(value.sizing.frozen_units);
-    f.b(value.sizing.at_fill); f.d(value.exit_levels.limit); f.d(value.exit_levels.stop);
+    f.b(value.sizing.at_fill);
+    // Recorded only under a cash commission with a percent-of-equity default
+    // quantity (the folded run configuration decides), so every other run
+    // keeps its digest (R5 lane PAR-CASHFEE).
+    if (!std::isnan(value.sizing.strategy_equity)) f.d(value.sizing.strategy_equity);
+    f.d(value.exit_levels.limit); f.d(value.exit_levels.stop);
     f.d(value.exit_levels.trail_points); f.d(value.exit_levels.trail_offset);
     f.d(value.exit_levels.trail_price); f.d(value.exit_levels.profit_ticks);
     f.d(value.exit_levels.loss_ticks);
@@ -469,6 +474,7 @@ void source::PineExecutionAdapter::hash_state(BrokerStateHashSink& f) const {
     // Live only inside a fill recalculation (NaN otherwise); folded then so
     // the idle digest keeps its prior form.
     if (coof_recalc_active_) f.d(coof_fill_cursor_t_);
+    if (coof_recalc_active_) f.b(coof_fill_forced_);
     const auto& coof_coord = coof_context_.coordinate;
     f.u(coof_coord.ordinal); f.i(coof_coord.interval_index); f.i(coof_coord.open_ms);
     f.i(coof_coord.eligible_open_ms); f.i(coof_coord.last_traded_close_ms);
@@ -706,11 +712,6 @@ void source::PineStrategyHost::hash_host_extension(BrokerStateHashSink& f) const
     f.i(override_.pyramiding); f.i(override_.slippage); f.i(override_.commission_type);
     f.i(override_.default_qty_type); f.i(override_.process_orders_on_close);
     f.i(override_.calc_on_order_fills); f.i(override_.close_entries_rule);
-    // Transient excursion-sampler cache (see pine_strategy_host.hpp): it is
-    // re-derived at every precommit, but it is next-decision visible to the
-    // excursion sampler inside an in-flight execution, so it is folded here
-    // rather than waived.
-    f.b(excursion_level_fill_);
     f.i(source_bar_index_); f.u(source_callback_count_);
     f.b(source_configuration_captured_); f.b(source_prepare_failed_);
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
@@ -780,14 +781,6 @@ void source::PineStrategyHost::hash_host_extension(BrokerStateHashSink& f) const
             }
         }
     }
-    // The margin slice's sampling chronology is resolved once per pending
-    // slice in the precommit pass and read back by the host's own excursion
-    // sampler at settlement, so it is folded rather than waived.
-    f.b(excursion_margin_prefix_);
-    f.b(excursion_margin_fill_only_);
-    // The TRAIL peak basis is the precommit view's pre-slip matcher price,
-    // which no durable snapshot re-derives at settlement.
-    f.d(excursion_trail_raw_price_);
     adapter_.hash_state(f); scheduler_.hash_state(f);
 }
 

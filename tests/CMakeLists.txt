@@ -857,6 +857,21 @@ list(APPEND TEST_SOURCES test_native_session_day_facts)
 # Wave G KERNEL-EDGE: one source-free row with fail-before witnesses for FX
 # rolls, session-day neighbours, final calendar-closed buckets and host marks.
 list(APPEND TEST_SOURCES test_native_kernel_edge)
+# R5 lane PAR-MARGIN (item 3): the margin model on an intrabar path is offered
+# NativeMarginCheckKind::IntrabarSample at every delivered sample after the
+# bar's first. Source-free, so it also runs in the kernel-only profile.
+list(APPEND TEST_SOURCES test_native_margin_intrabar_samples)
+# R5 lane PAR-MARGIN-2: the post-fill margin check of a request matched on the
+# segment into a waypoint measures from that segment's origin, so the waypoint
+# the fill was reached on the way to (a limit filled on its way down to the
+# bar's low) is in the scan. Source-free, so it also runs in the kernel-only
+# profile.
+list(APPEND TEST_SOURCES test_native_margin_post_fill_path)
+# R5 PERF-KEDGE: on a UTC calendar the session-day facts read an in-session
+# instant without resolving its interval -- the zone path's facts at every
+# decision point, and the per-bar resolution cost pinned. Source-free, so it
+# also runs in the kernel-only profile.
+list(APPEND TEST_SOURCES test_native_session_day_utc)
 
 # R5 F5: the Pine adapter selects those facts instead of computing its own:
 # the same tapes flag for flag through the adapter, its live-probe tail
@@ -1192,6 +1207,18 @@ list(APPEND TEST_SOURCES test_native_quantity_tolerance)
 # and a seeded battery of OCA-Reduce groups at ulp scale, staged and direct.
 # Source-free, so it also runs in the kernel-only profile.
 list(APPEND TEST_SOURCES test_native_group_absorption)
+# R5 lane K-OCA-KEEP: a re-price that keeps its handle inside a group, then a
+# sibling's fill, drains the group in queue order and the run goes on (it
+# stopped with code 2 / discriminator 1 on 2a03c658): K-ULP5's keep_handle
+# probe under Cancel and Reduce, a retained trail and a carried binding, the
+# order core's receipts in queue order and in reverse, and a seeded battery of
+# groups re-priced in random subsets and orders under every option set against
+# the plain replace, staged and direct; and K-ULP5's finding 2 -- on a quantity
+# grid, a whole-scope close whose pending group total its units absorb closes
+# the scope whole (a fraction floored and left dust, a host-sized close was
+# refused InvalidTerms, on 2a03c658). Source-free, so it also runs in the
+# kernel-only profile.
+list(APPEND TEST_SOURCES test_native_group_keep_handle)
 # R5 lane D2-A (PB): the consumer's O(1) has_command_after against the two
 # journal searches the Pine adapter's quiet receipt read compared, for every
 # kind of cursor, at every callback of windowed randomized runs
@@ -1230,6 +1257,12 @@ list(APPEND TEST_SOURCES test_native_precommit_hook)
 # nested run and two threads (differential). Source-free, so it also runs in
 # the kernel-only profile.
 list(APPEND TEST_SOURCES test_native_runtime_ambient)
+# R5 lane H-DOCGATES (AUDIT4 N-7): the runtime blocks' LIFO order -- the legal
+# order in process, and in a forked child the outer block leaving first, which
+# a library with its debug checks compiled in must answer with SIGABRT and any
+# other library by returning (PINEFORGE_LIBRARY_DEBUG_CHECKS, below).
+# Source-free, so it also runs in the kernel-only profile.
+list(APPEND TEST_SOURCES test_native_runtime_ambient_lifo)
 # R5 lane D2-C: the Pine host's publications, its suppressed probe tail and
 # its request.security evaluations (host-driven, kernel-routed, the
 # auxiliary lower-timeframe array) set the chart day partition, the EMA
@@ -1316,6 +1349,58 @@ list(APPEND TEST_SOURCES test_native_current_execution_rate)
 # leg first (|H - O| < |O - L| is strict), and so does the observation.
 # Source-bound.
 list(APPEND TEST_SOURCES test_adapter_dual_entry_tie)
+# R5 lane H-MEASURE (AUDIT4 X14): every adapter retention AUDIT4 §6 still read
+# as "ruled, unmeasured", measured -- the same bars and orders through the Pine
+# adapter and through a bare kernel host (a paired differential), and/or
+# TradingView's own trades (`lab tv` tapes under tests/fixtures/, each
+# directory's README.md names them). All source-bound.
+#   G2-09/-10/-12/-13 margin scheduling, market-execution checkpoints, the
+#   pre-open slice, opening admission; E20 f1's probe-tail margin call.
+list(APPEND TEST_SOURCES test_adapter_margin_schedule_differential)
+#   G2-15 pyramiding as a per-cycle count against max_open_lots and the tape.
+list(APPEND TEST_SOURCES test_pyramiding_count_differential)
+#   G2-18 the sibling Stop beside an explicit-zero trail.
+list(APPEND TEST_SOURCES test_zero_trail_sibling_stop)
+#   E5's pending-entry arm and E14's anchored-leg seed (AUDIT3 H6 tapes).
+list(APPEND TEST_SOURCES test_pending_entry_trail_tapes)
+#   G2-22 / E19 the host-owned excursion model against the kernel sampler.
+list(APPEND TEST_SOURCES test_e19_excursion_tape)
+#   G2-21 the short-seed report swaps against the kernel's lot identities.
+list(APPEND TEST_SOURCES test_short_seed_report_swap)
+#   G2-32 the 1e-10 dust sweep against a bare host on the same fills.
+list(APPEND TEST_SOURCES test_pine_dust_sweep_paired)
+#   G2-36 session.ismarket: the generated predicate, the kernel's in_session.
+list(APPEND TEST_SOURCES test_session_ismarket_tape)
+#   F1(e) an aggregated process_orders_on_close script reading entry_bar_index.
+list(APPEND TEST_SOURCES test_aggregated_entry_bar_index_tape)
+#   F1's magnified residual on the aggregated chart.
+list(APPEND TEST_SOURCES test_magnified_aggregated_tape)
+#   G2-23 every condition that keeps request.security on the source evaluator.
+list(APPEND TEST_SOURCES test_adapter_security_route_conditions)
+# R5 lane PAR-ORDERS-2: a current execution refuses a request bound to a host
+# roster (BindCohort) instead of failing the run. Source-free, so it also runs
+# in the kernel-only profile.
+list(APPEND TEST_SOURCES test_native_current_cohort_refusal)
+# R5 lane PAR-ORDERS-2: TradingView's own trades (`lab tv` tapes under
+# tests/fixtures/, each directory's README.md names them) replayed through the
+# Pine adapter. All source-bound.
+#   A calc_on_order_fills exit placed while flat, for a pending or a filled parent.
+list(APPEND TEST_SOURCES test_flat_coof_exit_tapes)
+#   An order a recalculation places on a bar's second extreme.
+list(APPEND TEST_SOURCES test_second_extreme_order_tapes)
+#   A process_orders_on_close stop entry placed while the book is still open.
+list(APPEND TEST_SOURCES test_pooc_reversing_stop_tapes)
+# R5 lane PAR-CASHFEE: a percent-of-equity default quantity under a cash
+# commission (per order, per contract) against TradingView's own trades -- the
+# `lab tv` tapes under tests/fixtures/cash_fee_sizing (README.md there names
+# them) replayed on their bars through the Pine adapter. Source-bound.
+list(APPEND TEST_SOURCES test_cash_fee_sizing_tapes)
+# R5 lane INT26 (round 2): a process_orders_on_close stop re-entry its close
+# reached keeps its fresh bracket when the previous bracket's same-bar limit is
+# observed at the next open -- the `lab tv` tapes under
+# tests/fixtures/pooc_stop_reentry_bracket (README.md there names them) replayed
+# through the Pine adapter. Source-bound.
+list(APPEND TEST_SOURCES test_pooc_stop_reentry_bracket_tapes)
 
 # R4-D L4b-fix restores every removed ShortSeed, affordability, sizing and
 # deferred-close oracle as an individually compiled native-route twin.  Keep
@@ -2047,6 +2132,42 @@ if(TARGET test_offset_trail_quantized_arm)
         PINEFORGE_E5_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/offset_trail_arm")
 endif()
 
+# R5 lane H-MEASURE: the rows that read TradingView tapes from the fixture tree.
+foreach(_pf_hm_row IN ITEMS
+        "test_pyramiding_count_differential|PINEFORGE_PYRAMIDING_FIXTURE_DIR|pyramiding_count"
+        "test_zero_trail_sibling_stop|PINEFORGE_ZERO_TRAIL_FIXTURE_DIR|zero_trail_sibling_stop"
+        "test_pending_entry_trail_tapes|PINEFORGE_PENDING_TRAIL_FIXTURE_DIR|pending_entry_trail"
+        "test_short_seed_report_swap|PINEFORGE_G221_FIXTURE_DIR|g221_short_seed"
+        "test_pine_dust_sweep_paired|PINEFORGE_G232_FIXTURE_DIR|g232_decimal_dust"
+        "test_session_ismarket_tape|PINEFORGE_G236_FIXTURE_DIR|session_ismarket"
+        "test_aggregated_entry_bar_index_tape|PINEFORGE_HM_F1E_FIXTURE_DIR|aggregated_entry_bar_index"
+        "test_magnified_aggregated_tape|PINEFORGE_HM_MAG_FIXTURE_DIR|magnified_aggregated"
+        "test_adapter_margin_schedule_differential|PINEFORGE_HM_M7A_FIXTURE_DIR|margin_entry_bar"
+        # R5 lane PAR-ORDERS-2's tape rows.
+        "test_flat_coof_exit_tapes|PINEFORGE_PA2_FLAT_COOF_FIXTURE_DIR|flat_coof_exit"
+        "test_second_extreme_order_tapes|PINEFORGE_PA2_SECOND_EXTREME_FIXTURE_DIR|second_extreme_orders"
+        "test_pooc_reversing_stop_tapes|PINEFORGE_PA2_REVERSING_STOP_FIXTURE_DIR|pooc_reversing_stop")
+    string(REPLACE "|" ";" _pf_hm_fields "${_pf_hm_row}")
+    list(GET _pf_hm_fields 0 _pf_hm_target)
+    list(GET _pf_hm_fields 1 _pf_hm_macro)
+    list(GET _pf_hm_fields 2 _pf_hm_dir)
+    if(TARGET ${_pf_hm_target})
+        target_compile_definitions(${_pf_hm_target} PRIVATE
+            ${_pf_hm_macro}="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_pf_hm_dir}")
+    endif()
+endforeach()
+
+# R5 lane PAR-CASHFEE reads its TradingView tapes from the fixture tree too.
+if(TARGET test_cash_fee_sizing_tapes)
+    target_compile_definitions(test_cash_fee_sizing_tapes PRIVATE
+        PINEFORGE_CASH_FEE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cash_fee_sizing")
+endif()
+# R5 lane INT26 (round 2) reads its TradingView tapes from the fixture tree too.
+if(TARGET test_pooc_stop_reentry_bracket_tapes)
+    target_compile_definitions(test_pooc_stop_reentry_bracket_tapes PRIVATE
+        PINEFORGE_INT26_REENTRY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pooc_stop_reentry_bracket")
+endif()
+
 # R5 E21 reads the kernel's own sources to prove BacktestEngine::marked_equity_at
 # is the one implementation of the marked equity. Kernel files only, so the
 # kernel-only profile runs the row too.
@@ -2101,6 +2222,16 @@ target_link_libraries(test_timezone_concurrency PRIVATE Threads::Threads)
 target_link_libraries(test_local_time_lock_free_hit PRIVATE Threads::Threads)
 target_link_libraries(test_native_runtime_ambient PRIVATE Threads::Threads)
 
+# The LIFO row's expectation is the library's build type. The library's
+# NDEBUG, which compiles uninstall_runtime_ambient's order check out, comes
+# from CMake's build-type flags -- Release, RelWithDebInfo and MinSizeRel
+# define it; Debug, the debug and sanitizers profiles' type, does not -- and
+# the row's TU strips NDEBUG like every test's (-UNDEBUG above), so it is
+# told. Flags that disagree with the build type fail the row; none passes it
+# without the check.
+target_compile_definitions(test_native_runtime_ambient_lifo PRIVATE
+    PINEFORGE_LIBRARY_DEBUG_CHECKS=$<CONFIG:Debug>)
+
 # Pure-C sanity test for <pineforge/pineforge.h>. Compiled with the C
 # compiler so any C++-only syntax leaking into the public header
 # triggers a hard build failure. Linked with CXX so it can pull in
@@ -2114,29 +2245,20 @@ if(PINEFORGE_ENABLE_COVERAGE)
 endif()
 pineforge_add_twin_test(test_c_abi test_c_abi)
 
-# R5 lane F6: the P2c historical spellings -- pf_equity_stats_t::sharpe_tv /
-# sortino_tv and exit_legs::Domain::Coof / MagnifierCoof -- are
-# compiler-deprecated aliases (ADR-0001 "Deprecated public spellings"). These
-# TUs name them on purpose: test_c_abi exercises the C alias, and the two
-# twins keep their frozen base CHECK texts verbatim. They build without the
-# diagnostic; test_deprecated_public_spellings holds that every other use
-# draws it, that the generic spellings compile clean, and that the aliases
-# still compile.
-foreach(_pf_deprecated_spelling_test
-        test_c_abi test_metrics_l4d test_exit_lifecycle_clock_l4c)
-    if(TARGET ${_pf_deprecated_spelling_test})
-        target_compile_options(${_pf_deprecated_spelling_test}
-            PRIVATE -Wno-deprecated-declarations)
-    endif()
-endforeach()
-add_test(NAME test_deprecated_public_spellings
+# Lane REL10: the four spellings ADR-0001 "Deprecated public spellings"
+# scheduled for removal -- pf_equity_stats_t::sharpe_tv / sortino_tv and
+# exit_legs::Domain::Coof / MagnifierCoof -- are gone at 1.0. The row compiles
+# their 1.0 spellings clean (-Werror) in strict C99 and in C++17, and each
+# removed spelling alone, which must fail with the unknown-member diagnostic
+# that names it (R5 lane F6 registered this row as the deprecation check).
+add_test(NAME test_removed_public_spellings
     COMMAND ${CMAKE_COMMAND}
         -DPF_CC=${CMAKE_C_COMPILER}
         -DPF_CXX=${CMAKE_CXX_COMPILER}
         "-DPF_INCLUDES=${PROJECT_SOURCE_DIR}/include|${PROJECT_BINARY_DIR}/include"
         -DPF_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-        -DPF_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/deprecated_spellings
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/deprecated_spellings.cmake)
+        -DPF_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/removed_spellings
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/removed_spellings.cmake)
 
 # R5 L13: the C-level native host API. One ctest row, two translation units.
 # test_native_c_api.c is compiled by the C compiler, so any C++ syntax leaking
@@ -2176,24 +2298,41 @@ target_compile_options(test_native_c_api_int23_header PRIVATE -UNDEBUG)
 pineforge_add_twin_test(test_native_c_api_int23_header test_native_c_api_int23_header)
 
 # R5 lane F4: the public C headers as a strict C99 consumer compiles them --
-# ADR-0001's P2c portability note. The one C11 construct they hold, the
-# anonymous union behind sharpe_tv / sortino_tv, is PF_ANONYMOUS_UNION; with
-# extensions off and -pedantic-errors, any other C11-only construct in
+# extensions off and -pedantic-errors, so any C11-only construct in
 # <pineforge/pineforge.h> or <pineforge/native_c_api.h> is a build failure.
-# The row executes the alias and one native C run.
+# The one C11 construct they held, the anonymous union behind P2c's
+# sharpe_tv / sortino_tv aliases, left with those spellings at 1.0 (lane
+# REL10). The row checks the equity offsets and executes one native C run.
 add_executable(test_native_c_api_c99 test_native_c_api_c99.c)
 set_target_properties(test_native_c_api_c99 PROPERTIES
     C_STANDARD 99 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF LINKER_LANGUAGE CXX)
 target_link_libraries(test_native_c_api_c99 PRIVATE pineforge)
-# It reads P2c's historical spellings (sharpe_tv, sortino_tv) on purpose, to
-# hold that the aliases share storage, so like test_c_abi it builds without
-# their deprecation diagnostic.
-target_compile_options(test_native_c_api_c99 PRIVATE -UNDEBUG -pedantic-errors -Wall -Wextra
-    -Wno-deprecated-declarations)
+target_compile_options(test_native_c_api_c99 PRIVATE -UNDEBUG -pedantic-errors -Wall -Wextra)
 if(PINEFORGE_ENABLE_COVERAGE)
     target_compile_options(test_native_c_api_c99 PRIVATE ${_pf_cov_test_flags})
 endif()
 pineforge_add_twin_test(test_native_c_api_c99 test_native_c_api_c99)
+
+# R5 lane H-MEASURE (AUDIT4-codex A4-ACID-COVERAGE): the G1 composite witness.
+# One ctest row, two translation units, the test_native_c_api pattern. The C++
+# half drives one Pine-free NativeStrategyHost through every feature the G1
+# acid test names (a PASS line per feature) in batch and in stream, runs the
+# keep_binding variant and a lower_tf-magnified batch, and accounts for the
+# driving-mode hash rules line by line. The C half drives the same commands
+# through <pineforge/native_c_api.h> alone, and the C++ half compares the two
+# FIELD sets in process: every shared ledger fact identical, every C++-only
+# family named by an EXCLUDED line. Neither TU reaches a source or compat
+# header, so the row runs in the kernel-only profile too.
+add_executable(test_native_acid_composite
+    test_native_acid_composite.cpp
+    test_native_acid_composite_c.c)
+target_compile_definitions(test_native_acid_composite PRIVATE ACID_WITH_C=1 ACID_C_NO_MAIN=1)
+target_link_libraries(test_native_acid_composite PRIVATE pineforge)
+target_compile_options(test_native_acid_composite PRIVATE -UNDEBUG -ffp-contract=off)
+if(PINEFORGE_ENABLE_COVERAGE)
+    target_compile_options(test_native_acid_composite PRIVATE ${_pf_cov_test_flags})
+endif()
+pineforge_add_twin_test(test_native_acid_composite test_native_acid_composite)
 
 add_test(NAME test_market_admission_schema COMMAND ${Python3_EXECUTABLE}
     ${PROJECT_SOURCE_DIR}/scripts/check_market_admission_schema.py)
@@ -2236,6 +2375,14 @@ add_test(NAME test_doc_anchors COMMAND ${Python3_EXECUTABLE} -B
     ${PROJECT_SOURCE_DIR}/scripts/test_check_doc_anchors.py)
 add_test(NAME test_doc_lint COMMAND ${Python3_EXECUTABLE} -B
     ${PROJECT_SOURCE_DIR}/scripts/test_check_doc_lint.py)
+# R5 lane H-DOCGATES (AUDIT4-opus X13): the doc-revert gate's must-fail suite,
+# over throwaway git repositories; the gate itself is a ci_preflight stage.
+add_test(NAME test_doc_reverts COMMAND ${Python3_EXECUTABLE} -B
+    ${PROJECT_SOURCE_DIR}/scripts/test_check_doc_reverts.py)
+# R5 lane H-DOCGATES (AUDIT4-opus X10): the kernel seam-row gate's must-fail
+# suite, over throwaway trees; the gate itself is a ci_preflight stage.
+add_test(NAME test_kernel_seam_rows COMMAND ${Python3_EXECUTABLE} -B
+    ${PROJECT_SOURCE_DIR}/scripts/test_check_kernel_seam_rows.py)
 
 # R5 F2: the worked migration of docs/pages/pine-to-native.md, executed. The
 # extractor copies the page's six C++ blocks out verbatim at build time and
@@ -2455,6 +2602,7 @@ set(PINEFORGE_PR_SLOW_TESTS
     test_native_direct_mutation
     test_native_event_retention
     test_native_group_absorption
+    test_native_group_keep_handle
     test_native_handle_stable_replace
     test_native_host_reads
     test_native_lookup_memos

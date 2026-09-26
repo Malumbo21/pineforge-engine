@@ -127,6 +127,11 @@ public:
     // (NativeStrategyHost::native_state, out of line and by value). running()
     // is the branch view() takes.
     bool running() const noexcept { return running_spec_ != nullptr; }
+    // Whether the configured spec's script bars are buckets gathered from its
+    // input under the resolved pairing (native_aggregates_input_bars).
+    bool aggregates_input() const noexcept {
+        return native_calendar::pairing_aggregates(pairing_);
+    }
     NativeLifecycleKind state_kind() const {
         return running_spec_ ? NativeLifecycleKind::Running : view().kind;
     }
@@ -1015,6 +1020,16 @@ private:
         return session_point_resolved(ms);
     }
     SessionPoint session_point_resolved(int64_t ms) const;
+    // The session point of the first eligible instant of the script interval
+    // holding `ms` (`ms` itself when the calendar has no such interval): what
+    // present_session_day reads for an instant, the interval resolved first.
+    SessionPoint eligible_session_point(int64_t ms) const;
+    // Whether calendar_ is UTC (native_calendar::utc_calendar), asked once
+    // per calendar: present_session_day reads it at every bar.
+    bool calendar_is_utc() const {
+        if (!calendar_utc_) calendar_utc_ = native_calendar::utc_calendar(calendar_, calendar_memo_);
+        return *calendar_utc_;
+    }
     struct SessionPointMemo {
         bool held = false;
         int64_t ms = 0;
@@ -1188,6 +1203,12 @@ private:
     // has no remaining modeled path of its own.
     double margin_sizing_price(bool short_side, NativePathPhase phase,
                                double fallback) const noexcept;
+    // The waypoint the segment into `phase` starts from (Open for the first
+    // extreme, and so on; Open itself has no segment into it). A request
+    // matched at a driver point was reached on that segment, so the path left
+    // after its fill starts AT the point's own waypoint: the post-fill check
+    // measures from here, as fx_roll_margin_check_at's continuous roll does.
+    NativePathPhase margin_segment_origin(NativePathPhase phase) const noexcept;
     // Kernel numbers, the host's requirement decision, the breach test, the
     // kernel sizing, then the host's units override. nullopt means no
     // liquidation.
@@ -1534,6 +1555,8 @@ private:
     // folded; a point whose resolution threw is never held.
     mutable std::array<SessionPointMemo, 2> session_points_{};
     mutable std::size_t session_point_next_ = 0;
+    // calendar_is_utc()'s answer for calendar_. Derived, never folded.
+    mutable std::optional<bool> calendar_utc_;
     // Forget every memo over the calendar and the lookups it keys: called
     // wherever calendar_ is rebuilt.
     void reset_calendar_memos() const noexcept {
@@ -1541,6 +1564,7 @@ private:
         calendar_memo_.reset();
         session_points_ = {};
         session_point_next_ = 0;
+        calendar_utc_.reset();
         interval_cache_.forget_priors();
     }
     Bar forming_{};

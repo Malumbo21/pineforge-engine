@@ -83,28 +83,6 @@
   #define PF_API
 #endif
 
-/* A public spelling kept only as a value-identical alias for compiled
- * consumers (ADR-0001 "Deprecated public spellings"): a consumer that still
- * names it compiles, with the compiler's deprecation diagnostic. */
-#if defined(__GNUC__) || defined(__clang__)
-  #define PF_DEPRECATED(msg) __attribute__((deprecated(msg)))
-#elif defined(_MSC_VER)
-  #define PF_DEPRECATED(msg) __declspec(deprecated(msg))
-#else
-  #define PF_DEPRECATED(msg)
-#endif
-
-/* An anonymous union member: C11 and C++ have them, and so does every
- * compiler this runtime builds with, but strict C99 does not -- a C99
- * consumer compiling with -pedantic-errors would reject the declaration.
- * GCC and Clang mark it __extension__, which exempts exactly that one
- * declaration from -pedantic and nothing else in the consumer. */
-#if defined(__GNUC__) || defined(__clang__)
-  #define PF_ANONYMOUS_UNION __extension__ union
-#else
-  #define PF_ANONYMOUS_UNION union
-#endif
-
 /** Monotonic ABI version of pf_report_t / pf_trade_t layout. Bumped
  *  whenever a caller-visible struct grows. Consumers MUST verify
  *  pf_abi_version() == PF_ABI_VERSION before calling run_backtest.
@@ -306,32 +284,16 @@ typedef struct pf_equity_stats_s {
      *  bucketing), risk-free 2%/yr (2/12 per month), annualized by sqrt(12).
      *  Uses sample (N-1) stddev. NaN with <2 monthly returns or zero deviation.
      *
-     *  `sharpe_tv` is the historical spelling of this same field. Both names
-     *  are one `double` at one offset (an anonymous union of two members of
-     *  the same type, #PF_ANONYMOUS_UNION so a strict C99 consumer compiles
-     *  it too), so the struct's size and every field offset are unchanged and
-     *  a caller compiled against either spelling reads the same storage. The old spelling is DEPRECATED and is removed at the next
-     *  #PF_ABI_VERSION; see ADR-0001 "Deprecated public spellings". The
-     *  serialized report key stays `sharpe_tv` (report-schema name). */
-    PF_ANONYMOUS_UNION {
-        double sharpe_monthly;
-        PF_DEPRECATED("sharpe_tv is the historical spelling of sharpe_monthly; "
-                      "removed at PF_ABI_VERSION 5")
-        double sharpe_tv;              /**< Deprecated spelling of
-                                        *   pf_equity_stats_s::sharpe_monthly. */
-    };
+     *  Its pre-1.0 spelling `sharpe_tv` named this same double at this same
+     *  offset (48) and was removed for 1.0; the serialized report key is still
+     *  `sharpe_tv` (report-schema name). */
+    double sharpe_monthly;
     /** Same resampling as sharpe_monthly; uses population downside deviation
      *  vs the monthly risk-free. NaN with <2 monthly returns or zero deviation.
      *
-     *  `sortino_tv` is the historical spelling of this same field, on the same
-     *  terms as sharpe_monthly / sharpe_tv above. */
-    PF_ANONYMOUS_UNION {
-        double sortino_monthly;
-        PF_DEPRECATED("sortino_tv is the historical spelling of sortino_monthly; "
-                      "removed at PF_ABI_VERSION 5")
-        double sortino_tv;             /**< Deprecated spelling of
-                                        *   pf_equity_stats_s::sortino_monthly. */
-    };
+     *  Its pre-1.0 spelling `sortino_tv` (offset 56) was removed the same way;
+     *  the serialized report key is still `sortino_tv`. */
+    double sortino_monthly;
     double sharpe_bar;                 /**< Per-script-bar returns, annualized by observed bar density
                                         *   (bars per year = (len-1)/calendar span), NOT a fixed
                                         *   calendar formula. Uses sample (N-1) stddev.
@@ -813,8 +775,10 @@ PF_API void strategy_stream_order_actions_clear(pf_strategy_t s);
  *  Excludes the consumable queue and arbitrary private strategy members.
  *  This is a replay check, not a complete state snapshot or cryptographic hash.
  *  Fresh replay must use deterministic strategy code, the same pinned engine
- *  build and configuration. Fingerprint representations may change between builds.
- *  Returns 0 for NULL. */
+ *  build and configuration. The fingerprint's recipe belongs to the script
+ *  ABI epoch: from 1.0.0 it is fixed for every 1.x engine
+ *  (engine_script_run_v19), and a new recipe is a new epoch; a value from a
+ *  build before 1.0.0 is not comparable. Returns 0 for NULL. */
 PF_API uint64_t strategy_stream_state_hash(pf_strategy_t s);
 
 /** Push one normalized realtime trade. Returns 0 on success, -1 on failure. */
@@ -1033,10 +997,11 @@ PF_API void strategy_set_broker_state_hash_recording(pf_strategy_t s, int on);
 /** Return the broker-state hash of the FINAL state after the most recent
  *  run() (see #strategy_set_broker_state_hash_recording's doc and
  *  pf_report_t::broker_state_hash for the per-bar recording; this accessor
- *  works whether or not recording was enabled). Compare only within the same
- *  pinned engine build and configuration; this is not a serialized checkpoint.
- *  Returns 0 when @p s is
- *  NULL. */
+ *  works whether or not recording was enabled). Compare runs of one
+ *  configuration: the recipe belongs to the script ABI epoch, fixed from 1.0.0
+ *  for every 1.x engine (engine_script_run_v19), so two values differ only
+ *  when the states they fold differ. This is not a serialized checkpoint.
+ *  Returns 0 when @p s is NULL. */
 PF_API uint64_t strategy_broker_state_hash(pf_strategy_t s);
 /** Number of orders resting in the engine's pending-order book after the
  *  most recent run() (ABI v4 live-runtime surface, task 7, spec 3.6): the
@@ -1106,10 +1071,11 @@ typedef enum pf_fill_qty_partition_e {
  *      `pyramid_entries[0].qty - pyramid_entries[1].qty` after closing both
  *      lots (the short-seed collision path). Both kernels are
  *      modelled; each reports `close_only` 1 when it opens nothing.
- *    - `2` DEFAULT_STOP_PLACEMENT -- the DEFAULT percent_of_equity <= 100
- *      pure STOP entry's placement size (`default_stop_placement_qty`,
- *      round-7 family K), when the placement-size rule says the
- *      fill consumes it: created flat, filling from flat, positive fill.
+ *    - `2` DEFAULT_STOP_PLACEMENT -- the DEFAULT percent_of_equity pure
+ *      STOP entry's placement size, at any percentage
+ *      (`default_stop_placement_qty`, round-7 family K), when the
+ *      placement-size rule says the fill consumes it: created flat, filling
+ *      from flat, positive fill.
  *    - `3` AT_FILL -- default sizing at the slipped fill.
  *  @p close_only receives 1 when the kernel's close-only predicate fires
  *  -- the fill closes against the live opposite position and that
@@ -1470,11 +1436,15 @@ PF_API pf_version_t pf_version_get(void);
 /** @return Monotonic ABI version (see #PF_ABI_VERSION). */
 PF_API int pf_abi_version(void);
 
-/** Full git-derived version descriptor.
+/** Full version descriptor, the `PINEFORGE_VERSION_FULL` of the generated
+ *  `pineforge/version.h`.
  *
- *  Returns `"MAJOR.MINOR.PATCH[-N-gSHA[-dirty]]"` for git checkouts, or
- *  plain `"MAJOR.MINOR.PATCH"` for tarball builds. The pointer is to a
- *  static string with program lifetime; do not free. */
+ *  Returns `"MAJOR.MINOR.PATCH[-rc.N][-N-gSHA[-dirty]]"` for a tagged git
+ *  checkout, or exactly the `VERSION` file (`"MAJOR.MINOR.PATCH"`, or
+ *  `"MAJOR.MINOR.PATCH-rc.N"` for a release candidate) for a tarball build
+ *  or one configured with `PINEFORGE_VERSION_SOURCE=FILE`. #pf_version_get
+ *  carries only the numeric MAJOR.MINOR.PATCH. The pointer is to a static
+ *  string with program lifetime; do not free. */
 PF_API const char* pf_version_string(void);
 
 /** @} */ /* end of pf_version */

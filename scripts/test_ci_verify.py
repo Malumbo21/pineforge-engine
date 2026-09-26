@@ -1222,6 +1222,11 @@ class DriverOrderingAndAggregation(unittest.TestCase):
         self.assertEqual(Path(argv[argv.index('--archive') + 1]).name, 'libpineforge_kernel.a')
         self.assertEqual(Path(argv[argv.index('--adr') + 1]).name,
                          '0001-kernel-adapter-boundary.md')
+        # R5 lane H-DOCGATES: the ruled-count floors travel with the argv.
+        self.assertEqual(argv[argv.index('--min-ruled-identifiers') + 1],
+                         str(ci_verify.ADR_RULED_IDENTIFIERS_MIN))
+        self.assertEqual(argv[argv.index('--min-ruled-texts') + 1],
+                         str(ci_verify.ADR_RULED_TEXTS_MIN))
 
     def test_kernel_residuals_failure_stops_before_ctest(self):
         code, summary, scripted, _ = self.run_profile('kernel', **{'kernel-residuals': 1})
@@ -1326,7 +1331,7 @@ class DriverOrderingAndAggregation(unittest.TestCase):
 
     def test_pr_exclusion_proves_registered_minus_labelled_equals_ran(self):
         self.assertEqual(ci_verify.EXCLUDED_REGISTERED_MIN,
-                         {'debug': 659, 'sanitizers': 659, 'native': 668})
+                         {'debug': 684, 'sanitizers': 684, 'native': 693})
         for profile, registered in ci_verify.EXCLUDED_REGISTERED_MIN.items():
             with self.subTest(profile=profile):
                 code, summary, scripted, _ = self.run_profile(

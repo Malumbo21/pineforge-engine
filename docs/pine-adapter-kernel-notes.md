@@ -308,6 +308,16 @@ The pair context exists only inside the ordinary atomic two-stop scan.
 No callback or stable-frame ABI read occurs between its two fills.
 ```
 
+Since R5 lane PAR-MARGIN the adapter keeps the placement quantity above
+100 % as well: eight `lab tv` tapes of a 390-400 % stop on NYSE:F
+(`tests/fixtures/margin_entry_bar/pm-m10-*`) open the placement quotient, never
+the fill's (`tests/test_adapter_margin_schedule_differential.cpp`, "M10 on
+tapes"). The margin call those tapes book at a half-cent low is TradingView's
+market execution at that print, so since R5 lane PAR-MARGIN-2 the pre-open
+slice books the print's nearest tick (12.105 books 12.11), where a stop or
+limit crossed at its own off-grid level keeps the directional tick
+(`tests/fixtures/half_tick_rounding`).
+
 ```text
 design-declined-reversal-close-leg: called at the KI-54 reversal-decline
 site with the just-declined MARKET reversal entry. Flags every pending
@@ -486,3 +496,13 @@ double reserve_percent_commission(double cash) const {
         ? cash / (1.0 + commission_value_ / 100.0) : cash;
 }
 ```
+
+> **Corrected by R5 lane PAR-CASHFEE.** The block's last claim -- that a
+> cash-per-order or cash-per-contract commission reserves nothing -- does not
+> hold on TradingView. A percent-of-equity default quantity under a cash
+> commission takes its percentage of `strategy.equity` (the open entries' cash
+> fees charged) and leaves out the fee its own order pays: the value per order,
+> or the value per contract against the contract's notional. The adapter's
+> `default_sizing_cash` does so; the tapes are under
+> `tests/fixtures/cash_fee_sizing` and `docs/design/native-feature-parity.md`
+> §3.10 records the measurement.

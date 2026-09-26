@@ -130,7 +130,7 @@ SANITIZER_FLAG = '-fsanitize=address,undefined'
 #   +3 F12 example_native_fee_reserve_strategy, example_native_fx_roll_strategy,
 #          example_native_broker_hash_strategy
 #   +3 F6  test_f6_dead_kernel_members, test_timeframe_trace_switch_once,
-#          test_deprecated_public_spellings
+#          test_removed_public_spellings (renamed by lane REL10)
 #   +1 F3  test_native_bare_host_contracts
 #   +1 F4  test_native_c_api_c99
 #   +1 F5  test_native_session_day_facts
@@ -239,7 +239,25 @@ SANITIZER_FLAG = '-fsanitize=address,undefined'
 #                  extracted from the page and run)
 # All six register in release too; RATIO-HARDEN, V19-FIX and K-IDX add no row.
 # 278 registered, 277 run: the WebSocket row still skips on a system libcurl.
-KERNEL_MIN_TESTS = 277
+# 286 run = those 277 plus the nine source-free rows of wave H (INT26),
+# counted with ctest -N on the integrated tree:
+#   +1 H-MEASURE    test_native_acid_composite (the G1 acid composite, C++
+#                   and C)
+#   +3 H-DOCGATES   test_doc_reverts and test_kernel_seam_rows (the two gates'
+#                   self-tests, Python rows every profile registers) and
+#                   test_native_runtime_ambient_lifo (the runtime blocks' LIFO
+#                   death row)
+#   +1 K-OCA-KEEP   test_native_group_keep_handle
+#   +1 PAR-ORDERS-2 test_native_current_cohort_refusal
+#   +1 PAR-MARGIN   test_native_margin_intrabar_samples
+#   +1 PAR-MARGIN-2 test_native_margin_post_fill_path
+#   +1 PERF-KEDGE   test_native_session_day_utc (session-day facts on a UTC
+#                   calendar without a calendar interval per bar)
+# REL10 renames F6's row (test_deprecated_public_spellings ->
+# test_removed_public_spellings); PAR-ORDERS and CI-FLAKE add no row. All
+# nine register in release too. 287 registered, 286 run: the WebSocket row
+# still skips on a system libcurl.
+KERNEL_MIN_TESTS = 286
 # Release-row floor, the same gate for the default profile. Before lane P7
 # only the kernel profile had one, so a row that left release alone (a
 # source-bound TU dropped from TEST_SOURCES, a deleted twin or ABI row) left a
@@ -347,13 +365,59 @@ KERNEL_MIN_TESTS = 277
 # wave-G lane adds a source-bound row (the K-ULP4 and K-ULP5 C checks and
 # V19-FIX's scaling rows are rows inside existing TUs). No release row skips,
 # so 678 registered is 678 run.
-RELEASE_MIN_TESTS = 678
+# 702 = those 678 plus wave H's twenty-four (INT26), counted with ctest -N on
+# the integrated tree: the nine KERNEL_MIN_TESTS lists above, which register
+# here too, H-MEASURE's eleven source-bound rows the kernel profile does not
+# build (AUDIT4 X14) and PAR-ORDERS-2's three tape rows:
+#   +1 G2-09/-10/-12/-13, E20 f1  test_adapter_margin_schedule_differential
+#   +3 G2-15, G2-18, E5/E14       test_pyramiding_count_differential,
+#                                 test_zero_trail_sibling_stop,
+#                                 test_pending_entry_trail_tapes
+#   +4 G2-22, G2-21, G2-32, G2-36 test_e19_excursion_tape,
+#                                 test_short_seed_report_swap,
+#                                 test_pine_dust_sweep_paired,
+#                                 test_session_ismarket_tape
+#   +3 F1(e), F1 magnified, G2-23 test_aggregated_entry_bar_index_tape,
+#                                 test_magnified_aggregated_tape,
+#                                 test_adapter_security_route_conditions
+#   +3 PAR-ORDERS-2 items 1-3     test_flat_coof_exit_tapes,
+#                                 test_second_extreme_order_tapes,
+#                                 test_pooc_reversing_stop_tapes
+#   +1 PAR-CASHFEE                test_cash_fee_sizing_tapes
+# PAR-MARGIN's own count also held the margin differential, which that lane
+# had cherry-picked for its pins; it counts once, as H-MEASURE's. No release
+# row skips, so 702 registered is 702 run.
+# 703 = those 702 plus INT26 round 2's source-bound tape row,
+# test_pooc_stop_reentry_bracket_tapes (the gate sweep's lost re-entry
+# bracket); 703 registered is 703 run.
+RELEASE_MIN_TESTS = 703
+# ADR-0001 ruled-count floors, beside the ctest floors (R5 lane H-DOCGATES,
+# AUDIT4-opus X13 / docs-a N7). check_kernel_residuals.py counts the rulings
+# its vocabulary reads -- 174 identifiers and 45 texts on the lane's tree: the
+# 175 AUDIT4 counted, less the bare word `Pine`, and the 3 feed texts plus
+# the 42 texts the lane rules by their exact words (6 deprecated-alias texts,
+# map.hpp's 4 static_assert texts, the runtime's 32 dotted argument checks).
+# A row the vocabulary reads cannot leave silently -- its name turns unruled
+# -- unless its name left in the same change; the floor makes that drop an
+# edit of this file. A lane that adds rulings raises the floor with them:
+# 46 texts once the lane also ruled Eigen's `matrix.cols() ==
+# matrix.rows()` assert text, which a debug or sanitizers archive carries.
+# 170 identifiers and 40 texts once lane REL10 removed the four deprecated
+# spellings for 1.0 (sharpe_tv, sortino_tv, Coof, MagnifierCoof): their names
+# and their six deprecation and static_assert texts left the headers, the
+# archive and the ADR's residual table together (INT26 pick of 38e8ad1e).
+ADR_RULED_IDENTIFIERS_MIN = 170
+ADR_RULED_TEXTS_MIN = 40
 # PR-only registration floors: the complete CTest populations of the three
 # excluded profiles at INT25, counted with ctest -N on the integrated tree --
 # 653/653/662 at 91d65ad6 (INT24) plus wave G's six rows (C-SURFACE-1 +1,
-# KERNEL-EDGE +1, K-ULP4 +2, K-ULP5 +1, DOC-TRUTH-4 +1) in each. An excluded
-# run must still discover at least this many rows before -LE.
-EXCLUDED_REGISTERED_MIN = {'debug': 659, 'sanitizers': 659, 'native': 668}
+# KERNEL-EDGE +1, K-ULP4 +2, K-ULP5 +1, DOC-TRUTH-4 +1) in each; 683/683/692
+# at INT26, each with wave H's twenty-four rows of RELEASE_MIN_TESTS
+# (H-MEASURE +12, H-DOCGATES +3, K-OCA-KEEP +1, PAR-ORDERS-2 +4, PAR-MARGIN
+# +1, PAR-MARGIN-2 +1, PERF-KEDGE +1, PAR-CASHFEE +1), counted the same way;
+# 684/684/693 with INT26 round 2's tape row.
+# An excluded run must still discover at least this many rows before -LE.
+EXCLUDED_REGISTERED_MIN = {'debug': 684, 'sanitizers': 684, 'native': 693}
 # The ctest stage's bound. A full sanitizers run (push to main, a manual
 # dispatch, the maintainers' verification) ran out of its 30 minutes twice on
 # main's four-core runner before every row had finished, so it gets an hour; a
@@ -604,7 +668,9 @@ def twin_parity_command(source: Path) -> list[str]:
 def kernel_residuals_command(cfg: VerifyConfig) -> list[str]:
     return [sys.executable, str(cfg.source / 'scripts/check_kernel_residuals.py'),
             '--archive', str(cfg.build_dir / 'lib' / 'libpineforge_kernel.a'),
-            '--adr', str(cfg.source / 'docs/adr/0001-kernel-adapter-boundary.md')]
+            '--adr', str(cfg.source / 'docs/adr/0001-kernel-adapter-boundary.md'),
+            '--min-ruled-identifiers', str(ADR_RULED_IDENTIFIERS_MIN),
+            '--min-ruled-texts', str(ADR_RULED_TEXTS_MIN)]
 
 
 def cmake_cache_definitions(cfg: VerifyConfig) -> dict[str, str]:

@@ -65,7 +65,40 @@
 // a new digest. Every count is unchanged, and this TU with the three hash
 // inputs taken out (the host-extension fold, the recorded broker-state hash
 // rows, the final hash) prints the same table against main 91d65ad6 and the
-// lane's library, byte for byte.
+// lane's library, byte for byte. Re-harvested once more for R5 lane
+// PAR-ORDERS (21 runs): a pending entry's trailing exit is no longer placed
+// as an anchored kernel child (17 runs: the host-extension fold, the recorded
+// broker-state hash rows and the final hash), and a process_orders_on_close
+// add stays under the pyramiding cap when the pending opposite entry is not
+// in the close pass (4 runs). With the three hash inputs taken out, this TU
+// prints INT25's table byte for byte but for Storm11 and Storm11M, whose
+// trades the cap moves.
+// Re-harvested once more for R5 lane PAR-MARGIN-2 (its v19 re-pin): one run,
+// Config03, opens a short with a sell limit filled at 111.25 on its way up a
+// low-first bar (O110.5 L109.5 H112.5 C112.25), and the kernel's post-fill
+// margin point now measures that bar's high -- the waypoint the fill was
+// reached on the way to -- where it measured the waypoints after it. The run
+// books its margin call on the fill bar at the high, 4 @112.5, where it booked
+// 2 @112.25 there and 6 @114.75 a bar later, so it closes 48 trades instead of
+// 50 and its digest moves (461a919ebdcd41e9 -> 4593ef08ab33e045 on the lane's
+// tree; INT26 moves it on the integrated tree in its v19 hash re-pin); TradingView
+// books a short limit's call at its fill bar's high
+// (tests/fixtures/margin_entry_bar/pm2-m7-slim-*, pm2-m7-s1lim-*). The other 155
+// runs keep their digest and every count.
+// Re-harvested once more for R5 lane PAR-CASHFEE's hash step: a
+// percent-of-equity default quantity under a cash commission takes its
+// percentage of strategy.equity, the open entries' cash fees charged, and
+// leaves out the fee its own order pays (tests/fixtures/cash_fee_sizing), and
+// the source layer's fold folds the sizing snapshot's strategy.equity wherever
+// such a quantity is recorded. 34 of the 156 runs pin a new digest: exactly
+// the Config runs whose configuration sweep passes through a percent-of-equity
+// default quantity with a positive cash fee (counted over the battery by an
+// instrumented copy of this TU); six of them close a different number of
+// trades (Config03 50 -> 48, Config03M 48 -> 44, ConfigFlags103 65 -> 63,
+// ConfigFlags103M 66 -> 65, ConfigFlags104 and ConfigFlags104M 12 -> 13). The
+// same harvest against the base 09f0bbda reproduces every old row. (The
+// counts are the lane's tree's; INT26 pins the integrated tree's trades with
+// this pick and moves the digests in its v19 hash re-pin.)
 #include <pineforge/pineforge.h>
 #include <pineforge/source/pine_strategy_host.hpp>
 
@@ -759,8 +792,9 @@ void harvest() {
                 "// row per run of its battery (name, digest, source folds, closed trades,\n"
                 "// recorded broker-state hash rows).\n"
                 "// Harvested on 6c081f5d, re-harvested once for V19-D's v4 fold (INT23),\n"
-                "// once for K-ULP3's whole-lot close and once for V19-FIX's hash step: see\n"
-                "// the provenance note in the test.\n"
+                "// once for K-ULP3's whole-lot close, once for V19-FIX's hash step and once\n"
+                "// for PAR-MARGIN-2's post-fill margin path: see the provenance note in the\n"
+                "// test.\n"
                 "// Generated -- never edit a row by hand.\n");
     std::printf("constexpr Pinned kPinned[] = {\n");
     for (const Scenario& s : battery()) {

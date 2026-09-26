@@ -151,6 +151,11 @@ struct PineSizingSnapshot {
     double mark = std::numeric_limits<double>::quiet_NaN();
     double frozen_units = std::numeric_limits<double>::quiet_NaN();
     bool at_fill = false;
+    // strategy.equity at `mark`: every open entry fee charged, the cash ones
+    // included, which `equity` restores for the money gates. Recorded only
+    // where a percent-of-equity default quantity converts it -- a cash
+    // commission (default_sizing_reserves_cash_fee); NaN everywhere else.
+    double strategy_equity = std::numeric_limits<double>::quiet_NaN();
 };
 
 // Source placement evidence keyed by the native request handle, read by the
@@ -235,11 +240,6 @@ struct PlacementSnapshot {
     // later submit of the same instance (a bracket leg materialized when its
     // parent entry applies) must not re-stamp it to the submitting bar.
     bool projection_created_bar_pinned = false;
-    // Set when a carried bracket leg is force-executed at its own level on the
-    // bar its parent entry opened (ab9714be src/source/pine_fills.cpp:7695-7728).
-    // The close of such a leg must not inherit the exit bar's path sample: the
-    // owner books that fill at step 1, before update_per_trade_extremes().
-    bool post_parent_calc_level_fill = false;
     std::int32_t projection_position_side = static_cast<std::int32_t>(PositionSide::FLAT);
     bool projection_after_close = false;
     bool projection_over_pyramiding = false;
@@ -1226,15 +1226,6 @@ struct PineRiskState {
     bool intraday_cancel_pending = false;
 };
 
-// ab9714be pine_risk.cpp:256-292 (update_per_trade_extremes): the source
-// host's per-lot excursion sampler. Folds one completed source bar's H/L/C
-// into every open lot, honoring the entry-bar masks. Shared by the bar-close
-// walk, the stream tick walk and the margin-call submit preload.
-void sample_open_trade_extremes(std::vector<PyramidEntry>& lots,
-                                PositionSide side, int bar_index, const Bar& bar);
-Bar margin_call_sample_bar(const Bar& bar, double fire_price, bool prefix_sample,
-                           bool high_first, double mintick = 0.0, int slippage = 0);
-
 class PineExecutionAdapter;
 
 // Allocation-free view facade for Appendix C's later C projection. L2 does
@@ -1383,22 +1374,10 @@ public:
 
     bool source_margin_rounded_tie_veto() const;
     bool margin_check_allowed(const NativeMarginCheckPoint&) const;
+    bool intrabar_sample_checked(const NativeMarginCheckPoint&) const;
     std::optional<NativeMarginDecision> resolve_margin_requirement(
         const NativeMarginRequirementView&) const;
     std::optional<double> resolve_margin_call_units(const NativeMarginCallView&) const;
-    // True when the request is a source exit leg carrying priced stop, limit
-    // or trailing terms (L10j): its trade row folds the pre-fill path extremes.
-    bool source_priced_exit(std::uint64_t incarnation) const noexcept;
-    bool source_post_parent_calc_level_fill(std::uint64_t incarnation) const noexcept;
-    std::optional<double> source_trail_offset_ticks(std::uint64_t incarnation) const noexcept;
-    bool source_margin_exit(std::uint64_t incarnation) const noexcept;
-    static bool source_kernel_liquidation(const native_order::DefinitionRef&) noexcept;
-    bool has_pending_market_exit(int current_interval_index = -1) const noexcept;
-    // The carried 1x long's opening money call precedes the bar's excursion
-    // sample only ahead of one resting full-position priced exit that the
-    // open does not reach (ab9714be pine_fills.cpp:164-218).
-    bool carried_long_money_precedes_priced_exit(const NativePrecommitView&,
-                                                 double held_units) const;
     void on_bar_open(const Bar&, const NativeDecisionContext&);
     void on_tick(const Bar&, const NativeTickContext&);
     // Called from the generic calculation callback after the source script
@@ -1721,6 +1700,14 @@ private:
     // execution converts at, which its terms facts carry
     // (NativeExecutionTermsFacts::active_fx); none, the presented clock's.
     double percent_commission_live_equity(double, std::optional<double> fx) const noexcept;
+    // The kernel's marked equity at `mark` (every open entry fee charged),
+    // at `fx` when given: strategy.equity under a cash commission.
+    double strategy_equity_at(double mark, std::optional<double> fx) const noexcept;
+    // Records both equities a sizing snapshot carries at `mark`: `equity`
+    // (percent_commission_live_equity) and, for a cash-fee percent-of-equity
+    // default quantity, `strategy_equity`.
+    void mark_sizing_equity(PineSizingSnapshot&, double mark,
+                            std::optional<double> fx = std::nullopt) const noexcept;
     double quantize_close_units(double basis, double percent) const noexcept;
     double quantize_percent_exit_units(double requested,
                                        double available) const noexcept;
@@ -1737,6 +1724,9 @@ private:
     void apply_fx_opening_margin_slice(const native_order::ExecutionAppliedEvent&,
                                        const NativeDecisionContext&);
     void schedule_preopen_margin_slice(const Bar&, const NativeDecisionContext&);
+    bool leveraged_entry_bar_checked() const noexcept;
+    bool preopen_slice_class(const PlacementSnapshot&,
+                             const NativeDecisionContext&) const noexcept;
     bool submit_margin_call_slice(double mark_price, const NativeDecisionContext&,
                                   bool opening_checkpoint = false);
     bool submit_margin_call_units(double mark_price, const NativeDecisionContext&,
@@ -1812,7 +1802,10 @@ private:
     // Whether an immediate strategy.close was placed on that bar.
     bool immediate_close_placed_on(std::int32_t bar) const noexcept;
     void cancel_bracket_origin(native_order::RequestHandle);
-    void cancel_bracket_siblings(native_order::RequestHandle);
+    // executed_at: the ordinal a terminal receipt executed at, when the
+    // observer reads it later; a later strategy.exit call's leg accepted
+    // after it is not a sibling.
+    void cancel_bracket_siblings(native_order::RequestHandle, std::uint64_t executed_at = 0);
     void cancel_exit_orders_for_full_close(const SourceId& from_entry);
     void retire_in_position_exits_at_flat(bool preserve_pending_parents,
                                           bool dormant_rows_only,
@@ -1847,6 +1840,7 @@ private:
     void stage_flat_children_before_parent(const SourceId&, std::int32_t,
                                            std::int64_t);
     bool defer_coof_tail() const noexcept;
+    bool coof_fill_at_second_extreme() const noexcept;
     bool source_path_uses_high_first(const Bar&) const noexcept;
     bool coof_fill_on_path_point() const noexcept;
     bool coof_fill_at_path_point(double waypoint) const noexcept;
@@ -1870,6 +1864,10 @@ private:
     // reserved out of it, and the lot floor applied to the core's quotient.
     double default_sizing_cash(const PineSizingSnapshot&) const noexcept;
     bool default_sizing_reserves_percent_fee() const noexcept;
+    // A percent-of-equity default quantity under a cash commission (per
+    // order or per contract) takes its percentage of strategy.equity and
+    // leaves out the fee its own order pays (R5 lane PAR-CASHFEE).
+    bool default_sizing_reserves_cash_fee() const noexcept;
     double default_sizing_lot_floor(double units) const noexcept;
     // A typed quantity (qty_type cash / percent_of_equity) names money, not
     // units: `money` converted at `price` by the core (native_sized_units:
@@ -1919,7 +1917,9 @@ private:
     // host is a PineStrategyHost". The readers ask the host's
     // PineStrategyHost view instead, so nothing reads or writes these two
     // slots; they keep this class's layout, which is part of
-    // PineStrategyHost's and so of the generated script's ABI.
+    // PineStrategyHost's and so of the generated script's ABI. Scheduled:
+    // both slots and ReceiptHighWaterReader go at the next engine_script_run
+    // epoch, the layout change that epoch licenses (R5 lane H-DOCGATES).
     ReceiptHighWaterReader event_high_water_reader_ = nullptr;
     ReceiptHighWaterReader terminal_receipt_high_water_reader_ = nullptr;
     bool is_declined_market_reversal(
@@ -1960,6 +1960,10 @@ private:
     void admit_deferred_open_marketable_sells();
     void rearm_throttled_reopens();
     void flush_pooc_marketable_limit_entry_fills(const Bar&, const NativeDecisionContext&);
+    // The close pass's fills at a close tick: its own pass, or (after_close)
+    // the reversing stops a same-bar close's fill releases.
+    void fill_pooc_close_entries(double raw_close, const NativeDecisionContext&,
+                                 bool after_close);
     void flush_pooc_marketable_exit_fills(const Bar&, const NativeDecisionContext&);
     void record_market_review(admission::Checkpoint, int,
                               const std::vector<native_order::RequestHandle>&);
@@ -2055,6 +2059,11 @@ private:
     bool source_batch_mutated_ = false;
     bool coof_recalc_active_ = false;
     bool coof_first_open_ = false;
+    // Whether the recalculating fill booked the forced_execution_price the
+    // adapter set on its request (a fill AT a path point), not the matcher's
+    // own price (R5 lane PAR-ORDERS-2). It sits in the padding before the
+    // next 8-byte member, so the class layout does not move.
+    bool coof_fill_forced_ = false;
     std::uint64_t coof_market_entry_recalc_incarnation_ = 0;
     std::uint64_t coof_market_entry_recalc_fill_seq_ = 0;
     std::uint64_t coof_current_fill_seq_ = 0;

@@ -463,12 +463,21 @@ bool explicit_reduction_units_representable(double units, double exposure) noexc
 }
 
 // A request that settles its units in one fill, all of them: no point budget
-// splits them and no group deduction is pending against them. Only such a
-// request's units can be the book's own quantity, closed as it stands
-// (R5 lane K-ULP4).
-bool settles_in_one_fill(const native_order::LiveRequest& live) noexcept {
-    return std::holds_alternative<native_order::ImmediateRemaining>(live.request().capacity)
-        && !std::holds_alternative<native_order::PendingDeferred>(live.pending);
+// splits them and no group deduction is pending against them that takes any
+// -- a pending total `units` absorb takes none (R5 lane K-ULP5), so it
+// settles them all (R5 lane K-OCA-KEEP). Only such a request's units can be
+// the book's own quantity, closed as it stands (R5 lane K-ULP4).
+bool settles_in_one_fill(const native_order::LiveRequest& live, double units) noexcept {
+    if (!std::holds_alternative<native_order::ImmediateRemaining>(live.request().capacity)) {
+        return false;
+    }
+    if (!std::holds_alternative<native_order::PendingDeferred>(live.pending)) return true;
+    double deduction = 0.0;
+    double after = 0.0;
+    bool exhausted = false;
+    return native_order::WorkingRequestCore::effective_host_units(live.pending, units, &deduction,
+                                                                  &after, &exhausted)
+        && !exhausted && deduction == 0.0;
 }
 
 // `own_quantity`: the answered units are the book's own -- a closing size,
@@ -3112,7 +3121,8 @@ bool NativeExecutionConsumer::margin_check_admitted(
 // The most adverse price the modeled script path still reaches after `phase`,
 // including the cursor price itself so a point with no remaining waypoint
 // still has a finite mark. A run with an intrabar path has no whole-bar
-// waypoint model here: it re-evaluates at each delivered sample instead.
+// waypoint model here: it re-evaluates at each delivered sample of a
+// continuous path instead (NativeMarginCheckKind::IntrabarSample).
 double NativeExecutionConsumer::margin_sizing_price(
         bool short_side, NativePathPhase phase, double fallback) const noexcept {
     if (!has_margin_path_) return fallback;
@@ -3146,6 +3156,18 @@ double NativeExecutionConsumer::margin_sizing_price(
         }
     }
     return adverse;
+}
+
+NativePathPhase NativeExecutionConsumer::margin_segment_origin(
+        NativePathPhase phase) const noexcept {
+    const NativePathPhase first = margin_path_high_first_ ? NativePathPhase::High
+                                                          : NativePathPhase::Low;
+    const NativePathPhase second = margin_path_high_first_ ? NativePathPhase::Low
+                                                           : NativePathPhase::High;
+    if (phase == first) return NativePathPhase::Open;
+    if (phase == second) return first;
+    if (phase == NativePathPhase::Close) return second;
+    return phase;
 }
 
 std::optional<double> NativeExecutionConsumer::margin_call_units(
@@ -4776,9 +4798,11 @@ std::optional<double> NativeExecutionConsumer::resolve_sized_units(
     // settlement arithmetic moves off any decimal grid: floored, the close fell
     // up to a whole step short, left a dust lot, or found nothing to close. A
     // scope net of siblings' claims or frozen at another total, a point budget
-    // and a pending group deduction settle something else, and are floored as
-    // before (R5 lane K-ULP4).
-    if (units == scope && scope == facts.scope_exposure_units && settles_in_one_fill(live)) {
+    // and a pending group deduction that takes any settle something else, and
+    // are floored as before (R5 lane K-ULP4); a pending total the units absorb
+    // takes none (R5 lane K-OCA-KEEP).
+    if (units == scope && scope == facts.scope_exposure_units
+        && settles_in_one_fill(live, units)) {
         return scope;
     }
     return representable_units(units, native_order::ExecutionGridPolicy::SnapToGrid,
@@ -4974,7 +4998,8 @@ std::optional<NativeCurrentExecutionResult> NativeExecutionConsumer::consume_mat
         if (terms.units && (!std::isfinite(*terms.units) || *terms.units < 0.0)) {
             return terminal(native_order::MatchRejectReason::InvalidTerms, terms);
         }
-        const bool own_quantity = closing_size && terms.units && settles_in_one_fill(*live)
+        const bool own_quantity = closing_size && terms.units
+            && settles_in_one_fill(*live, *terms.units)
             && *terms.units == terms_facts.scope_exposure_units;
         if (!execution_terms_grid_representable(
                 terms, host_sized, unresolved, terms_facts.scope_exposure_units,
@@ -6377,20 +6402,19 @@ std::optional<NativeCurrentRefusal> NativeExecutionConsumer::validate_current_ex
     } else if (!std::holds_alternative<native_order::Flatten>(request.intent)) {
         return Refusal::UnsupportedRequest;
     }
+    // A BindCohort roster is read at the match, never fixed at the command:
+    // the evaluation's current shape (native_order.cpp current_shape) admits
+    // no such owner, so a cohort close is refused here, before its point is
+    // taken, rather than left unevaluated there (R5 lane PAR-ORDERS-2).
     if (!std::holds_alternative<native_order::Independent>(request.owner)
         && !std::holds_alternative<native_order::BindOpening>(request.owner)
-        && !std::holds_alternative<native_order::BindOpenings>(request.owner)
-        && !std::holds_alternative<native_order::BindCohort>(request.owner))
+        && !std::holds_alternative<native_order::BindOpenings>(request.owner))
         return Refusal::UnsupportedRequest;
     const auto target = read_target(engine, live);
     if (std::holds_alternative<native_order::OpeningClose>(live->authority)) {
         if (!target.opening || !target.opening->has_live_matching_lot) return Refusal::UnreadyOwner;
     } else if (std::holds_alternative<native_order::OpeningsClose>(live->authority)) {
         if (target.openings.empty()) return Refusal::InvalidSelection;
-        bool any_live = false;
-        for (const auto& row : target.openings) any_live |= row.has_live_matching_lot;
-        if (!any_live) return Refusal::UnreadyOwner;
-    } else if (std::holds_alternative<native_order::CohortClose>(live->authority)) {
         bool any_live = false;
         for (const auto& row : target.openings) any_live |= row.has_live_matching_lot;
         if (!any_live) return Refusal::UnreadyOwner;
@@ -6522,7 +6546,8 @@ NativeCurrentExecutionPreview NativeExecutionConsumer::inspect_current_execution
         out.terms_rejection = native_order::MatchRejectReason::InvalidTerms;
         return out;
     }
-    const bool own_quantity = closing_size && terms.units && settles_in_one_fill(*live)
+    const bool own_quantity = closing_size && terms.units
+        && settles_in_one_fill(*live, *terms.units)
         && *terms.units == facts.scope_exposure_units;
     if (!execution_terms_grid_representable(
             terms, host_sized, unresolved, facts.scope_exposure_units, spec_ptr(),
@@ -6988,14 +7013,19 @@ void NativeExecutionConsumer::drain_queued_notifications(BacktestEngine& engine)
         applied_notifications_.clear();
         notification_head_ = 0;
         // L4: every applied fill re-arms the margin model against the book it
-        // left behind. Inert for a run that declares no margin model.
+        // left behind. Inert for a run that declares no margin model. The
+        // fill was reached on the segment into its driver point, so the path
+        // still ahead of it starts at that point's waypoint: a limit filled on
+        // the way down to the bar's low still faces the low (R5 lane
+        // PAR-MARGIN-2). Measured from the segment's origin, with the fill
+        // price as the point's own mark.
         if (drained && margin_model() != nullptr) {
             native_order::MatchCursor cursor;
             cursor.point = last.point.decision.coordinate;
-            maintain_margin_liquidation(engine, cursor,
-                                        last.point.decision.coordinate.path_phase,
-                                        last.point.price,
-                                        NativeMarginCheckKind::AfterApplied);
+            maintain_margin_liquidation(
+                engine, cursor,
+                margin_segment_origin(last.point.decision.coordinate.path_phase),
+                last.point.price, NativeMarginCheckKind::AfterApplied);
         }
         // L9: the second evaluation point. Every fill of this drain has
         // already been counted; the account facts are measured once, at the
@@ -7284,18 +7314,40 @@ void NativeExecutionConsumer::present_session_day(NativeDecisionContext& context
     // interval can reopen at 13:30 while its grid label is 13:00). Resolve
     // its first eligible instant and next input opening from the calendar,
     // even when a FeedTolerant host partitions by raw provider labels.
-    const auto slot = native_calendar::interval_containing(
-        calendar_, script_tf_, input_tf_, label, calendar_memo_);
-    const int64_t here_ms = slot ? slot->eligible_open_ms : label;
-    const SessionPoint here = session_point(here_ms);
+    //
+    // R5 lane PERF-KEDGE: on a UTC calendar an instant that is itself in
+    // session reads exactly as its interval's first eligible instant does, so
+    // neither the bar's interval nor a neighbour's is resolved for it. The
+    // day's cycles tile (utc_calendar), so the instant, its interval's open
+    // and that first eligible instant share the one session day holding the
+    // instant: the eligible instant is the first in-session instant of
+    // [open, instant], in session on that day, and every session point of
+    // them is that day's. Only an instant out of session, the walk and the
+    // scheduled close below resolve an interval. Any other zone asks the
+    // calendar in the order it always did, because a libc zone's mktime
+    // answer can depend on what was asked before it.
+    const bool utc = calendar_is_utc();
+    std::optional<native_calendar::NativeInterval> slot;
+    bool slot_resolved = false;
+    const auto resolve_slot = [&] {
+        if (slot_resolved) return;
+        slot = native_calendar::interval_containing(
+            calendar_, script_tf_, input_tf_, label, calendar_memo_);
+        slot_resolved = true;
+    };
+    SessionPoint here;
+    if (utc) here = session_point(label);
+    if (!here.in_session) {
+        resolve_slot();
+        here = session_point(slot ? slot->eligible_open_ms : label);
+    }
     if (!here.in_session) return;
     context.in_session = true;
     // In session on this bar's own session day.
     const auto same_day = [&](int64_t other) {
-        const auto other_slot = native_calendar::interval_containing(
-            calendar_, script_tf_, input_tf_, other, calendar_memo_);
-        const SessionPoint there = session_point(
-            other_slot ? other_slot->eligible_open_ms : other);
+        SessionPoint there;
+        if (utc) there = session_point(other);
+        if (!there.in_session) there = eligible_session_point(other);
         return there.in_session && there.ordinal && here.ordinal
             && *there.ordinal == *here.ordinal;
     };
@@ -7313,12 +7365,14 @@ void NativeExecutionConsumer::present_session_day(NativeDecisionContext& context
             ? std::optional<int64_t>(pumped_last_label_)
             : pumped_script_label(script_.first_index - 1);
     }
+    if (!run_start && !before) resolve_slot();
     if (!run_start && !before && slot) {
         // A previous eligible input slot ON THIS session day suffices to
         // establish that this bar does not open it. If none exists, the
         // predecessor is on another day (or absent). Walk this day's spans
         // backwards, skipping any declared closed window, then resolve the
         // slot at the last eligible instant before this script interval.
+        const int64_t here_ms = slot->eligible_open_ms;
         if (!session_day_memo_ || !session_day_memo_->holds(here_ms)) {
             session_day_memo_ = native_calendar::session_day_at(
                 calendar_, here_ms, calendar_memo_);
@@ -7358,10 +7412,20 @@ void NativeExecutionConsumer::present_session_day(NativeDecisionContext& context
     } else {
         // Nothing held after the bar: the calendar's next eligible input
         // slot, which jumps across a declared break without ending the day.
+        resolve_slot();
         const bool scheduled = slot && !same_day(slot->next_input_open_ms);
         context.closes_session_day = run_end || scheduled;
         context.closes_session_day_open_ended = scheduled;
     }
+}
+
+// Out of line, so the neighbour reading present_session_day inlines stays the
+// session point alone on its UTC shortcut.
+[[gnu::noinline]] NativeExecutionConsumer::SessionPoint
+NativeExecutionConsumer::eligible_session_point(int64_t ms) const {
+    const auto slot = native_calendar::interval_containing(
+        calendar_, script_tf_, input_tf_, ms, calendar_memo_);
+    return session_point(slot ? slot->eligible_open_ms : ms);
 }
 
 // (in session, session-day ordinal) of one instant, through the memo of the
@@ -7541,7 +7605,9 @@ void NativeExecutionConsumer::deliver_intrabar_script(
     }
 
     // A sampled intrabar path re-evaluates the margin model at each delivered
-    // sample instead of at the containing bar's remaining waypoints.
+    // sample of a continuous path (IntrabarSample, below) instead of at the
+    // containing bar's remaining waypoints; a one-price distribution path, at
+    // its first sample and after fills.
     has_margin_path_ = false;
     // The script bar's sub-bars and one sub-bar's samples, in consumer-owned
     // buffers whose capacity outlives the bar (R5 lane PERF-L1): a lower-path
@@ -7702,6 +7768,19 @@ void NativeExecutionConsumer::deliver_intrabar_script(
                     risk_evaluate(engine, point_frame_view(point), CallbackPhase::PreOpen);
                     if (failed()) return;
                 }
+            } else if (!distribution_samples) {
+                // No whole-bar waypoint model here, so every later sample of a
+                // continuous path is a check point of its own, measured at its
+                // price before it is matched: a mark-check liquidation rests at
+                // that sample, and the segment into it (or, at a sub-bar's
+                // open, the segment out of it) reaches it there. A one-price
+                // distribution sample is not offered one: a request armed at a
+                // discrete point is matched only at a later point, so a
+                // liquidation re-armed at every sample would never be.
+                maintain_margin_liquidation(
+                    engine, make_cursor(point, 0.0), point.coordinate.path_phase, price,
+                    NativeMarginCheckKind::IntrabarSample);
+                if (failed()) return;
             }
             if (distribution_samples || sample_index == 0) {
                 match_discrete(engine, point);
@@ -10651,6 +10730,10 @@ std::optional<double> NativeStrategyHost::native_sized_units(
 std::optional<double> NativeStrategyHost::native_liquidation_price() const {
     return NativeExecutionConsumer::bound(*this)
         .host_liquidation_price(*this);
+}
+
+bool NativeStrategyHost::native_aggregates_input_bars() const {
+    return NativeExecutionConsumer::bound(*this).aggregates_input();
 }
 
 NativeRiskState NativeStrategyHost::native_risk_state() const {

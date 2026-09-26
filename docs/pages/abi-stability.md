@@ -185,24 +185,22 @@ moves -- a declaring host's run is its empty-hook run, value for value -- and
 no C symbol is added: a C host declares both from its `pf_native_callbacks_v1`,
 a table without `on_bar_open` or `on_precommit`.
 
-R5 gap lane P2c gives two TradingView-named public surfaces a generic primary
-spelling without an epoch, because an alias needs none.
-`pf_equity_stats_t::sharpe_tv` / `sortino_tv` are now
-`sharpe_monthly` / `sortino_monthly`: each pair is one `double` behind a C11
-anonymous union of two same-typed members, so `sizeof(pf_equity_stats_t)`
-(120), the field offsets (48, 56) and `offsetof(pf_metrics_t, equity)` (648)
-are unchanged, `static_assert`s in `src/c_abi.cpp` pin them, and a consumer
-compiled against either spelling reads the same storage. The standalone
-`pineforge::exit_legs::lifecycle_v1` enumerators `Domain::Coof` /
-`MagnifierCoof` are now `Domain::FillRecalc` / `MagnifierFillRecalc`, with the
-old names kept as value-identical aliases (`== 1` and `== 3`, underlying type
-still `uint8_t`, `RawTicks` still 4). Both old spellings are DEPRECATED: the C
-fields are removed at the next `PF_ABI_VERSION`, the enumerators at
-`lifecycle_v2`. Serialized report keys are unaffected — a report dictionary <!-- verified HEAD -->
-still carries `sharpe_tv` / `sortino_tv`. Compile the public C header as C11 or
-later (the project's own `CMAKE_C_STANDARD` is 11 and the native C examples
-document `cc -std=c11`); strict C99 accepts the anonymous union with a
-`-Wc11-extensions` warning. Rulings of record: ADR-0001, "Deprecated public
+R5 gap lane P2c gave two TradingView-named public surfaces a generic primary
+spelling without an epoch, because an alias needs none, and lane REL10 removed
+the old spellings for 1.0 without one, because removing an alias moves
+nothing. The C fields are `pf_equity_stats_t::sharpe_monthly` /
+`sortino_monthly` (pre-1.0 also `sharpe_tv` / `sortino_tv`):
+`sizeof(pf_equity_stats_t)` (120), the field offsets (48, 56) and
+`offsetof(pf_metrics_t, equity)` (648) are unchanged, and `static_assert`s in
+`src/c_abi.cpp` pin them. The standalone `pineforge::exit_legs::lifecycle_v1`
+enumerators are `Domain::FillRecalc` / `MagnifierFillRecalc` (pre-1.0 also
+`Coof` / `MagnifierCoof`), still `== 1` and `== 3`, underlying type still
+`uint8_t`, `RawTicks` still 4. `test_removed_public_spellings` holds that each
+old spelling fails to compile. Serialized report keys are unaffected: a report
+dictionary still carries `sharpe_tv` / `sortino_tv`
+(`scripts/test_report_schema_keys.py`). With the anonymous union gone, the
+public C headers are plain C99, which `test_native_c_api_c99` compiles at
+`-std=c99 -pedantic-errors`. Rulings of record: ADR-0001, "Deprecated public
 spellings".
 
 The two relocation manifests remain reviewed descriptions of the v16→v18 source
@@ -324,6 +322,17 @@ v19fix-cancel-at-1000, v19fix-gapped-stop-cancel and
 v19fix-gapped-stop-cancel-after-pair show TradingView never does; the values
 the tree pins were re-pinned once more, each marked "expectation corrected
 (V19-FIX, ...)".
+R5 lane H-THIN moves them once more, inside the unreleased v19 epoch and with
+the source extension still v4, in one hash step. The Pine host no longer owns
+lot excursions: it keeps the kernel's `owns_lot_excursions()` default, so the
+extension's fold no longer carries the retired host model's state (its
+excursion caches and level fills), and every value that folds the extension
+moves. A default `strategy.exit(from_entry)` under FIFO now reserves its
+entry's own quantity, the oldest lots first, as TradingView's pyramiding tape
+books it, so the witnesses whose seeded storms exercise it move their trades
+too. The corpus moves only where the excursion cells moved toward TradingView
+(19 probes); the values the tree pins were re-pinned once more, each marked
+"expectation corrected (H-THIN, ...)" with the value's cause.
 Stable `RunIdentity` / `RequestHandle` / `Birth` remain
 `native_order_v1`; request, core, and event values own `native_order_v7`.
 Terms receipts, attempted terms, deferred
@@ -354,17 +363,30 @@ lift the missing surface into the public ABI.
 
 ## Version macros
 
-The generated `<pineforge/version.h>` exposes, for this tree's `VERSION`
-(0.14.0):
+The generated `<pineforge/version.h>` exposes, for a `VERSION` of
+`1.0.0-rc.1` built from a tarball or at that release candidate's tag:
 
 ```c
-#define PINEFORGE_VERSION_MAJOR  0
-#define PINEFORGE_VERSION_MINOR  14
+#define PINEFORGE_VERSION_MAJOR  1
+#define PINEFORGE_VERSION_MINOR  0
 #define PINEFORGE_VERSION_PATCH  0
-#define PINEFORGE_VERSION_STRING "0.14.0"
-#define PINEFORGE_VERSION_FULL   "0.14.0"    /* or "0.14.0-3-gabc1234-dirty" */
+#define PINEFORGE_VERSION_STRING "1.0.0"
+#define PINEFORGE_VERSION_FULL   "1.0.0-rc.1"   /* or "1.0.0-rc.1-3-gabc1234-dirty" */
 #define PINEFORGE_GIT_SHA        "<sha>"
 ```
+
+`PINEFORGE_VERSION_STRING` is MAJOR.MINOR.PATCH, as are CMake's
+`project(VERSION)`, the package's `PineForge_VERSION` and #pf_version_get; a
+release candidate's `-rc.N` lives in `PINEFORGE_VERSION_FULL`, the package's
+`PineForge_VERSION_FULL` and #pf_version_string. A final release reads the
+same with no `-rc.N`: `FULL` is `"1.0.0"`. The trailing `-N-gSHA[-dirty]` is
+`git describe`'s, for a git checkout past its tag; a tarball build, or one
+configured with `-DPINEFORGE_VERSION_SOURCE=FILE`, carries the `VERSION` file
+exactly. `scripts/test_cmake_version_source.py` (CTest
+`test_cmake_version_source`) holds the resolution, from `VERSION` and from a
+tag; the installed-package smoke test that `scripts/ci_verify.py` runs
+(`cmake/smoke_consumer`) holds that the package, the installed header and the
+linked library name one full version, and that it is `VERSION` exactly.
 
 Use these for compile-time gating of features added in later minors:
 

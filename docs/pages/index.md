@@ -42,7 +42,8 @@ the one a host programs against.
   Read **[Native engine](@ref native_engine)** for `NativeStrategyHost`,
   `configure_native`, execution terms and the C ABI contract. Coming from
   PineScript, start with **[PineScript to native C++](@ref pine_to_native)** —
-  every `strategy.*` builtin mapped to its C++ and C spelling, the runnable
+  every `strategy.*` builtin mapped to its C++ spelling and, where the 1.0 C
+  surface has one, its C spelling, the runnable
   host that exercises each, and a six-feature strategy migrated end to end.
 
 - <b class="tab-title">I'm integrating from CMake</b>
@@ -218,6 +219,7 @@ Build the generated strategy module with the repository recipe (or
 | [Report schema](@ref report_schema) | `pf_report_t` field by field, including the equity curve. |
 | [Trading metrics reference](@ref metrics) | Every `pf_metrics_t` field: units, NaN rules, validation status. |
 | [ABI stability](@ref abi_stability) | The append-only guarantee, and the internal C++ epochs behind it. |
+| [Public contract for 1.0](@ref public_contract) | What the version number promises from 1.0.0: the C ABI, the native C++ API, the script ABI epoch, the C-surface boundary, and the pairing with codegen. |
 | [ABI v4 live surface](@ref live_surface) | The default-off live accessors: abort, realtime tail, broker-state hash, pending-order mirror. |
 | [FFI from Python](@ref ffi_python) | A ctypes mirror of every POD in `pineforge.h`. |
 
@@ -226,7 +228,7 @@ Build the generated strategy module with the repository recipe (or
 | Page | What it covers |
 | --- | --- |
 | [Native engine](@ref native_engine) | The reference: lifecycle, run spec, request vocabulary, the C ABI contract. |
-| [PineScript to native C++](@ref pine_to_native) | Every Pine builtin mapped to its C++ and C spelling, with a worked migration. |
+| [PineScript to native C++](@ref pine_to_native) | Every Pine builtin mapped to its C++ spelling and, where the 1.0 C surface has one, its C spelling, with a worked migration. |
 | [Contributing as an LLM](@ref contributing_llm) | The repo map, the boundary invariants and the lane recipe, for an agent. |
 
 **How execution works**

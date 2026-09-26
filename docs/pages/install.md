@@ -55,24 +55,35 @@ ${prefix}/
 
 ## Docker
 
-The published image bundles the runtime plus a one-shot transpile + run
-harness for ad-hoc strategy execution.
+This repository publishes no container image: a release attaches the
+prebuilt static-lib tarballs above to its GitHub release and notifies the
+release hub, pineforge-release. The hub publishes the image,
+`ghcr.io/pineforge-4pass/pineforge-release`: this runtime, the
+`pineforge-codegen` transpiler of the same version and the one-shot transpile
++ run harness of `docker/`, built from the release's static-lib tarball. A
+stable release is tagged `X.Y.Z`, `X.Y`, `latest` and
+`engine<E>-codegen<C>`; a release candidate only under its exact version
+(for example `1.0.0-rc.1`) and `engine<E>-codegen<C>`. Pin the tag of the
+release you build against.
 
 ```bash
-docker pull ghcr.io/pineforge-4pass/pineforge-engine:latest
+docker pull ghcr.io/pineforge-4pass/pineforge-release:latest
 ```
 
-Run the tutorial MACD strategy entirely inside the container:
+Run the tutorial MACD strategy entirely inside the container; the image
+transpiles the `.pine` with its own codegen:
 
 ```bash
 docker run --rm \
-  -v "$(pwd)/tutorial/macd/generated.cpp:/in/strategy.cpp:ro" \
+  -v "$(pwd)/tutorial/macd/strategy.pine:/in/strategy.pine:ro" \
   -v "$(pwd)/tutorial/data/btcusdt_15m_7d.csv:/in/ohlcv.csv:ro" \
-  ghcr.io/pineforge-4pass/pineforge-engine:latest > report.json
+  ghcr.io/pineforge-4pass/pineforge-release:latest > report.json
 ```
 
 See [`docker/README.md`](https://github.com/pineforge-4pass/pineforge-engine/blob/main/docker/README.md)
-for the full mount + JSON schema reference.
+for the full mount + JSON schema reference. This tree keeps that harness
+(`docker/entrypoint.sh`, `docker/run_json.py`) but no Dockerfile; the image's
+Dockerfile is pineforge-release's.
 
 ## Verifying the install
 
@@ -81,10 +92,14 @@ A self-contained smoke test ships under `cmake/smoke_consumer/`:
 ```bash
 cmake -S cmake/smoke_consumer -B build-smoke
 cmake --build build-smoke
-./build-smoke/smoke_version     # prints the runtime version
+./build-smoke/smoke_version     # prints the runtime version string
 ```
 
-If this prints the version you installed (`0.14.0` for this tree's `VERSION`)
-you're done. The configure step also checks that the package hands its
-consumers `-ffp-contract=off`, and the program exits 1 instead if its own
-multiply-add was fused.
+If this prints the version you installed you're done: `pf_version_string()`,
+which is the `VERSION` file exactly (a release candidate's `-rc.N` included)
+for a tarball build or one configured with `-DPINEFORGE_VERSION_SOURCE=FILE`,
+and `git describe`'s descriptor for a build from a git checkout. The program
+exits 1 instead if the CMake package's `PineForge_VERSION_FULL`, the installed
+`pineforge/version.h` and the linked library name different versions, or if
+its own multiply-add was fused; the configure step also checks that the
+package hands its consumers `-ffp-contract=off`.

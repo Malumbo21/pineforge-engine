@@ -115,9 +115,11 @@ Lifecycle-aware compiled modules reset Pine variables, indicator/history buffers
 
 ## Three front doors
 
-The engine can be driven three ways. All three run the same kernel, so they
-match trigger, price fills, book lots and settle identically; what differs is
-who writes the strategy and who owns TradingView's quirks.
+The engine can be driven three ways. All three run the same kernel, so for the
+same requests they match trigger, price fills, book lots and settle
+identically; what differs is who writes the strategy, who owns TradingView's
+quirks and, for C, the C++ capabilities the 1.0 C surface does not spell (the
+1.0 C boundary table in the [native engine guide](docs/pages/native-engine.md)).
 
 ### 1. PineScript, through codegen
 
@@ -192,7 +194,8 @@ strategy_native_run_v1(s, bars, n, &report);
 
 **Coming from PineScript?** [PineScript to native C++](docs/pages/pine-to-native.md)
 maps every `strategy.*` builtin, the 19 covered `strategy()` declaration
-parameters and every `request.*` form to its C++ **and** C spelling, names the example that
+parameters and every `request.*` form to its C++ spelling and, where the 1.0 C surface has one,
+its C spelling, names the example that
 exercises each, and walks one six-feature strategy from Pine to a native host
 end to end. The [native engine guide](docs/pages/native-engine.md) is the
 reference underneath it.
@@ -390,13 +393,15 @@ The gates a pull request passes, one line each:
 
 | Gate | Command | What it refuses |
 |---|---|---|
-| TradingView parity | `./scripts/check_corpus_parity.sh --subset` | A trade that moved: 30 probes re-run and hashed against `scripts/corpus_parity_baseline.txt`. The full 312-probe sweep (`--subset` dropped) runs nightly. |
+| TradingView parity | `./scripts/check_corpus_parity.sh --subset` | A trade that moved: 54 probes re-run and hashed against `scripts/corpus_parity_baseline.txt`. The full 312-probe sweep (`--subset` dropped) runs nightly. |
 | CTest row floors | `ci_verify.py release` / `kernel` | A test row that vanished: each profile counts the rows that actually ran against a floor. |
 | Kernel residuals | `scripts/check_kernel_residuals.py` | A TradingView-shaped name reaching the kernel archive or its installed headers without an ADR 0001 row. |
+| Kernel seams | `scripts/check_kernel_seam_rows.py` | A kernel `source_*` seam, or a kernel member or row field the source layer writes, with no ADR 0001 row. |
 | Feature rulings | `scripts/check_native_feature_rulings.py` | A `NativeRunSpec` field the adapter does not declare and the ADR does not rule. |
-| C surface | `scripts/check_c_abi_runtime.py`, `scripts/check_native_c_api_surface.py` | A `PF_API` export added without its inventory row; a public host member with no C spelling and no recorded reason. |
+| C surface | `scripts/check_c_abi_runtime.py`, `scripts/check_native_c_api_surface.py` | A `PF_API` export added without its inventory row; a public host member with no C spelling and no recorded reason; a 1.0 C boundary row whose gap has closed or that the native engine guide no longer lists. |
 | Twin parity | `scripts/check_twin_parity.py` | A frozen assertion quietly rewritten instead of a behaviour change being argued. |
 | Documentation | `scripts/check_doc_anchors.py`, `scripts/check_doc_lint.py`, `scripts/check_pine_to_native_coverage.py` | A `file:line` citation that no longer points at its symbol; a stale epoch, roadmap label or negative claim; a Pine builtin with no row on the migration page. |
+| Doc reverts | `scripts/check_doc_reverts.py` | A published sentence deleted, or older wording restored over newer, by a commit whose message does not name it. |
 
 New here? [CONTRIBUTING.md](CONTRIBUTING.md) is the human walkthrough of all of
 the above; [Contributing as an LLM](docs/pages/contributing-llm.md) is the same
@@ -425,6 +430,11 @@ TradingView ties some day-boundary logic (intraday order caps, session rollovers
 ---
 
 ## Public C ABI
+
+What the version number promises from 1.0.0 — for this C ABI, the native C++
+API, the script ABI epoch and the pairing with codegen — is the
+[public contract](docs/pages/public-contract.md); what a 0.x user must act on
+is in [CHANGELOG.md](CHANGELOG.md).
 
 A built strategy `.so` exposes 66 compiled-strategy `PF_API` declarations
 (58 runtime implementations plus eight generated exports) plus 43 native-host
@@ -499,7 +509,10 @@ The header's **COVERAGE** block lists every public member of
 `scripts/check_native_c_api_surface.py` proves that list is exactly that
 class's public surface — a member added without a row, a row naming a member
 that no longer exists, or a spelling naming a symbol the C headers do not
-declare all fail CI.
+declare all fail CI. Every other C++ capability the 1.0 C surface lacks is a
+row of the 1.0 C boundary table in the native engine guide, and a
+`C_V1_EXCLUSIONS` row of the same checker fails when that gap closes or its C++
+declaration goes.
 
 Every struct is tagged and size-prefixed (`struct_size`, `version`); an unknown
 size, version or enumerator is refused with a documented negative status and
@@ -572,12 +585,13 @@ docs/                   coverage map, Pine v6 audit, Doxygen site (cdocs.pinefor
 cmake/                  PineForgeConfig.cmake.in + the find_package smoke consumer
 ```
 
-Documentation: [C ABI reference](https://cdocs.pineforge.dev) · [Getting started](https://cdocs.pineforge.dev/getting_started.html) · [MACD tutorial](https://cdocs.pineforge.dev/tutorial_macd.html) · [Streaming](https://cdocs.pineforge.dev/streaming.html) · [Metrics reference](https://cdocs.pineforge.dev/metrics.html) · [FFI from Python](https://cdocs.pineforge.dev/ffi_python.html) · [Rust](https://cdocs.pineforge.dev/examples_rust.html) · [CMake integration](https://cdocs.pineforge.dev/integration_cmake.html) · [ABI stability](https://cdocs.pineforge.dev/abi_stability.html) · [Coverage](https://cdocs.pineforge.dev/coverage.html). The site rebuilds on every push to `main`.
+Documentation: [C ABI reference](https://cdocs.pineforge.dev) · [Getting started](https://cdocs.pineforge.dev/getting_started.html) · [MACD tutorial](https://cdocs.pineforge.dev/tutorial_macd.html) · [Streaming](https://cdocs.pineforge.dev/streaming.html) · [Metrics reference](https://cdocs.pineforge.dev/metrics.html) · [FFI from Python](https://cdocs.pineforge.dev/ffi_python.html) · [Rust](https://cdocs.pineforge.dev/examples_rust.html) · [CMake integration](https://cdocs.pineforge.dev/integration_cmake.html) · [ABI stability](https://cdocs.pineforge.dev/abi_stability.html) · [Public contract](https://cdocs.pineforge.dev/public_contract.html) · [Coverage](https://cdocs.pineforge.dev/coverage.html). The site rebuilds on every push to `main`.
 
 ---
 
 ## Releases
 
+- **1.0.0** — the release notes are [CHANGELOG.md](CHANGELOG.md), and what 1.x promises is the [public contract](docs/pages/public-contract.md).
 - **Unreleased** (branch `live/abi-v4`) — ABI v4 live surface for `pineforge-live`: 24 new default-off exports (cooperative abort, realtime tail, probe-suppress tail logic, forced path order, a per-bar broker-state hash, the pending-order book as a generated POD mirror, closed-trade id/comment/close-cause, position and equity accessors). No flag changes a historical run: `scripts/live_flags_off_identity.py` (312 corpus probes, 0 differ vs the pre-v4 branch point), `scripts/live_flags_lane.py` (312 probes, 0 positives, 130 open-at-end trades subtracted), and `scripts/bar_identity_lane.py` (row 1: 222,295 bars compared, 2 explained open divergences, 0 else) all pass. 56 symbols.
 - **v0.13.0** (2026-09-05) — the parity campaign, rounds 1–11: TradingView's broker rules pinned with sensor exports and landed with replay tests — ten-significant-digit money, trailing-stop restarts, zero-offset trails, declined-reversal bracket legs, the surviving `strategy.close`, sparse `ta.atr`/`ta.tr`, pivot tick snap, same-bar entry/close transactions, early-close higher-timeframe buckets, 64-bit epoch arrays. Closed test 3,880/3,881; corpus 309/309. ABI v3, 32 symbols, 198 tests.
 - **v0.7 – v0.12** (June–August 2026) — native and auxiliary `request.security()` feeds, ABI v2 metrics + equity curve, streaming mode, range-end accounting. See [GitHub releases](https://github.com/pineforge-4pass/pineforge-engine/releases).

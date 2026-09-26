@@ -50,6 +50,7 @@
 #include "../src/native_execution_consumer.hpp"
 #include "native_match_book_fixture.hpp"
 #include "native_order_full_fold.hpp"
+#include "ratio_timing.hpp"
 
 #include <algorithm>
 #include <array>
@@ -483,7 +484,9 @@ private:
             exit.kind = Kind::Exit;
             exit.trigger = rng_.below(3);
             exit.intent = rng_.below(3);
-            exit.level = ref_ + (rng_.percent(50) ? 1 : -1) * rng_.between(4, 16);
+            // One draw per statement: the operands of '*' are unsequenced.
+            const int side = rng_.percent(50) ? 1 : -1;
+            exit.level = ref_ + side * rng_.between(4, 16);
             const int tie = rng_.percent(30) ? pick_live(Kind::Exit) : -1;
             if (tie >= 0) {
                 const Slot& other = slots_[static_cast<std::size_t>(tie)];
@@ -499,7 +502,8 @@ private:
                 place(exit);
                 Slot sibling = exit;
                 sibling.trigger = exit.trigger == 0 ? 1 : 0;
-                sibling.level = ref_ + (rng_.percent(50) ? 1 : -1) * rng_.between(4, 16);
+                const int sibling_side = rng_.percent(50) ? 1 : -1;
+                sibling.level = ref_ + sibling_side * rng_.between(4, 16);
                 place(sibling);
                 return;
             }
@@ -1120,25 +1124,32 @@ double continuation_seconds(int bars, int repeats) {
     return seconds;
 }
 
+// Each leg is repeated until it has at least 100 ms of CPU; a timed leg under
+// that doubles the repeats and times both legs again (R5 lane CI-FLAKE,
+// tests/ratio_timing.hpp).
 void scaling() {
     constexpr int kInitialSmall = 2000;
-    constexpr int kMaxRepeats = 256;
+    // The repeats grow to at most this many; an Apple M4 Max needs 64.
+    constexpr int kMaxRepeats = 1024;
     constexpr double kMinLegSeconds = 0.1;
-    int repeats = 1;
-    while (continuation_seconds(kInitialSmall, repeats) < kMinLegSeconds
-           && repeats < kMaxRepeats / 2) {
-        repeats *= 2;
-    }
+    int repeats = ratio_timing::presized(1, kMaxRepeats, kMinLegSeconds, [&](int count) {
+        return continuation_seconds(kInitialSmall, count);
+    });
     double best_small = 1e9, best_large = 1e9;
-    for (int round = 0; round < 5; ++round) {
-        if (round % 2 == 0) {
-            best_small = std::min(best_small, continuation_seconds(kInitialSmall, repeats));
-            best_large = std::min(best_large, continuation_seconds(4 * kInitialSmall, repeats));
-        } else {
-            best_large = std::min(best_large, continuation_seconds(4 * kInitialSmall, repeats));
-            best_small = std::min(best_small, continuation_seconds(kInitialSmall, repeats));
+    ratio_timing::time_measurable_legs(repeats, kMaxRepeats, kMinLegSeconds, [&](int count) {
+        best_small = 1e9;
+        best_large = 1e9;
+        for (int round = 0; round < 5; ++round) {
+            if (round % 2 == 0) {
+                best_small = std::min(best_small, continuation_seconds(kInitialSmall, count));
+                best_large = std::min(best_large, continuation_seconds(4 * kInitialSmall, count));
+            } else {
+                best_large = std::min(best_large, continuation_seconds(4 * kInitialSmall, count));
+                best_small = std::min(best_small, continuation_seconds(kInitialSmall, count));
+            }
         }
-    }
+        return std::min(best_small, best_large);
+    });
     const double ratio = best_large / best_small;
     CHECK(best_small >= kMinLegSeconds);
     CHECK(best_large >= kMinLegSeconds);

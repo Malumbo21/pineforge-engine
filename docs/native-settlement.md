@@ -119,7 +119,8 @@ refused, typed, as above -- the settlement's own refusal shows beforehand in
 boundary re-check below are made at execution only; and `Flatten` is never
 refused for a quantity. On a quantity grid (`NativeRunSpec::quantity_grid`) the
 book's own quantities are on the grid, for a request that settles them in one
-fill (no point budget, no group deduction pending against it): a
+fill (no point budget, no group deduction pending against it that takes any; a
+pending total its units absorb takes none, R5 lane K-OCA-KEEP): a
 `ScopeFraction` whose product is its scope's held total as it stands --
 `fraction == 1` of the gross scope -- resolves to that total, which the grid
 does not floor (a scope net of siblings' claims, or frozen at acceptance at
@@ -220,15 +221,29 @@ it -- the closes the exact-sum rule above now closes lot by lot (R5 lane
 K-ULP3).
 The Pine source host keeps one quantity rule of its own: after every applied
 execution, `source::PineStrategyHost::on_native_applied` erases any lot of at
-most `kQtyEpsilon` (`1e-10`) without a closing row, the settle rule of the
-legacy engine it restates. That is source-layer TradingView policy, not the
-kernel's; since K-ULP3 an exact-sum close no longer leaves such a lot for it.
+most `kQtyEpsilon` (`1e-10`) from the book it shares with the kernel, with no
+closing row or event, and resets the position when nothing is left. It is
+broader than the legacy engine's settle rule: `ab9714be` reset only a whole
+book at or under `kQtyEpsilon` and kept a dust lot beside a live one, where the
+sweep erases it inside a live book too. It is measured source-layer
+TradingView policy, not the kernel's: TradingView's decimal quantities leave no
+remnant row (`lab tv` tape `hm-g232-decimal-dust`), which the Pine host books
+row for row while a bare host books four 2.8e-17-unit dust rows beside them
+(`tests/test_pine_dust_sweep_paired.cpp`). Since K-ULP3 an exact-sum close no
+longer leaves such a lot, but a decimal sum binary64 misses (0.1 + 0.2 closed
+by 0.3) still does.
 The adapter does not declare the kernel's quantity tolerance (ADR-0001,
 "Kernel capabilities the Pine adapter does not declare"): its FIFO endpoint
 test settles a snapped prefix as a selected `Flatten`, charged the lots it
 holds, where the tolerance charges a `Reduce` its request, and its sweep
-erases dust without a row, where the kernel books every lot it closes. Whether
-the adapter can move onto the tolerance is a measurement for a later lane.
+erases dust without a row, where the kernel books every lot it closes. R5
+lane H-THIN measured the sweep with every other quantity epsilon of the Pine
+host and adapter, 85 comparisons, each evaluated in its epsilon form and its
+exact form over 5,500 seeded runs and the 610 CTest rows that link the
+library (design §3.9): 32 decide somewhere, 50 never do, three are reached
+by nothing. Made exact, the sweep moves 30 of the runs and fails its tape
+row, as do the lot floor's, the percent-exit floor's and the margin restore's
+`+1e-6` slack on theirs. The adapter keeps all of them.
 
 ## Reversal to an exact exposure
 

@@ -65,8 +65,8 @@ Two consequences that are easy to miss:
 | Add a generic broker/matching capability | the kernel (`src/engine_*`, `src/native_*`) | make it opt-in, add its ADR 0001 ruling row, add a kernel-only test, and add an `examples/native/` host if the ruling is *native-only* |
 | Add or change a TA class | the right `ta_*.cpp` partition + its declaration in `<pineforge/ta.hpp>` | add a unit test against a hand-computed series |
 | Change what codegen may emit | the contract, not this repo's runtime | say so in the PR; the transpiler lives in `pineforge-codegen-oss` |
-| Add a runtime `PF_API` export | `src/c_abi.cpp` + `include/pineforge/pineforge.h` | update `EXPECTED_RUNTIME` check_c_abi_runtime.py:28, the ctypes harnesses, and the README symbol table — all in the same commit |
-| Add a C kernel-driving export | `src/native_c_host.cpp` + `include/pineforge/native_c_api.h` | update that header's COVERAGE block; `scripts/check_native_c_api_surface.py` proves it is exactly the host's public surface |
+| Add a runtime `PF_API` export | `src/c_abi.cpp` + `include/pineforge/pineforge.h` | update `EXPECTED_RUNTIME` check_c_abi_runtime.py:29, the ctypes harnesses, and the README symbol table — all in the same commit |
+| Add a C kernel-driving export | `src/native_c_host.cpp` + `include/pineforge/native_c_api.h` | update that header's COVERAGE block, and retire the 1.0 C boundary row the export closes; `scripts/check_native_c_api_surface.py` proves the block is exactly the host's public surface and fails on a closed gap |
 | Document something | `docs/pages/`, `README.md`, this file | cite the tree by `file:line`; the anchor guard checks that the line still holds the symbol |
 
 ## Development setup
@@ -135,22 +135,25 @@ What each gate refuses:
 | Gate | Refuses |
 |---|---|
 | `check_c_abi_runtime.py` | a `PF_API` runtime export added or removed without its inventory row |
-| `check_native_c_api_surface.py` | a public `NativeStrategyHost` member with no C spelling and no recorded reason |
+| `check_native_c_api_surface.py` | a public `NativeStrategyHost` member with no C spelling and no recorded reason; a 1.0 C boundary row whose gap closed, or that `docs/pages/native-engine.md` stopped listing |
 | `check_native_feature_rulings.py` | a `NativeRunSpec` field the adapter does not declare and the ADR does not rule |
 | `check_kernel_residuals.py` | a TradingView-shaped name reaching the kernel archive or its installed headers without an ADR 0001 row |
+| `check_kernel_seam_rows.py` | a kernel `virtual source_*` seam, or a kernel member or row field the source layer writes, that no ADR 0001 row names in its first cell |
 | `check_native_cpp_versions.py`, `check_aggregate_cpp_versions.py` | an internal C++ epoch moved without its consumers |
 | `check_adapter_spec_shadowing.py` | the adapter setting a kernel field it is ruled not to set |
 | `check_twin_parity.py` | a frozen test assertion rewritten instead of a behaviour change being argued |
+| `check_rng_draw_order.py` | two random draws in one call's arguments or one operator's operands, whose order the compiler picks (x86-64 GCC and AppleClang would test different batteries) |
 | `check_doc_anchors.py` | a `file:line` citation that no longer points at the symbol it claims |
 | `check_doc_lint.py` | a stale epoch, a roadmap label or a "there is no … yet" claim the tree has falsified | <!-- verified HEAD -->
 | `check_pine_to_native_coverage.py` | a Pine builtin with no row on the migration page |
+| `check_doc_reverts.py` | a published sentence deleted, or older wording restored over newer, by a commit whose message does not name it (by the lane label or hash of the commit that wrote it, or by six of its words) |
 | the CTest row **floors** | a test row that vanished from a profile |
 
 ### The floors
 
 `ci_verify.py` counts the CTest rows that actually **ran** and fails below a
-floor — `KERNEL_MIN_TESTS` ci_verify.py:242 and `RELEASE_MIN_TESTS`
-ci_verify.py:350.
+floor — `KERNEL_MIN_TESTS` ci_verify.py:260 and `RELEASE_MIN_TESTS`
+ci_verify.py:393.
 A deleted or silently skipped row is a failure, not a quieter run. If your
 change adds rows, raise the floor in the same commit and say by how much; if it
 legitimately removes one, lower it deliberately and say why. `--min-tests`
@@ -162,7 +165,7 @@ The validation corpus is a **byte oracle**, not a smoke test.
 
 ```bash
 ./scripts/check_corpus_parity.sh            # the full 312-probe sweep, ~32 min
-./scripts/check_corpus_parity.sh --subset   # the 30 probes a pull request waits for
+./scripts/check_corpus_parity.sh --subset   # the 54 probes a pull request waits for
 ```
 
 It checks the corpus out at the gitlink this repository records, refuses to
@@ -186,7 +189,7 @@ python3 scripts/corpus_trades_identity.py --update
 ```
 
 The subset runs as a required check on a pull request; the full sweep runs
-nightly and on demand. The details, including which 30 probes and why, are in
+nightly and on demand. The details, including which 54 probes and why, are in
 `docs/ci.md`.
 
 ### "Expectation corrected"
@@ -320,3 +323,12 @@ License 2.0 (the same license as the rest of the project). See
 4. **Benchmark AGPL** — optional `benchmarks/` tooling installs AGPL-covered
    PineTS. Default CI stays on ctest only so a minimal clone is not forced to
    pull AGPL into the library build.
+5. **Cut the release** — dispatch `.github/workflows/release.yml` (Actions →
+   Release → Run workflow); rehearse with `dry_run` first. A dry run computes
+   the version with `scripts/release_version.py`, builds, installs, verifies
+   and packs every prebuilt tarball, and commits, tags, releases, uploads and
+   dispatches nothing. A release candidate is `override` `X.Y.Z-rc.N`: a
+   GitHub prerelease, dispatched to the hub with `prerelease: true`. The final
+   release is `override` `X.Y.Z` (a candidate has no `bump`). From 1.0.0 the
+   engine and codegen release one version number, prerelease included; see
+   the [public contract](docs/pages/public-contract.md).
