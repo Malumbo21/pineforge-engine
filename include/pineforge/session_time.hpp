@@ -144,18 +144,18 @@ int64_t session_trading_day_open_ms(int64_t bar_ms,
 // ---------------------------------------------------------------------------
 // Session predicates backing session.is* Pine v6 variables.
 //
-// LIMITATION: The engine has a single syminfo.session string and cannot
-// distinguish RTH from ETH.  Therefore:
-//   session.isfirstbar_regular  == session.isfirstbar
-//   session.islastbar_regular   == session.islastbar
-// in the current architecture.  Future work: add SymInfo.regular_session
-// field for strict RTH separation (deferred — separate sprint).
+// syminfo.session is the regular session: session.isfirstbar_regular /
+// islastbar_regular mark its day, and session.isfirstbar / islastbar the
+// chart's, which on an extended-hours chart takes in the pre- and post-market
+// bars the chart holds (PineStrategyHost's session flags, tests/
+// test_session_extended_day_tape.cpp). A chart without extended hours holds
+// none, so there each pair is one bar.
 //
-// Pre/post-market predicates assume standard US ETH windows:
-//   premarket : 04:00 – RTH_open  (RTH_open parsed from session string)
-//   postmarket: RTH_close – 20:00
-// For exchanges with non-standard ETH (e.g. LSE auctions), accuracy may
-// degrade.  This is documented behaviour, not a bug.
+// Pre/post-market predicates assume standard US ETH windows around the day:
+//   premarket : 04:00 – its first open, postmarket: its last close – 20:00,
+// over every window in any order; a break between windows is neither, and an
+// overnight or 24-hour session has neither (TradingView's TSE, HKEX, CBOT, CME
+// and OANDA tapes, tests/test_session_prepost_windows_tape.cpp).
 // ---------------------------------------------------------------------------
 
 bool session_in_market(const std::string& session,

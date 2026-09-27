@@ -1396,6 +1396,14 @@ list(APPEND TEST_SOURCES test_short_seed_report_swap)
 list(APPEND TEST_SOURCES test_pine_dust_sweep_paired)
 #   G2-36 session.ismarket: the generated predicate, the kernel's in_session.
 list(APPEND TEST_SOURCES test_session_ismarket_tape)
+#   K-SESSION-WINDOWS F6: pre- and post-market over every session window.
+list(APPEND TEST_SOURCES test_session_prepost_windows_tape)
+#   K-SESSION-WINDOWS F1: a script bar's session-day facts at its own label.
+list(APPEND TEST_SOURCES test_native_session_day_bar_open)
+#   K-SESSION-WINDOWS F2: the chart's session day and the regular one.
+list(APPEND TEST_SOURCES test_session_extended_day_tape)
+#   K-SESSION-WINDOWS F7: an aggregated bar opening inside a session break.
+list(APPEND TEST_SOURCES test_session_break_open_bar_tape)
 #   F1(e) an aggregated process_orders_on_close script reading entry_bar_index.
 list(APPEND TEST_SOURCES test_aggregated_entry_bar_index_tape)
 #   F1's magnified residual on the aggregated chart.
@@ -2221,6 +2229,15 @@ if(TARGET test_pooc_stop_reentry_bracket_tapes)
     target_compile_definitions(test_pooc_stop_reentry_bracket_tapes PRIVATE
         PINEFORGE_INT26_REENTRY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pooc_stop_reentry_bracket")
 endif()
+# R5 lane K-SESSION-WINDOWS reads TradingView's session-flag tapes.
+foreach(_pf_ksw_target IN ITEMS test_session_prepost_windows_tape
+        test_native_session_day_bar_open test_session_extended_day_tape
+        test_session_break_open_bar_tape)
+    if(TARGET ${_pf_ksw_target})
+        target_compile_definitions(${_pf_ksw_target} PRIVATE
+            PINEFORGE_KSW_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/session_windows")
+    endif()
+endforeach()
 
 # R5 E21 reads the kernel's own sources to prove BacktestEngine::marked_equity_at
 # is the one implementation of the marked equity. Kernel files only, so the

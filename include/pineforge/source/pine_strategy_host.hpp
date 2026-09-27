@@ -885,9 +885,11 @@ private:
     void scheduler_mark_report_point(std::int64_t script_bar_ts);
     void scheduler_record_broker_hash();
     void capture_script_continuation_hash();
-    // The one writer of the three session flags below: it selects the
-    // kernel's session-day facts of the script bar being published.
+    // The one writer of the session flags below: it selects the kernel's
+    // session-day facts of the script bar being published, and widens the
+    // chart's day by the pre- and post-market bars an extended chart holds.
     void scheduler_update_session_state();
+    void update_extended_session_day(const NativeDecisionContext& facts);
     void adapter_label_bracket_trades(
         const native_order::ExecutionAppliedEvent&, bool from_bracket);
     bool adapter_has_open_entry_id(const std::string&) const;
@@ -1003,18 +1005,27 @@ protected:
     int realtime_tail_horizon_bars_ = 0;
     bool probe_suppress_tail_logic_ = false;
 
-    // The script bar's session flags as generated code reads them:
-    // session.isfirstbar and session.islastbar lower to the last two, and
-    // session_ismarket_ is the in-session fact itself (a generated
-    // session.ismarket calls pine_session_ismarket above instead). They were
-    // BacktestEngine members the kernel only cleared (R5 lane F5 moved them
-    // here). scheduler_update_session_state writes all three from the kernel's
-    // session-day facts before each source callback, and on_native_run_begin
-    // clears them; derived from those facts, they fold into no hash, as the
-    // facts do not.
+    // The script bar's session flags. Generated code reads session.isfirstbar
+    // and session.islastbar from the next two -- and, as the transpiler lowers
+    // them today, their _regular spellings as well, which the last two answer:
+    // the plain pair is the chart's session day, widened by the pre- and
+    // post-market bars an extended-hours chart holds, the _regular pair the
+    // regular session's day, the kernel's facts as they are.
+    // session_ismarket_ is the kernel's in-session fact. A generated chart
+    // session.ismarket does not read it: it asks the session calendar at the
+    // bar's open (the transpiler's _pf_session_market_ helper, e.g.
+    // corpus/validation/symbol-specified/AAPL/session-ismarket-nyse-rth-01),
+    // and one inside a request.security payload calls pine_session_ismarket
+    // above. The flags were BacktestEngine members the kernel only cleared (R5
+    // lane F5 moved them here). scheduler_update_session_state writes them
+    // before each source callback and on_native_run_begin clears them;
+    // derived from the kernel's session-day facts, they fold into no hash, as
+    // the facts do not.
     bool session_ismarket_ = false;
     bool session_isfirstbar_ = false;
     bool session_islastbar_ = false;
+    bool session_isfirstbar_regular_ = false;
+    bool session_islastbar_regular_ = false;
 
     // Live-runtime tail (spec §3.1): once script_tf_seconds_ is known for
     // this run, freeze pine_last_bar_index()/last_bar_time_ at the horizon
