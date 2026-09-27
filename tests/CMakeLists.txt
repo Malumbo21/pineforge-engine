@@ -141,6 +141,9 @@ set(TEST_SOURCES
     test_native_auxiliary_feed
     test_native_auxiliary_feed_stream
     test_native_auxiliary_feed_twin
+    test_native_instrument_feed
+    test_native_instrument_feed_twin
+    test_symbol_request_data
     test_native_risk_limits
     test_native_host_repairs
     test_l8c_short_seed_guards
@@ -1768,6 +1771,13 @@ add_test(
     NAME test_run_strategy_aux_feed
     COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/scripts/test_run_strategy_aux_feed.py
+)
+
+# Lane XSYM-D: the probe's pinned request data (PINEFORGE_REQUESTS_ROOT).
+add_test(
+    NAME test_run_strategy_requests
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_run_strategy_requests.py
 )
 
 add_test(

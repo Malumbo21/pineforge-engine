@@ -54,9 +54,9 @@ Three layers:
 
 ## Symbol inventory
 
-A built strategy `.so` exposes 66 compiled-strategy `PF_API` declarations
-(58 runtime implementations plus eight generated exports) plus 43 native-host
-declarations: 109 `PF_API` exports in total. `nm -gU` also reports libc++'s
+A built strategy `.so` exposes 70 compiled-strategy `PF_API` declarations
+(62 runtime implementations plus eight generated exports) plus 43 native-host
+declarations: 113 `PF_API` exports in total. `nm -gU` also reports libc++'s
 `std::piecewise_construct`; no project-internal C++ symbol is exported. The historical 28-symbol module
 sentence was not a current module count; the grouped table below is a guide,
 not the complete inventory:
@@ -94,7 +94,7 @@ not the complete inventory:
 | `pf_version_string` | @ref pf_version |
 
 Eight per-strategy exports include the five create/run/free lifecycle
-functions. The remaining 58 runtime implementations, including the
+functions. The remaining 62 runtime implementations, including the
 closed-trade incarnation accessor, are force-linked into each strategy library,
 so consumers resolve the same complete ABI from the strategy `.so`. All
 additions remain covered by the minor-version append-only guarantee.
@@ -184,6 +184,18 @@ layout changes (the declaration is kept by the private consumer), no value
 moves -- a declaring host's run is its empty-hook run, value for value -- and
 no C symbol is added: a C host declares both from its `pf_native_callbacks_v1`,
 a table without `on_bar_open` or `on_precommit`.
+
+R5 lane XSYM-D adds four `BacktestEngine` virtuals inside v19, beside
+`set_aux_security_feed`: `set_symbol_feed`, `set_symbol_feed_column`,
+`set_symbol_facts` and `set_recorded_series`, the source host's doors for
+`strategy_set_symbol_feed` and its three siblings. Like N5's
+`hash_host_extension` inside v18, they land without an epoch; they change the
+vtable, so a generated or native C++ object compiled against an earlier v19
+header is rebuilt with the library (the subclass contract is internal, as
+`engine.hpp` states). No value moves: the kernel's defaults answer false, and
+a run with no symbol data folds nothing new. The C side is append-only -- four
+functions, each behind its own `PINEFORGE_HAS_…_V1` probe -- so
+`PF_ABI_VERSION` stays 4.
 
 R5 gap lane P2c gave two TradingView-named public surfaces a generic primary
 spelling without an epoch, because an alias needs none, and lane REL10 removed

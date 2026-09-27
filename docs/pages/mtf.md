@@ -10,6 +10,7 @@ paths, and they have different rules:
 | --- | --- | --- | --- |
 | **Upward (HTF)** | `request.security(sym, "60", expr)` | target TF **coarser** than input | aggregated from input bars |
 | **Downward (LTF)** | `request.security_lower_tf(sym, "1", expr)` | target TF **finer** than input | **synthesized** from each input bar's OHLC path |
+| **Another symbol** | `request.security("TVC:DXY", "15", expr)` | any TF | **the other symbol's own bars**, installed before the run |
 
 The downward path is where PineForge diverges from TradingView. TV
 downloads a separate finer-resolution feed when you switch to a lower
@@ -21,6 +22,44 @@ resolution.
 
 For the upward path and the chart-aggregation rules, see also
 @ref timeframes.
+
+## Another symbol's bars
+
+A `request.security` of **another** symbol reads that symbol's own bars; no
+aggregation of the chart can produce them. The host installs them before the
+run, keyed by the exact symbol string the script passes and by the timeframe,
+each bar with its own close:
+
+```c
+strategy_set_symbol_feed(s, "TVC:DXY", "15", bars, close_ms, n);   /* PINEFORGE_HAS_SYMBOL_FEED_V1 */
+strategy_set_symbol_facts(s, "TVC:DXY", "type", "index");           /* PINEFORGE_HAS_SYMBOL_FACTS_V1 */
+```
+
+On each chart bar the site sees the **last bar of the other symbol that has
+closed by the chart bar's close** (`lookahead_off`) or **that opened by the
+chart bar's open** (`lookahead_on`); no calendar is guessed for the other
+symbol, so a daily bar that closes after the chart's session close is seen one
+chart day late, as TradingView sees it. The site's expression runs on **every**
+bar of the other symbol, in order, so its history offsets and indicators run
+over that symbol's own bars; inside it `bar_index`, `time_close` and
+`syminfo.*` are the other symbol's. `gaps_on` reads na on a chart bar that
+received no new bar; the generated `clear_security()` that blanks the site
+there also clears the expression's own history series, as it does for a
+same-symbol site, so under `gaps_on` an offset or an indicator inside the
+expression starts over after each such bar (a codegen limit, not the merge's).
+A symbol with no installed feed fails the run closed, naming the symbol and
+the timeframe; a feed installed with no bars reads na on every chart bar, and
+an invalid symbol reads na under `ignore_invalid_symbol`. Historical runs
+only: a stream refuses an installed symbol feed, and every setter answers -1
+while a run is in progress. The merge itself is the kernel's (`NativeRunSpec::instrument_feeds`,
+@ref native_engine) and holds for a native host too.
+
+`scripts/run_strategy.py` installs a probe's pinned feeds, facts and recorded
+request values (`strategy_set_recorded_series`, TradingView's per-chart-bar
+fundamentals; a tape with a header only is a request na on every chart bar)
+from `PINEFORGE_REQUESTS_ROOT/<probe>/requests.json` when that variable is set. Codegen's lowering of a foreign `request.security` onto this
+surface is a separate lane; until it lands, codegen still refuses a symbol that
+is not the chart's.
 
 ## The script_tf / input_tf model
 
