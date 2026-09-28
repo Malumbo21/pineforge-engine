@@ -39,9 +39,10 @@ Usage examples
 With a TradingView tape (inputs.json::tv_trades_csv, default
 strategy_dir/tv_trades.csv) the emit window is TradingView's own: order
 commands are ignored before the chart bar that precedes TV's first entry
-bar (the bar the first entry was placed on), and the trades written are
-those entered inside the tape's span — _tv_entry_emit_window states the
-exact rule.
+bar (the bar the first entry was placed on) -- or, on a run whose feed
+starts on TradingView's first computed bar, before that bar -- and the
+trades written are those entered inside the tape's span —
+_tv_entry_emit_window states the exact rule.
 """
 from __future__ import annotations
 
@@ -1118,8 +1119,13 @@ def _load_account_currency_fx_daily_closes(path: Path):
     )
 
 
+# The lane template's quantity step, as the case runner hands it to every
+# case of a lane that declares one (inputs_run_kwargs: syminfo.mincontract).
+LANE_QTY_STEP_ENV = "PINEFORGE_VERIFY_QTY_STEP"
+
+
 def inputs_run_kwargs(params, strategy_dir: Path, default_ohlcv: Path,
-                      default_chart_tz: str = "") -> tuple[Path, dict]:
+                      default_chart_tz: str = "", env=None) -> tuple[Path, dict]:
     """Resolve per-probe ``inputs.json`` metadata into the OHLCV path and the
     keyword arguments for :meth:`Strategy.run`.
 
@@ -1130,7 +1136,10 @@ def inputs_run_kwargs(params, strategy_dir: Path, default_ohlcv: Path,
     ``scripts/crossvalidate_metrics.py`` both consume it, so a probe that
     runs under one harness runs identically under the other. ``params``
     itself must still be passed to ``Strategy.run(params=...)`` so Pine
-    ``input()`` values reach ``strategy_set_input``.
+    ``input()`` values reach ``strategy_set_input``. ``env`` (default
+    ``os.environ``) supplies the one lane fact the case runner hands every
+    run, the lane template's quantity step (``LANE_QTY_STEP_ENV``), which
+    becomes ``syminfo.mincontract``.
     """
     if not isinstance(params, dict):
         params = {}
@@ -1249,6 +1258,25 @@ def inputs_run_kwargs(params, strategy_dir: Path, default_ohlcv: Path,
             syminfo_metadata = {}
         syminfo_metadata = dict(syminfo_metadata)
         syminfo_metadata["qty_step"] = qty_step
+    # syminfo.mincontract: on every campaign symbol TradingView's smallest
+    # contract IS its quantity step (tests/fixtures/syminfo_mincontract: 18
+    # lab tv read-outs, one per lane -- BINANCE:ETHUSDT.P 0.0001,
+    # BINANCE:BTCUSDT 0.00001, OANDA:EURUSD / OANDA:XAUUSD 0.01, NASDAQ:AAPL,
+    # NYSE:F, NSE:NIFTY, CME_MINI:ES1! and NQ1! 1). The fact is the lane
+    # template's: its environment's PINEFORGE_VERIFY_QTY_STEP
+    # (lane_input_templates), which the case runner sets for every case of
+    # a lane that declares it and every verifier child inherits. Only a
+    # declared step counts: the Lab substitutes ETHUSDT.P's 0.0001 as
+    # runtime_overrides.qty_step where a lane declares none (the two ETH 15m
+    # templates), and records that value as its default, not as lane
+    # evidence. Generated code reads the fact through
+    # get_syminfo_metadata("mincontract") once codegen lowers it so (W2's
+    # F06, cg/w2-trio 90ab04d; codegen d7e095f still lowers na); a probe that
+    # declares its own keeps it.
+    lane_step = _num((os.environ if env is None else env).get(LANE_QTY_STEP_ENV))
+    if lane_step is not None and math.isfinite(lane_step) and lane_step > 0.0:
+        syminfo_metadata = dict(syminfo_metadata or {})
+        syminfo_metadata.setdefault("mincontract", lane_step)
 
     fx_series = None
     fx_source_sha256 = None
@@ -1837,6 +1865,13 @@ class Strategy:
         _check_abi(self.lib)
         self._setup_signatures()
 
+    @property
+    def declares_bar_magnifier(self) -> bool:
+        """True when the script declares ``use_bar_magnifier = true``: its
+        library exports ``strategy_declares_bar_magnifier`` returning 1."""
+        return (hasattr(self.lib, "strategy_declares_bar_magnifier")
+                and self.lib.strategy_declares_bar_magnifier() == 1)
+
     def _setup_signatures(self) -> None:
         L = self.lib
         L.strategy_create.argtypes = [ctypes.c_char_p]
@@ -2003,6 +2038,11 @@ class Strategy:
             L.strategy_set_magnifier_volume_weighted.argtypes = [
                 ctypes.c_void_p, ctypes.c_int]
             L.strategy_set_magnifier_volume_weighted.restype = None
+        # A script that declares strategy(..., use_bar_magnifier = true)
+        # exports this (returning 1); every other library lacks it.
+        if hasattr(L, "strategy_declares_bar_magnifier"):
+            L.strategy_declares_bar_magnifier.argtypes = []
+            L.strategy_declares_bar_magnifier.restype = ctypes.c_int
         # Symbol metadata plumbing (#19). Exchange tz / session feed
         # session.ismarket / time(session); the metadata setter injects
         # fundamental fields (shares_outstanding_*, target_price_*, ...).
@@ -2874,6 +2914,22 @@ def _filter_trades_to_window(trades: list[dict], window: tuple[int, int] | None)
     ]
 
 
+def _entered_before_tv(trades: list[dict], report_start_ms: int) -> int | None:
+    """The earliest entry the engine filled before ``report_start_ms`` (TV's
+    first entry less one bar interval), or None when it filled none.
+
+    A run whose window opens on TradingView's first computed bar
+    (_tv_entry_emit_window) is TradingView's run only while it does what
+    TradingView did before its first entry: fill nothing. An entry there is
+    one TradingView never had -- a script state that differs from TV's cold
+    start (an indicator seeded otherwise, a rule the engine applies
+    differently) -- and its position and P&L would carry into the trades
+    that are reported, so main() runs such a probe again from the signal
+    bar, as before. Reported rows start at ``report_start_ms`` either way."""
+    early = [int(t["entry_time"]) for t in trades if int(t["entry_time"]) < report_start_ms]
+    return min(early) if early else None
+
+
 def _filter_trace_to_window(trace: list[dict], window: tuple[int, int] | None) -> list[dict]:
     if window is None:
         return trace
@@ -3360,6 +3416,45 @@ def _feed_timestamps(csv_path: Path, *, ohlcv_start_ms: int | None = None,
     return out
 
 
+def _tv_first_bar(strategy_dir: Path, meta: dict) -> tuple[int, str] | None:
+    """TradingView's first computed chart bar for the tape (UTC ms), with
+    where it was read: metrics.json ``wsProvenance.returnedRange.from``.
+
+    TradingView's deep backtest over the ws report channel computes the
+    script from the first chart bar at or after the requested ``from`` and
+    from no earlier bar, and records that bar's open as
+    ``returnedRange.from``. Pinned by ``lab tv --no-note`` tapes
+    (tests/fixtures/run_harness_window): a script reads bar_index 0 on it
+    (rh-diag-firstbar, rh-diag-firstbar2 on BINANCE:ETHUSDT.P 15 over
+    2025-04-01 .. 2025-04-08 and .. 2026-05-01, OANDA:EURUSD / OANDA:XAUUSD /
+    CME_MINI:ES1! 15 at 00:00 UTC, NYSE:F 15 at 13:30, NSE:NIFTY 15 at
+    03:45, BINANCE:BTCUSDT 1D at 00:00, OANDA:XAUUSD 1D at 21:00 -- each
+    equal to its returnedRange.from), and a command on a bar before it never
+    runs: a stop, a limit and two market entries placed on 2025-03-31 bars
+    yield no trade (rh-prerange-stop, rh-prerange-limit, rh-prerange-fills).
+
+    None for a tape without it: the browser export records no returned range
+    (and its deep backtest computes bars before ``from``: an entry filled
+    one bar before the range start is exported), a hand-made metrics.json,
+    or none."""
+    tv_name = str(meta.get("tv_trades_csv", "tv_trades.csv"))
+    tv_path = strategy_dir / tv_name
+    metrics_path = _tv_metrics_path(strategy_dir, meta, tv_path)
+    if not metrics_path.is_file():
+        return None
+    try:
+        with metrics_path.open(encoding="utf-8") as f:
+            metrics = json.load(f)
+    except (OSError, ValueError):
+        return None
+    ws = metrics.get("wsProvenance") if isinstance(metrics, dict) else None
+    returned = ws.get("returnedRange") if isinstance(ws, dict) else None
+    first = returned.get("from") if isinstance(returned, dict) else None
+    if isinstance(first, bool) or not isinstance(first, int) or first <= 0:
+        return None
+    return int(first), "metrics.json wsProvenance.returnedRange.from"
+
+
 class TvEntryWindow(NamedTuple):
     """The window a TV tape defines over the loaded chart feed
     (_tv_entry_emit_window)."""
@@ -3369,10 +3464,12 @@ class TvEntryWindow(NamedTuple):
     first_entry_ms: int       # TV's first entry as stamped on the tape
     fill_bar_ms: int | None   # the loaded feed bar at/just before it: TV's first fill bar
     signal_bar_ms: int | None  # the loaded feed bar before that one
+    tv_first_bar_ms: int | None = None  # the loaded feed's first bar when it is TV's first bar
 
 
 def _tv_entry_emit_window(feed_ts: list[int], first_entry_ms: int, last_entry_ms: int,
-                          bar_interval_ms: int) -> TvEntryWindow:
+                          bar_interval_ms: int,
+                          tv_first_bar_ms: int | None = None) -> TvEntryWindow:
     """The emit window a TV tape defines, walked over the loaded chart feed.
 
     ``end`` is TV's last entry. ``report_start`` is ``first TV entry -
@@ -3418,7 +3515,30 @@ def _tv_entry_emit_window(feed_ts: list[int], first_entry_ms: int, last_entry_ms
     whose first-row gap is wider than the gap before the first entry (a
     feed starting on a Friday) keeps the wider legacy start. A first entry
     past the feed's last bar admits the last two bars, which is harmless:
-    nothing at or after it exists to report."""
+    nothing at or after it exists to report.
+
+    A run that starts where TradingView's did is TradingView's run, and its
+    window opens on its first bar. ``tv_first_bar_ms`` is the tape's first
+    computed bar (_tv_first_bar); when the loaded feed's first bar is that
+    bar, ``start`` is it. TradingView's broker is live from that bar: an
+    order placed on any bar before the tape's first fill can make that fill,
+    as a stop placed at 01:00 UTC makes the 06:30 UTC first fill of
+    rh-inrange-preplaced, hours before the bar that precedes it -- the shape
+    that cost jaysharma (a supertrend stop placed before 08:00 UTC fills at
+    08:15) and ki62 (phase A's stop, armed once) their first trades. The
+    signal bar alone cannot see such an order, but on this run nothing
+    precedes TradingView's first bar, so no bar is admitted that TradingView
+    did not compute. A run that loads bars before it (a warmed full-history
+    or padded feed) keeps the signal-bar start: its script state on those
+    bars is not TradingView's, which computes nothing before its first bar
+    (rh-diag-firstbar: bar_index 0 is the range start), so an order placed
+    there would be one TradingView never had. A feed starting after
+    TradingView's first bar lacks bars TradingView traded on and keeps the
+    signal-bar start too. main() keeps the earlier start only while the run
+    enters nothing before the bar the tape reports from (TradingView's first
+    entry less one bar interval), since TradingView filled nothing before its
+    first entry (_entered_before_tv); a run that does is run again from the
+    signal bar. Reported trades are unchanged either way."""
     report_start_ms = first_entry_ms - bar_interval_ms
     fill_index = -1
     for index, ts in enumerate(feed_ts):
@@ -3429,14 +3549,23 @@ def _tv_entry_emit_window(feed_ts: list[int], first_entry_ms: int, last_entry_ms
     signal_bar_ms = feed_ts[fill_index - 1] if fill_index >= 1 else None
     start_ms = (report_start_ms if signal_bar_ms is None
                 else min(report_start_ms, signal_bar_ms))
+    tv_first = (feed_ts[0] if feed_ts and tv_first_bar_ms is not None
+                and feed_ts[0] == tv_first_bar_ms else None)
+    if tv_first is not None:
+        start_ms = min(start_ms, tv_first)
     return TvEntryWindow(start_ms, last_entry_ms, report_start_ms,
-                         first_entry_ms, fill_bar_ms, signal_bar_ms)
+                         first_entry_ms, fill_bar_ms, signal_bar_ms, tv_first)
 
 
 def _describe_tv_entry_window(w: TvEntryWindow) -> str:
     """The one line main() logs for a TV tape's window."""
     reported = (f"entries reported from {_fmt_utc_ms(w.report_start_ms)} "
                 f"to {_fmt_utc_ms(w.end_ms)}")
+    if w.tv_first_bar_ms is not None and w.start_ms == w.tv_first_bar_ms:
+        return (f"start {_fmt_utc_ms(w.start_ms)} = TV's first computed bar, where this "
+                f"run's feed starts (orders placed before TV's first entry bar "
+                f"{'-' if w.fill_bar_ms is None else _fmt_utc_ms(w.fill_bar_ms)} "
+                f"are live, as on TV); {reported}")
     if w.fill_bar_ms is None:
         return (f"start {_fmt_utc_ms(w.start_ms)} (TV's first entry "
                 f"{_fmt_utc_ms(w.first_entry_ms)} precedes the loaded feed: "
@@ -3466,6 +3595,121 @@ def _infer_bar_interval_ms(csv_path: Path) -> int:
                 return max(1, ts - prev)
             prev = ts
     return 15 * 60 * 1000
+
+
+# --- a declared bar magnifier ------------------------------------------
+
+# The case runner names the lane's 1m feed (and its sha256) here for every
+# case; a script that declares use_bar_magnifier = true is run on it.
+MAGNIFIER_FEED_ENV = "PINEFORGE_RUN_MAGNIFIER_FEED"
+MAGNIFIER_FEED_SHA256_ENV = "PINEFORGE_RUN_MAGNIFIER_FEED_SHA256"
+
+
+def _tf_seconds(tf: str) -> int:
+    """tf_to_seconds (src/timeframe.cpp) for a Pine timeframe string: minutes
+    for a bare number, n * 86400 / 604800 for "nD" / "nW", n for "nS", -1 for a
+    calendar month ("nM"), 0 for an empty or unreadable string."""
+    tf = str(tf or "").strip()
+    if not tf:
+        return 0
+    unit = tf[-1]
+    count = tf[:-1] if unit in "DWMS" else tf
+    try:
+        n = int(count) if count else 1
+    except ValueError:
+        return 0
+    if unit == "M":
+        return -1
+    if unit == "D":
+        return n * 86400
+    if unit == "W":
+        return n * 604800
+    if unit == "S":
+        return n if count else 0
+    return n * 60
+
+
+class MagnifierPlan(NamedTuple):
+    """How a script declaring use_bar_magnifier = true is run
+    (_declared_magnifier_plan)."""
+    status: str               # "declared" (run magnified) or "declared-not-run"
+    detail: str               # the one line main() logs after the status
+    ohlcv_path: Path          # the feed the engine is fed
+    run_kwargs: dict          # Strategy.run's kwargs for that feed
+
+
+def _declared_magnifier_plan(params: dict, chart_ohlcv: Path, run_kwargs: dict,
+                             env=None) -> MagnifierPlan:
+    """Run a script that declares ``strategy(..., use_bar_magnifier = true)``
+    the way TradingView backtests it: with its bar magnifier.
+
+    TradingView fills such a script's orders on its own intrabars (15m chart:
+    2m bars; tests/fixtures/magnifier_intrabars), which the engine builds from
+    a finer input (MAG-INTRABAR). So on an intraday chart coarser than 1m
+    the run's input becomes the lane's 1m feed -- ``MAGNIFIER_FEED_ENV``,
+    held to ``MAGNIFIER_FEED_SHA256_ENV`` when that is set -- with
+    ``input_tf = "1"``, ``script_tf`` = the chart timeframe and the
+    magnifier on; the chart feed still defines TradingView's window
+    (_tv_entry_emit_window walks it). The 1m run reads exactly the chart
+    feed's loaded bars (both of the run's bounds applied): from the first
+    chart bar's open to the last minute of the last chart bar, so a 1m feed
+    that starts earlier warms nothing the chart run does not, and the final
+    bar (TradingView's last, at a range-end bound) is whole. TradingView's tape of
+    a declaring script (mi-fx-eth-15) and of the same script declared off
+    (w9mag-fx-eth-15-off) enter alike and part on 7 of the 23 exits
+    tests/fixtures/magnifier_intrabars replays.
+
+    ``declared-not-run`` otherwise, saying why: the probe turns the
+    magnifier off (``runtime_overrides.bar_magnifier`` false), no magnifier
+    feed was named, the run already reads an auxiliary request.security
+    feed, the chart is not coarser than 1m, or the chart is daily, weekly or
+    monthly -- TradingView keeps its own daily bars as the chart bars there
+    (OANDA:XAUUSD's daily bar opens at 21:00 UTC, the 1m aggregate's at
+    22:00), and no engine input yet keeps chart bars with a 1m intrabar
+    source. A not-run plan leaves the run exactly as it was."""
+    env = os.environ if env is None else env
+
+    def not_run(why: str) -> MagnifierPlan:
+        return MagnifierPlan("declared-not-run", why, chart_ohlcv, run_kwargs)
+
+    overrides = params.get("runtime_overrides")
+    if isinstance(overrides, dict) and overrides.get("bar_magnifier") is False:
+        return not_run("runtime_overrides.bar_magnifier is false")
+    feed_value = str(env.get(MAGNIFIER_FEED_ENV) or "").strip()
+    if not feed_value:
+        return not_run(f"no magnifier feed ({MAGNIFIER_FEED_ENV} unset)")
+    if run_kwargs.get("aux_security_ohlcv_csv") is not None:
+        return not_run("the run reads an auxiliary request.security feed")
+    chart_tf = str(params.get("script_tf") or "").strip()
+    if not chart_tf:
+        chart_tf = str(_infer_bar_interval_ms(chart_ohlcv) // 60_000)
+    chart_seconds = _tf_seconds(chart_tf)
+    if chart_seconds < 0 or chart_seconds >= 86400:
+        return not_run(f"chart {chart_tf} is daily or coarser")
+    if chart_seconds <= 60:
+        return not_run(f"chart {chart_tf} is not coarser than the 1m feed")
+    chart_ts = _feed_timestamps(chart_ohlcv,
+                                ohlcv_start_ms=run_kwargs.get("ohlcv_start_ms"),
+                                ohlcv_end_ms=run_kwargs.get("ohlcv_end_ms"))
+    if not chart_ts:
+        return not_run("the chart feed has no bar in the run's bounds")
+    feed = Path(feed_value).resolve()
+    if not feed.is_file():
+        raise FileNotFoundError(f"{MAGNIFIER_FEED_ENV} names no file: {feed}")
+    feed_sha = _sha256_file(feed)
+    expected = str(env.get(MAGNIFIER_FEED_SHA256_ENV) or "").strip().lower()
+    if expected and feed_sha != expected:
+        raise ValueError(
+            f"{MAGNIFIER_FEED_ENV} sha256 {feed_sha} != {MAGNIFIER_FEED_SHA256_ENV} {expected}")
+    magnified = dict(run_kwargs)
+    magnified.update(input_tf="1", script_tf=chart_tf, bar_magnifier=True,
+                     ohlcv_start_ms=chart_ts[0],
+                     ohlcv_end_ms=chart_ts[-1] + chart_seconds * 1000 - 1)
+    return MagnifierPlan(
+        "declared",
+        f"run on the 1m feed {feed.name} (sha256 {feed_sha}), input_tf=1 "
+        f"script_tf={chart_tf}, magnifier on",
+        feed, magnified)
 
 # --- docker runner (pineforge-release image) ---------------------------
 
@@ -3512,8 +3756,10 @@ def _run_via_docker(strategy_dir: Path, ohlcv_path: Path, params: dict,
         if not str(k).startswith("tv_") and k not in _VALIDATION_META_KEYS
     }
     # syminfo from runtime_overrides. apply_syminfo covers mintick/pointvalue/
-    # timezone/session; syminfo_metadata (fundamentals) is NOT covered — 0 corpus
-    # probes use it (documented gap).
+    # timezone/session; syminfo_metadata (fundamentals, and the lane's
+    # syminfo.mincontract) is NOT covered, nor is a declared bar magnifier (the
+    # image runs generated.cpp, so the library's export is never read) --
+    # documented gaps, which main() prints when the environment names either.
     syminfo: dict = {}
     if run_kwargs.get("syminfo_timezone"):
         syminfo["timezone"] = run_kwargs["syminfo_timezone"]
@@ -3694,6 +3940,9 @@ def main() -> int:
     report_window: tuple[int, int] | None = None
     tv_window_used = False
     tv_span: tuple[int, int] | None = None
+    # The signal-bar start, when the window opens earlier on TradingView's
+    # first computed bar: the run falls back to it (_entered_before_tv).
+    signal_start_ms: int | None = None
     if args.no_trim_output:
         pass
     elif args.emit_window_ohlcv is not None:
@@ -3730,20 +3979,35 @@ def main() -> int:
         # ``first entry - one bar interval`` start, from which trades keep
         # being reported (_tv_entry_emit_window has the rule and the six
         # round-7 tapes).
+        # A run whose feed starts on TradingView's first computed bar is
+        # TradingView's run: its window opens there, so an order placed
+        # before TV's first entry bar is live as it was on TV.
         assert tv_span is not None
+        tv_first_bar = _tv_first_bar(strategy_dir, params)
+        feed_ts = _feed_timestamps(ohlcv_path,
+                                   ohlcv_start_ms=run_kwargs.get("ohlcv_start_ms"),
+                                   ohlcv_end_ms=run_kwargs.get("ohlcv_end_ms"))
+        bar_interval_ms = _infer_bar_interval_ms(ohlcv_path)
         tv_window = _tv_entry_emit_window(
-            _feed_timestamps(ohlcv_path,
-                             ohlcv_start_ms=run_kwargs.get("ohlcv_start_ms"),
-                             ohlcv_end_ms=run_kwargs.get("ohlcv_end_ms")),
-            tv_span[0], tv_span[1], _infer_bar_interval_ms(ohlcv_path))
+            feed_ts, tv_span[0], tv_span[1], bar_interval_ms,
+            None if tv_first_bar is None else tv_first_bar[0])
         emit_window = (tv_window.start_ms, tv_window.end_ms)
         report_window = (tv_window.report_start_ms, tv_window.end_ms)
+        if tv_window.tv_first_bar_ms is not None:
+            signal_start = _tv_entry_emit_window(
+                feed_ts, tv_span[0], tv_span[1], bar_interval_ms).start_ms
+            # The engine admits commands from one bar before its gate
+            # (trading_window_active): a signal-bar gate that still admits the
+            # feed's first bar admits every bar, and a re-run would repeat this one.
+            if signal_start - bar_interval_ms > feed_ts[0]:
+                signal_start_ms = signal_start
         print(f"  emit-window: {_describe_tv_entry_window(tv_window)}")
     trade_start_ms = None
     if emit_window is not None and not args.allow_trading_before_window:
         if tv_window_used or args.disable_trading_before_window:
             trade_start_ms = emit_window[0]
 
+    run_ohlcv = ohlcv_path   # the feed the engine reads (a declared magnifier's 1m feed)
     if args.runner == "docker":
         if args.trace_json is not None:
             sys.exit("error: --trace-json needs --emit-plots (deferred); not supported with --runner docker.")
@@ -3790,8 +4054,14 @@ def main() -> int:
                 "error: --runner docker does not support --dump-book; "
                 "use --runner ctypes with a freshly built strategy library.")
         strat = None
-        report = _run_via_docker(strategy_dir, ohlcv_path, params, run_kwargs,
-                                 trade_start_ms, args.image)
+        if os.environ.get(MAGNIFIER_FEED_ENV) or os.environ.get(LANE_QTY_STEP_ENV):
+            print("note: --runner docker honours neither a declared bar magnifier nor "
+                  "syminfo_metadata (syminfo.mincontract); use --runner ctypes",
+                  file=sys.stderr)
+
+        def run_engine(start_ms):
+            return _run_via_docker(strategy_dir, ohlcv_path, params, run_kwargs,
+                                   start_ms, args.image)
     else:
         so_path = find_strategy_lib(strategy_dir, args.so_name)
         strat = Strategy(so_path)
@@ -3841,15 +4111,37 @@ def main() -> int:
                 sys.exit(
                     "error: --path-order requires strategy_set_path_order "
                     "(strategy.so predates ABI v4 spec section 3.3; rebuild the engine)")
-        report = strat.run(ohlcv_path, params=params,
-                           trace_enabled=args.trace_json is not None,
-                           trade_start_time_ms=trade_start_ms,
-                           realtime_tail_horizon=args.realtime_tail,
-                           probe_suppress_tail=args.probe_suppress_tail,
-                           path_order=args.path_order,
-                           broker_state_hash_recording=args.broker_state_hash,
-                           dump_book=args.dump_book is not None,
-                           **run_kwargs)
+        if strat.declares_bar_magnifier:
+            # use_bar_magnifier = true: TradingView's window stays the chart
+            # feed's (above); the engine's input may become the 1m feed.
+            plan = _declared_magnifier_plan(params, ohlcv_path, run_kwargs)
+            run_ohlcv, run_kwargs = plan.ohlcv_path, plan.run_kwargs
+            print(f"  magnifier: {plan.status}: {plan.detail}")
+
+        def run_engine(start_ms):
+            return strat.run(run_ohlcv, params=params,
+                             trace_enabled=args.trace_json is not None,
+                             trade_start_time_ms=start_ms,
+                             realtime_tail_horizon=args.realtime_tail,
+                             probe_suppress_tail=args.probe_suppress_tail,
+                             path_order=args.path_order,
+                             broker_state_hash_recording=args.broker_state_hash,
+                             dump_book=args.dump_book is not None,
+                             **run_kwargs)
+    report = run_engine(trade_start_ms)
+    if (signal_start_ms is not None and trade_start_ms is not None
+            and trade_start_ms < signal_start_ms and report_window is not None):
+        early = _entered_before_tv(report["trades"], report_window[0])
+        if early is not None:
+            # TradingView filled nothing before its first entry; a run that
+            # entered before the tape's report bound is not TradingView's there,
+            # so it runs as a warmed run does.
+            print(f"  emit-window: the run from TV's first computed bar entered at "
+                  f"{_fmt_utc_ms(early)}, before TV's first entry, where TV filled "
+                  f"nothing: run again from {_fmt_utc_ms(signal_start_ms)}")
+            trade_start_ms = signal_start_ms
+            emit_window = (signal_start_ms, emit_window[1])
+            report = run_engine(trade_start_ms)
     raw_trade_count = len(report["trades"])
     trades_to_write = _filter_trades_to_window(report["trades"], report_window)
     # The trades the verifier grades are the CSV's — run_strategy.py writes
@@ -3863,7 +4155,7 @@ def main() -> int:
         with args.trace_json.open("w", encoding="utf-8") as f:
             json.dump({
                 "strategy": str(strategy_dir),
-                "ohlcv": str(ohlcv_path),
+                "ohlcv": str(run_ohlcv),
                 "emit_window": None if emit_window is None else {"start_ms": emit_window[0], "end_ms": emit_window[1]},
                 "report_start_ms": None if report_window is None else report_window[0],
                 "trace_names": report["trace_names"],
@@ -3916,7 +4208,7 @@ def main() -> int:
         with bsh_path.open("w", encoding="utf-8") as f:
             json.dump({
                 "strategy": str(strategy_dir),
-                "ohlcv": str(ohlcv_path),
+                "ohlcv": str(run_ohlcv),
                 "script_bars_processed": report["script_bars_processed"],
                 "entries": entries,
             }, f)
@@ -3936,7 +4228,7 @@ def main() -> int:
             with args.dump_book.open("w", encoding="utf-8") as f:
                 json.dump({
                     "strategy": str(strategy_dir),
-                    "ohlcv": str(ohlcv_path),
+                    "ohlcv": str(run_ohlcv),
                     "struct_version": PENDING_ORDER_STRUCT_VERSION,
                     # The runtime's own field table, so a consumer can tell
                     # which fields this engine build emitted.

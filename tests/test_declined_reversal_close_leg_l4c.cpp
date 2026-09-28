@@ -229,11 +229,14 @@ static void test_R4_followup_close_and_ledger_recredit() {
     }
 }
 
-// R5: close_all co-queued with a declined reversal is a characterization FREEZE
-// — its bare "__close__" id (empty target) is EXCLUDED from suppression, so it
-// still fires. LONG held then S + close_all(); S declines but close_all flattens.
+// R5: a close_all placed after the all-in reversal entry belongs to that
+// reversal, as a close of the held id does (R1). LONG held then S +
+// close_all(); S declines at the fill and the position is held: TradingView
+// flattens the held long through neither (lane INT28-FIX, rule CA; lab tv
+// tapes tests/fixtures/reversal_close_all int28fix-ca2-rev and -frosty).
+// Expectation corrected: this row froze the close_all firing.
 static void test_R5_close_all_freeze() {
-    std::printf("-- R5: close_all + declined reversal freeze (NOT suppressed) --\n");
+    std::printf("-- R5: close_all + declined reversal: the long is held --\n");
     Probe p;
     p.plan = {
         {{Op::EnterLong}},
@@ -242,8 +245,8 @@ static void test_R5_close_all_freeze() {
     };
     auto bars = reversal_bars(111);
     p.run(bars.data(), (int)bars.size());
-    CHECK(p.position_side_ == PositionSide::FLAT);   // close_all still fired
-    CHECK(p.trade_count() == 1);
+    CHECK(p.position_side_ == PositionSide::LONG);   // the close_all is the reversal's
+    CHECK(p.trade_count() == 0);
 }
 
 // R6: the SAME-direction shape (probe65: same-id add + close, no reversal) is
@@ -254,8 +257,14 @@ static void test_R5_close_all_freeze() {
 // a held-side close is pending — the close fires first and the add re-opens
 // from flat. That makes a same_dir decline + held-side close structurally
 // unreachable, so the `reversal==true` guard is only ever exercised on genuine
-// reversals; this row pins the fix's inertness on the same-direction shape
-// (close fires, add re-opens LONG 100 — byte-identical to HEAD).
+// reversals; this row pins the fix's inertness on the same-direction shape.
+// Expectation corrected (lane W5-ENG-MARGIN-V6, M1): the all-in add does not
+// re-open from flat. TradingView judges a default percent_of_equity add at
+// placement on the held units plus its own and drops one whose margin exceeds
+// the equity, whatever the close does at the next open (tests/fixtures/
+// margin_v6 w5-m1-addclose: an add followed by strategy.close of the held id,
+// or by strategy.close_all, never opens). The close fires and the book is
+// flat; before the lane the add re-opened LONG 100.
 static void test_R6_same_dir_shape_fix_inert() {
     std::printf("-- R6: same-direction add + close: fix inert (close fires) --\n");
     Probe p(/*pyramiding=*/2);
@@ -272,8 +281,8 @@ static void test_R6_same_dir_shape_fix_inert() {
         mk(4000, 100, 100, 100, 100),
     };
     p.run(bars.data(), (int)bars.size());
-    CHECK(p.position_side_ == PositionSide::LONG);   // close fired, add re-opened
-    CHECK_NEAR(p.position_qty_, 100.0, 1e-9);
+    CHECK(p.position_side_ == PositionSide::FLAT);   // close fired, add dropped
+    CHECK_NEAR(p.position_qty_, 0.0, 1e-9);
     CHECK(p.trade_count() == 1);                     // the original L round-trip
 }
 

@@ -188,10 +188,24 @@
   "observableRewrites": {
     "test_calc_on_order_fills": {
       "baseAssertions": 242,
-      "reason": "the chart-path endpoint row follows the R5 PAR-ORDERS-3 TradingView tapes (pa3-f4-stop-w1-mkt-*): a market add placed by the recalculation on a stop entry's fill exactly at a bar's first extreme fills at that extreme, not at the next waypoint",
+      "reason": "the chart-path endpoint row follows the R5 PAR-ORDERS-3 TradingView tapes (pa3-f4-stop-w1-mkt-*): a market add placed by the recalculation on a stop entry's fill exactly at a bar's first extreme fills at that extreme, not at the next waypoint; the entry-bar through-stop rows follow the R5 W4-ENG-POOC-SAMEPASS TradingView tapes (w4-f19c-{long,short}-plain-coof cells LA and SA): a stop already through the open fill that recalculated executes at that fill, not on the next bar",
       "twin": "test_calc_on_order_fills_l4c.cpp",
-      "twinAssertionSha256": "4fe9c2736bc13f4489d9600c0fbbb11e3890e531418dab2a994db7e2012e81a3",
+      "twinAssertionSha256": "51cc42a4424fe7a6b0fa998544551fbd818d3e6c72dd9c567f2ac98d30215cef",
       "twinAssertions": 242
+    },
+    "test_carried_pooc_short_margin_state": {
+      "baseAssertions": 43,
+      "reason": "the competing-entry and rounded-money controls follow the R5 lane W5B-ENG-MARGIN-RESIDUAL TradingView tapes (tests/fixtures/margin_residual w5b-pc-seen-size and -seen-size-parked): a carried process_orders_on_close short is called on its bar's path before the script, a pending entry beside it or not and at any money class, so the script reads the called size where ab9714be read the uncalled one",
+      "twin": "test_carried_pooc_short_margin_state_l4a.cpp",
+      "twinAssertionSha256": "02c5f820b47d00e8967c4272de6c3302663357fbb280b605f55d85aa18f7206c",
+      "twinAssertions": 43
+    },
+    "test_declined_reversal_close_leg": {
+      "baseAssertions": 39,
+      "reason": "R6's all-in same-side add co-queued with a close of the held id follows the R5 lane W5-ENG-MARGIN-V6 TradingView tapes (tests/fixtures/margin_v6 w5-m1-addclose): TradingView drops the add at placement, its margin on top of the held side's exceeding the equity, so the close leaves the book flat instead of the add re-opening LONG 100; and lane INT28-FIX rule CA: R5's close_all placed after the all-in reversal entry belongs to that reversal (tests/fixtures/reversal_close_all int28fix-ca2-rev and -frosty), so the declined reversal holds the long where the row froze the close_all firing",
+      "twin": "test_declined_reversal_close_leg_l4c.cpp",
+      "twinAssertionSha256": "18c9185d8d13599ca337b1f14eb54f386ebf5097d92b619f7b23531dc2bf7958",
+      "twinAssertions": 39
     },
     "test_direct_short_reversal_affordability": {
       "baseAssertions": 48,
@@ -199,6 +213,13 @@
       "twin": "test_direct_short_reversal_affordability_l4b.cpp",
       "twinAssertionSha256": "54c3efd189cd70416be175b5608954f0299bdc4aa3d80ab97550665e949401cd",
       "twinAssertions": 54
+    },
+    "test_dual_entry_placement_sizing": {
+      "baseAssertions": 172,
+      "reason": "two observable rewrites -- the MS-SF-A row and the pyramiding-1 fence follow the W6-ENG-FILL-ORDER TradingView tapes: a marketable buy stop placed after a sell market on one flat bar fills first, as one buy of both quantities, so the closed trade is a slice of the buy's long closed by the sell (w6-f10a-open-pair MS-SF); and the later call of a flat opposite pair is costed as its own quantity plus the pending market's at pyramiding 1 as at 0, so past the equity it is dropped (w6-f10h-pair-gross-pyramiding1); and lane W3B-ENG-GRID: the pair's percent exits for LAY-L are issued before LAY-L's entry call, while LAY-L neither exists nor rests, and TradingView voids such an exit (lab tv w3f05-s18, w3f05-s21, w3bf05-v1 in tests/fixtures/exit_queue): nothing rests for them after the pair, where the adapter froze 1.0 and 1.5",
+      "twin": "test_dual_entry_placement_sizing_l4b.cpp",
+      "twinAssertionSha256": "e310460cb609017087f3ddcaae33d0e785df8f9d76eed21e61e58c9469d3f880",
+      "twinAssertions": 173
     },
     "test_engine_risk": {
       "baseAssertions": 56,
@@ -258,10 +279,10 @@
     },
     "test_integration": {
       "baseAssertions": 572,
-      "reason": "legacy owner reads in the integration TU are rewritten to source-host projections",
+      "reason": "legacy owner reads in the integration TU are rewritten to source-host projections; the close-reservation rows follow lane W3B-ENG-GRID's TradingView tapes (tests/fixtures/grid_close: w3f02-x1/-x2, w3bf02-a1/-a2/-f1 and the legacy scenarios w3bl-s6..-s10b): a call site's fill books its first id's close ledger and spills oldest first, every reducing fill books it, and no close holds a standing reservation, so the rows pin the ledger and the trades instead of the retired reservation and provenance maps; and test_strategy_close_pooc_keeps_same_bar_market_reentry follows TradingView's lab tv tape w8a-pooc-close-reentry-pyr2 (lane W8A-SIGSTATE-1 R2): under process_orders_on_close a same-bar strategy.close of L and a same-side entry L_add both fill, so the run ends holding L_add (position 1, not 0)",
       "twin": "test_integration_l4d.cpp",
-      "twinAssertionSha256": "3678564aacd7444c676ef72b937979ec453ec4f5ce9761a9cd3a8bb9d665b3d8",
-      "twinAssertions": 572
+      "twinAssertionSha256": "a5b8bf426c9ed27559ac9044299b2f4b15761c6297c8ca058dc8c25da886193d",
+      "twinAssertions": 569
     },
     "test_live_pending_order_mirror": {
       "baseAssertions": 73,
@@ -291,6 +312,13 @@
       "twinAssertionSha256": "5fd3bc55d5be90041fc35f45a26d9e5d2f38e45563576655d57a3d1a080dfcbe",
       "twinAssertions": 54
     },
+    "test_margin_call_1x_long_entry_fill": {
+      "baseAssertions": 62,
+      "reason": "F's process_orders_on_close opening-budget trim follows the R5 lane W5-ENG-MARGIN-V6 TradingView tapes (tests/fixtures/margin_v6 w5-c2-pooc-flat-explicit-long): a commissioned process_orders_on_close opening is called at the next open, never at its close fill, so the 0.1996 @100 trim lands on bar 1",
+      "twin": "test_margin_call_1x_long_entry_fill_l4a.cpp",
+      "twinAssertionSha256": "eb87c55121b2368e727136aee1df26af82c8c1bfd4c8b3836747e9cfd5d38e4e",
+      "twinAssertions": 62
+    },
     "test_order_birth_provenance": {
       "baseAssertions": 60,
       "reason": "retired order objects are rewritten to adapter birth receipts",
@@ -305,12 +333,54 @@
       "twinAssertionSha256": "cb694da6f8211cab98bb19411d0a06a5ccd90c8ab87be9e7f5d7332d976f1ce0",
       "twinAssertions": 23
     },
+    "test_pooc_coof_reversal_gross_admission": {
+      "baseAssertions": 28,
+      "reason": "the scratch-row side follows the W6-ENG-FILL-ORDER TradingView tapes (w6-f10d-pooc-pair, w6-f10e-pooc-coof-pair MM-SF): a flat sell-then-buy market pair on one close fills the buy first, so the scratch row is always the buy's long",
+      "twin": "test_pooc_coof_reversal_gross_admission_l4c.cpp",
+      "twinAssertionSha256": "1084c2698a763bbf141b0dbaceb661b4d251214c5d1c114b2d4bf267978beca7",
+      "twinAssertions": 28
+    },
+    "test_pooc_global_full_exit": {
+      "baseAssertions": 66,
+      "reason": "the three rows that left an add open follow the R5 W4-ENG-POOC-SAMEPASS TradingView tapes (w4-f19a-pooc cells A, B and F): a from_entry \"\" exit without a quantity, the book's only exit, is sized on the position it fills against, so an add filled before that fill -- a same-id replacement, a later bar's entry, a same-bar add placed after the exit -- is closed with it",
+      "twin": "test_pooc_global_full_exit_l4c.cpp",
+      "twinAssertionSha256": "6c90c8b2cddcc1c9b9f35af2e5d78f3fc46f3e8bf13e3a40685159aba3681e73",
+      "twinAssertions": 66
+    },
+    "test_pooc_open_money_event": {
+      "baseAssertions": 57,
+      "reason": "the fee compatibility scope's opening event follows the R5 lane W5-ENG-MARGIN-V6 TradingView tapes (tests/fixtures/margin_v6 w5-c2-pooc-flat-explicit-long): under a commission a process_orders_on_close opening is called at the next open, so outside calc_on_order_fills its event is at 2000, not at the entry close",
+      "twin": "test_pooc_open_money_event_l4b.cpp",
+      "twinAssertionSha256": "e9c3dea8f5b33e8420f6b9f9865137eac1178c9e549fe6b1906d520f758cc3f5",
+      "twinAssertions": 57
+    },
+    "test_prearmed_exit_path_cursor": {
+      "baseAssertions": 96,
+      "reason": "lane W3B-ENG-GRID: the FreshChild book issues its exit after the parent's cancel and before the fresh parent's call, while the entry neither exists nor rests, and TradingView voids such an exit (lab tv w3f05-s18, w3f05-s21, w3bf05-v1 in tests/fixtures/exit_queue): the fresh parent's trade has no exit to close it",
+      "twin": "test_prearmed_exit_path_cursor_l4c.cpp",
+      "twinAssertionSha256": "0128c3d7d3cb461dea0032ad74b36b88c22f6f717c72366decf06eb0e1eb8057",
+      "twinAssertions": 96
+    },
     "test_reservation_expansion": {
       "baseAssertions": 139,
       "reason": "private reservation objects are rewritten to pending and trade projections",
       "twin": "test_reservation_expansion_l4c.cpp",
       "twinAssertionSha256": "359f41c82bf7dfab29dd59bf67720e52741df0b995443311cd479676ad1d811b",
       "twinAssertions": 38
+    },
+    "test_reversal_admission_float_guard": {
+      "baseAssertions": 25,
+      "reason": "pin E follows the R5 lane W5B-ENG-MARGIN-RESIDUAL TradingView tapes (tests/fixtures/margin_residual w5b-pa-f-market-p50 and -pooc-p50): an add to a held position whose margin exceeds the equity by less than one lot's notional is dropped, so the same-direction add arm keeps no one-lot slack either",
+      "twin": "test_reversal_admission_float_guard_l4c.cpp",
+      "twinAssertionSha256": "720031f9165aa0d73fe14b136fc8098b0a71030121d06b43479cb1ddcd3df4be",
+      "twinAssertions": 25
+    },
+    "test_rounded_carried_short_trail": {
+      "baseAssertions": 43,
+      "reason": "the other order shapes and the competing entry follow the R5 lane W5B-ENG-MARGIN-RESIDUAL TradingView tapes (tests/fixtures/margin_residual w5b-pc-seen-size and -seen-size-parked): a rounded-money carried process_orders_on_close short is called on its bar's path before the script whatever else the book holds, so every shape sees the margin before the script as the trailing exits do",
+      "twin": "test_rounded_carried_short_trail_l4c.cpp",
+      "twinAssertionSha256": "b16b9023353e7533c80e570d84017ec77a020a405f09377c0c86dbf17750dc22",
+      "twinAssertions": 43
     },
     "test_settlement_observation_boundary": {
       "baseAssertions": 65,
@@ -346,6 +416,13 @@
       "twin": "test_trail_open_arm_subtick_offset_l4c.cpp",
       "twinAssertionSha256": "b6f39ef9540567ddc37079fc2831938894239cbcbd4df319e820ba38c106a131",
       "twinAssertions": 101
+    },
+    "test_tv_money_carried_pooc": {
+      "baseAssertions": 43,
+      "reason": "the pyramiding-2 scope follows the R5 lane W5B-ENG-MARGIN-RESIDUAL TradingView tapes (tests/fixtures/margin_residual w5b-ms-eur-p100-pyr2 against w5b-sz-eur-p100-10m-0410): a one-lot full-margin long under process_orders_on_close takes its one-unit money call whatever pyramiding the strategy declares, so that scope takes the call carried() pins instead of none",
+      "twin": "test_tv_money_carried_pooc_l4b.cpp",
+      "twinAssertionSha256": "8b8780d985ad5393e8a75fda604e49247e6d232ea1a480d2265ac6966c9b1448",
+      "twinAssertions": 43
     }
   },
   "removed": [

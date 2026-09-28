@@ -117,8 +117,8 @@ finding to report, not a step to take.
    `scripts/check_doc_reverts.py`.
 
 10. **A test row never silently disappears.** Each profile counts the rows that
-    *ran* against a floor: `KERNEL_MIN_TESTS` ci_verify.py:293 and
-    `RELEASE_MIN_TESTS` ci_verify.py:463. Adding rows means raising the floor
+    *ran* against a floor: `KERNEL_MIN_TESTS` ci_verify.py:301 and
+    `RELEASE_MIN_TESTS` ci_verify.py:511. Adding rows means raising the floor
     in the same commit.
 
 ## The recipe for a lane
@@ -233,7 +233,7 @@ decision, and removing one is a regression:
 | the kernel's price grid (`NativeRunSpec::price_grid`) and the adapter's own tick rules | TradingView quantizes per *order kind* — stop and limit legs on the quantized bar, the trail stop and the `calc_on_order_fills` cursors raw — and the kernel grid is one rule for the run. A per-kind mask would spell that inconsistency into the kernel. | ADR 0001 ruling table, row `price_grid`; design `native-feature-parity.md:532` |
 | the kernel's risk limits (`NativeRunSpec::risk`) and the adapter's `strategy.risk.*` | structurally, Pine's risk calls are per-bar statements that arrive after the spec has been digested; substantively, four measured divergences in the latch, the streak, the close price and the day key. | ADR 0001 ruling table, row `risk`; design `native-feature-parity.md:443` |
 | the kernel's `max_abs_units` and the adapter's `max_position_size` | the kernel caps the *resulting* book, TradingView gates the *live* book before the fill. | ADR 0001 ruling table, row `max_abs_units` |
-| the kernel's `max_open_lots` and Pine's `pyramiding` | the adapter counts *entries per cycle*, the kernel counts *physical lots*. Measured against TradingView the kernel's count is the closer one (14 of 15 tape scenarios against the adapter's 8, `tests/test_pyramiding_count_differential.cpp`): TradingView checks an entry once, at its first eligible point, against the trades then open. Lowered onto the cap, four corpus probes move away from TradingView, for want of that rule, so the adapter keeps its count. | ADR 0001 ruling table, row `max_open_lots` |
+| the kernel's `max_open_lots` and Pine's `pyramiding` | the adapter counts *entries per cycle*, the kernel counts *physical lots*. Measured against TradingView the kernel's count is the closer one (14 of 15 tape scenarios against the adapter's 12, `tests/test_pyramiding_count_differential.cpp`): TradingView checks an entry once, at its first eligible point, against the trades then open. Lowered onto the cap, four corpus probes move away from TradingView, for want of that rule, so the adapter keeps its count. | ADR 0001 ruling table, row `max_open_lots` |
 | the kernel's margin model and the adapter's money admission | the adapter answers TradingView's ten-significant-digit admission itself and declares a *maintenance-only* model, because a positive initial requirement would decline openings TradingView takes and admit adds it refuses (measured both ways, `tests/test_adapter_margin_schedule_differential.cpp`). | ADR 0001 ruling table, row `initial_margin_fraction` |
 | `NativeRunSpec::report_open_position_at_end` and the adapter's range-end rows | TradingView's range-end report re-marks the curve's last point and re-folds every extreme from it: report *shape*, not a mark-to-market row. | ADR 0001 ruling table, row `report_open_position_at_end`; design `native-feature-parity.md:629` |
 | `subscriptions` in the spec and the adapter's begin-time declaration | the adapter declares the same kernel subscriptions through a hook instead of the field, so a plain `request.security` site really is a kernel subscription. | ADR 0001 ruling table, row `subscriptions` |
@@ -264,7 +264,7 @@ measurement that produced it, so a later change to it is visible as a change to
 the record, not as an edit to a literal.
 
 **floor** — the minimum number of CTest rows a profile must actually run
-(`KERNEL_MIN_TESTS` ci_verify.py:293, `RELEASE_MIN_TESTS` ci_verify.py:463). It
+(`KERNEL_MIN_TESTS` ci_verify.py:301, `RELEASE_MIN_TESTS` ci_verify.py:511). It
 counts rows that ran, so a skipped row does not pad it.
 
 **receipt** — the recorded evidence an ABI-comparison row needs (a prepared

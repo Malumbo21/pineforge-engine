@@ -171,9 +171,10 @@ static void test_R1_ms_lf_a_short_held() {
 // ─────────────────────────────────────────────────────────────────────
 // R2 — MS-SF-A: E1 short MARKET, then E2 long STOP (marketable @50), same
 // bar, from flat. TV holds net +1 long (the buy-side E2 leg). Engine HEAD:
-// close-only-flat (net 0). The engine fills E1 (short) first by seq, so the
-// trade decomposition differs from TV's buy-first split (E2 long x2); we pin
-// the NET position, which is the 782-event divergence the pin names.
+// close-only-flat (net 0). TradingView fills the buy stop first, as one buy
+// of both quantities (E2 long x2), and the market then sells its own one:
+// the closed trade is a slice of E2's long, closed by E1 (lab tv
+// w6-f10a-open-pair MS-SF, lane W6-ENG-FILL-ORDER).
 // ─────────────────────────────────────────────────────────────────────
 static void test_R2_ms_sf_a_long_held() {
     std::printf("test_R2_ms_sf_a_long_held\n");
@@ -189,11 +190,12 @@ static void test_R2_ms_sf_a_long_held() {
     p.run(bars, 3);
 
     CHECK(near(p.pos(), 1.0));                   // HEAD: 0.0 (close-only-flat)
-    CHECK(p.trade_count() == 1);                 // E1 short round-trip, dur-0
+    CHECK(p.trade_count() == 1);                 // E2 long slice, dur-0
     if (p.trade_count() == 1) {
         const Trade& t = p.get_trade(0);
-        CHECK(!t.is_long);
-        CHECK(t.entry_id == "E1");
+        CHECK(t.is_long);
+        CHECK(t.entry_id == "E2");
+        CHECK(t.exit_id == "E1");
         CHECK(t.exit_bar_index == 1);
     }
 }
@@ -664,7 +666,10 @@ static void test_MM_scope_predicates_do_not_pair_or_gross_gate() {
     CHECK(oca.queued == 2 && oca.metadata_clean);
     CHECK(slippage.queued == 2 && slippage.metadata_clean);
     CHECK(zero_qty.queued == 2 && zero_qty.metadata_clean);
-    CHECK(non_p2.queued == 2 && non_p2.metadata_clean);
+    // pyramiding 1 is not excluded: TradingView costs the later call's own
+    // quantity plus the pending market's there too and drops it past the
+    // equity (lab tv w6-f10h-pair-gross-pyramiding1, lane W6-ENG-FILL-ORDER).
+    CHECK(non_p2.queued == 1 && non_p2.metadata_clean);
     CHECK(custom_margin.queued == 2 && custom_margin.metadata_clean);
     CHECK(risk_rule.queued == 2 && risk_rule.metadata_clean);
     CHECK(three_calls.queued == 3 && three_calls.metadata_clean);
@@ -1055,6 +1060,11 @@ static void test_MM_pair_fill_gap_gate_uses_gross_transaction_qty() {
 // Deferred percent-layered exits armed between pair calls resolve against the
 // final own exposure, not the transient gross open. At 2.5, 40%/60% must freeze
 // to 1.0/1.5 only after transaction netting completes.
+// Expectation corrected (lane W3B-ENG-GRID): the two exits are issued before
+// LAY-L's entry call, while LAY-L neither exists nor rests, and TradingView
+// voids such an exit (lab tv w3f05-s18, -s21: an exit issued on its entry's
+// bar before the entry call never fills; w3bf05-v1): nothing rests for them
+// after the pair, where the adapter had frozen 1.0 and 1.5.
 static void test_MM_pair_defers_percent_exit_reconciliation_until_net() {
     std::printf("test_MM_pair_defers_percent_exit_reconciliation_until_net\n");
     struct P : PendingMarketProbeBase {
@@ -1086,8 +1096,8 @@ static void test_MM_pair_defers_percent_exit_reconciliation_until_net() {
     p.run(bars, 3);
     CHECK(near(p.position_after_pair, 2.5));
     CHECK(near(p.ledger_after_pair, 2.5));
-    CHECK(near(p.exit_one_qty, 1.0));
-    CHECK(near(p.exit_two_qty, 1.5));
+    CHECK(near(p.exit_one_qty, 0.0));
+    CHECK(near(p.exit_two_qty, 0.0));
     CHECK(p.trade_count() == 2);
 }
 

@@ -186,6 +186,12 @@ struct PlacementSnapshot {
     bool opening = false;
     bool deferred_cohort = false;
     bool reservation_deferred_to_pending_entry = false;
+    // A strategy.exit issued while its from_entry had neither an open trade
+    // nor an entry order waiting to fill, which TradingView voids. Its request
+    // waits in the book as before; the entry's opening withdraws it
+    // (withdraw_void_exits), and a re-issue made once the entry exists takes
+    // a new place in the exit queue rather than this one's.
+    bool void_issue = false;
     bool fixed_exit_reservation = false;
     bool frozen_market_instruction = false;
     double frozen_market_own_units = std::numeric_limits<double>::quiet_NaN();
@@ -223,10 +229,15 @@ struct PlacementSnapshot {
     std::uint64_t command_sequence = 0;
     // Source close-callsite lowering facts. They describe one admitted
     // script-evaluation command; the native request remains the sole
-    // executable order.
+    // executable order. `close_first_id` is the id the fill books against in
+    // the close ledger (book_close_ledger): the first call of the call site
+    // on the bar, whatever id a later call of the site sized the order for.
     std::uint64_t close_callsite_token = 0;
     std::uint32_t close_batch_calls = 0;
     SourceId close_first_id{};
+    // Retired with the reservation model (lane W3B-ENG-GRID): nothing sets
+    // these six any more, and each keeps its default so the v4 placement
+    // fold keeps its layout.
     double close_first_target = 0.0;
     bool close_first_ledger_consumed = false;
     bool close_first_carry_valid = false;
@@ -1206,6 +1217,9 @@ struct SourceDayLedger {
     int consecutive_loss_days = 0;
     std::int64_t intraday_loss_day = std::numeric_limits<std::int64_t>::min();
     double intraday_start_equity = std::numeric_limits<double>::quiet_NaN();
+    // The script bar whose open captured intraday_start_equity: fills at that
+    // open point precede the day (lane W8A-SIGSTATE-1 R4).
+    std::int64_t intraday_start_script_bar = std::numeric_limits<std::int64_t>::min();
     double intraday_realized = 0.0;
     std::uint64_t observed_applied_ordinal = 0;
 };
@@ -1383,6 +1397,9 @@ public:
     std::optional<double> resolve_margin_call_units(const NativeMarginCallView&) const;
     void on_bar_open(const Bar&, const NativeDecisionContext&);
     void on_tick(const Bar&, const NativeTickContext&);
+    // Called from the generic calculation callback before the source script
+    // runs, at the executable decision point on_bar_close then sees.
+    void on_bar_close_before_script(const Bar&, const NativeDecisionContext&);
     // Called from the generic calculation callback after the source script
     // has returned while the current decision point remains executable.
     void on_bar_close(const Bar&, const NativeDecisionContext&);
@@ -1408,20 +1425,9 @@ public:
     }
     int source_entry_slot_count() const noexcept;
     double fixture_close_logical_units(const SourceId&) const noexcept;
-    double fixture_close_reserved_units(const SourceId&) const noexcept;
-    double fixture_close_first_units(const SourceId&) const noexcept;
-    double fixture_callsite_close_reserved_units(
-        std::uint64_t, const SourceId&) const noexcept;
-    double fixture_callsite_close_first_units(
-        std::uint64_t, const SourceId&) const noexcept;
-    std::size_t fixture_close_reservation_count() const noexcept;
-    std::size_t fixture_close_first_count() const noexcept;
     std::size_t fixture_close_logical_count() const noexcept {
         return close_logical_units_.size();
     }
-    std::size_t fixture_callsite_close_reservation_count() const noexcept;
-    std::size_t fixture_callsite_close_first_count() const noexcept;
-    double fixture_callsite_close_reserved_total() const noexcept;
     double fixture_close_pending_debt() const noexcept {
         return close_batch_pending_debt_;
     }
@@ -1589,6 +1595,11 @@ private:
         PlacementSnapshot snapshot;
         SourceId replacement_key;
         bool opening = false;
+        // A same-id MARKET reissue booked as a transaction of its own units
+        // (R1) and the held opposite units it left out, which the round-8
+        // short-seed book puts back.
+        bool staged_reversal = false;
+        double staged_reversal_held_units = 0.0;
     };
 
     // A source command can remain observable through the enclosing source
@@ -1660,21 +1671,26 @@ private:
         std::uint64_t surviving_exit_incarnation = 0;
     };
 
+    // One strategy.close call site on one bar: TradingView keeps one order
+    // per site. Its quantity and comment are the last effective call's, the
+    // id its fill books against the first effective call's.
     struct CloseCallsiteState {
         bool active = false;
         std::uint64_t token = 0;
         int calls = 0;
         SourceId first_id{};
-        double first_target = 0.0;
-        bool first_ledger_consumed = false;
-        bool first_carry_valid = false;
-        double first_carry_qty = 0.0;
         SourceId id{};
         std::string comment{};
         double target = 0.0;
-        bool retire_ledger_whole = false;
         std::uint64_t queue_sequence = 0;
-        std::vector<SourceId> deferred_cleanup_ids;
+    };
+
+    // One opening fill's share of the close ledger: the units entered under
+    // `id` that no close has booked yet. Records keep fill order; adjacent
+    // records of one id merge.
+    struct CloseLedgerRecord {
+        SourceId id{};
+        double units = 0.0;
     };
 
     NativeStrategyHost& require_host() const;
@@ -1742,9 +1758,14 @@ private:
         const Bar&, const NativeDecisionContext&);
     bool schedule_tv_money_long_margin_before_trail(
         const Bar&, const NativeDecisionContext&);
-    bool market_orders_pending_at_close(const NativeDecisionContext& context,
-                                        std::uint64_t except_incarnation = 0) const;
-    bool defer_rounded_pooc_short_margin_until_close(const Bar&) const;
+    std::optional<std::int64_t> flat_sibling_placement(std::size_t min_lots) const;
+    bool flat_sibling_book(const PlacementSnapshot&, std::int32_t interval_index,
+                           NativePathPhase phase) const;
+    bool flat_sibling_fill_follows(const PlacementSnapshot&,
+                                   const native_order::RequestHandle&) const;
+    bool whole_unit_follow_up_due(double called_units, double mark) const;
+    void follow_one_unit_margin_call(double called_units, double fill, double current,
+                                     const NativeDecisionContext&);
     bool declined_reversal_at_open(const Bar&) const;
     bool schedule_margin_call_path(const Bar&, const NativeDecisionContext&);
     void defer_declined_reversal_exits_at_adverse(const Bar&,
@@ -1855,7 +1876,7 @@ private:
                          bool include_next_open = false);
     native_order::Owner owner_for_close(const SourceId&, bool dynamic) const;
     bool same_bar_market_tx_scope() const;
-    void flush_pending_same_bar_commands();
+    void flush_pending_same_bar_commands(bool flat_pair_follows = false);
     // The placement-time default quantity: the core's own conversion, read as
     // a query (NativeStrategyHost::native_sized_units) and floored by the
     // source.  The source's money band and affordability gates consume the
@@ -1969,6 +1990,13 @@ private:
     void fill_pooc_close_entries(double raw_close, const NativeDecisionContext&,
                                  bool after_close);
     void flush_pooc_marketable_exit_fills(const Bar&, const NativeDecisionContext&);
+    // The close pass's exit fills at a close tick, and whether the calculation
+    // still has an order the close fills at any price.
+    void fill_pooc_close_exits(double raw_close, const NativeDecisionContext&);
+    bool pooc_close_market_pending(const NativeDecisionContext&) const;
+    // A from_entry "" exit without a quantity that is the book's only exit:
+    // it closes its percentage of the position it fills against.
+    bool fill_time_global_exit(const PlacementSnapshot&) const;
     void record_market_review(admission::Checkpoint, int,
                               const std::vector<native_order::RequestHandle>&);
     void refresh_pending_sizing_after_margin(
@@ -1977,13 +2005,20 @@ private:
         const Bar&, const NativeDecisionContext&, bool defer_trails = false);
     void reaccept_gapped_bracket_behind_same_id_add(
         const Bar&, const NativeDecisionContext&);
+    void order_open_marketable_limit_entries(const Bar&, const NativeDecisionContext&);
     void apply_terminal_explicit_market_policy(const NativeDecisionContext&);
     bool enqueue_pooc_fifo_close(const SourceId&, const std::string&,
                                  std::uint64_t, std::uint64_t);
-    double close_reserved_other_units(const SourceId&,
-                                      std::uint64_t) const noexcept;
-    void observe_close_policy(const native_order::ExecutionAppliedEvent&,
-                              const PlacementSnapshot&);
+    void observe_close_ledger(const native_order::ExecutionAppliedEvent&,
+                              const PlacementSnapshot*);
+    bool entry_order_pending(const SourceId&) const;
+    bool open_lot_of(const SourceId& id) const;
+    bool standing_exit(const SourceId& exit_id, const SourceId& from_entry) const;
+    void unvoid_exit(PlacementSnapshot& row);
+    void execute_or_withdraw_close(native_order::RequestHandle close, bool void_issue);
+    void withdraw_void_exits(const SourceId& entry_id);
+    void credit_close_ledger(const SourceId&, double units);
+    void book_close_ledger(const SourceId&, double units);
 
     // @source-state begin
     NativeStrategyHost* host_ = nullptr;
@@ -2039,13 +2074,12 @@ private:
     std::unordered_map<SourceId, std::int64_t> consumed_partial_exit_cycles_;
     std::unordered_set<std::uint64_t> bracket_shadowed_openings_;
     std::unordered_map<SourceId, NamedEntryCancelToken> named_entry_cancel_tokens_;
+    // The close ledger: per id, the units entered under it that no close has
+    // booked yet (close_logical_units_), and the same units by opening fill
+    // in fill order (close_ledger_records_), which a booking beyond its id's
+    // own units spills over oldest first.
     std::map<SourceId, double> close_logical_units_;
-    std::map<SourceId, double> close_reserved_units_;
-    std::map<SourceId, double> close_first_units_;
-    std::map<std::uint64_t, std::map<SourceId, double>>
-        close_callsite_reserved_units_;
-    std::map<std::uint64_t, std::map<SourceId, double>>
-        close_callsite_first_units_;
+    std::vector<CloseLedgerRecord> close_ledger_records_;
     std::map<std::uint64_t, CloseCallsiteState> close_batch_callsites_;
     std::int32_t close_batch_bar_ = -1;
     std::uint64_t close_batch_queue_sequence_ = 0;
@@ -2113,8 +2147,11 @@ private:
     // did. Same hash argument as kernel_margin_path_point_ above: a strictly
     // monotone ordinal compared only for equality with the current point's.
     std::uint64_t kernel_margin_resize_point_ = std::numeric_limits<std::uint64_t>::max();
-    // Close-time carried-POOC-short checkpoint deferred behind this bar's
-    // market fills (ab9714be pine_scheduler.cpp:260 before :278).
+    // Retired by lane W5B-ENG-MARGIN-RESIDUAL: ab9714be deferred a carried
+    // process_orders_on_close short's checkpoint behind its bar's close market
+    // fills (pine_scheduler.cpp:260 before :278); TradingView checks it over
+    // the bar's path before the script instead. Never set now, and kept as
+    // the constant it folds into the broker-state hash.
     std::int64_t pooc_close_checkpoint_deferred_ms_ = std::numeric_limits<std::int64_t>::min();
     std::int32_t signal_close_mc_event_bar_ = -1;
     std::int64_t signal_close_mc_position_cycle_ = 0;
@@ -2228,6 +2265,19 @@ private:
         }
     };
     RetiredRowScratch retired_row_scratch_;
+    // R5 lane W6: after a source evaluation, queue this bar's marketable
+    // flat entries in TradingView's order at their shared fill point.
+    void order_same_point_entries();
+    double pending_opposite_market_units(bool is_long, std::int64_t script_open_ms, const SourceId& id) const;
+    // R5 lane W6B-ENG-PAIRS: the configurations those flat-pair rules cover,
+    // and whether a pair's opposite member fills next at the same price.
+    bool same_point_pair_scope() const;
+    bool same_point_two_leg_book(const SourceId& id, std::int64_t script_open_ms) const;
+    bool same_point_pair_fill_follows(const PlacementSnapshot& filled,
+                                      const native_order::RequestHandle& filled_handle,
+                                      double price) const;
+    // Item 3: a flat market-and-priced pair at a process_orders_on_close close.
+    bool fill_pooc_close_pair(double raw_close, const NativeDecisionContext& context);
 };
 
 } // namespace pineforge::source

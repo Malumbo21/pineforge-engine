@@ -907,7 +907,7 @@ class CAbiRuntimeInventory(unittest.TestCase):
         )
         header = _pf_api_names(ROOT / 'include/pineforge/pineforge.h')
         runtime = _pf_api_names(ROOT / 'src/c_abi.cpp')
-        self.assertEqual(EXPECTED_PUBLIC_DECLARATIONS, 70)
+        self.assertEqual(EXPECTED_PUBLIC_DECLARATIONS, 71)
         self.assertEqual(EXPECTED_RUNTIME_IMPLEMENTATIONS, 62)
         self.assertEqual(len(EXPECTED_RUNTIME), EXPECTED_RUNTIME_IMPLEMENTATIONS)
         self.assertEqual(len(header), EXPECTED_PUBLIC_DECLARATIONS)
@@ -922,6 +922,9 @@ class CAbiRuntimeInventory(unittest.TestCase):
                      'strategy_set_symbol_facts', 'strategy_set_recorded_series'):
             self.assertIn(name, header)
             self.assertIn(name, runtime)
+        # Generated, only by a script declaring use_bar_magnifier = true.
+        self.assertIn('strategy_declares_bar_magnifier', header)
+        self.assertNotIn('strategy_declares_bar_magnifier', runtime)
 
     def test_historical_only_setters_say_a_stream_refuses_them(self):
         from check_c_abi_runtime import (
@@ -1352,7 +1355,7 @@ class DriverOrderingAndAggregation(unittest.TestCase):
 
     def test_pr_exclusion_proves_registered_minus_labelled_equals_ran(self):
         self.assertEqual(ci_verify.EXCLUDED_REGISTERED_MIN,
-                         {'debug': 705, 'sanitizers': 705, 'native': 714})
+                         {'debug': 733, 'sanitizers': 733, 'native': 742})
         for profile, registered in ci_verify.EXCLUDED_REGISTERED_MIN.items():
             with self.subTest(profile=profile):
                 code, summary, scripted, _ = self.run_profile(

@@ -354,6 +354,7 @@ void source::PineStrategyHost::on_native_bar(
     diag_magnifier_sample_ticks_processed_ = bar_magnifier_enabled_
         ? static_cast<std::int64_t>(context.driver_statistics.sample_ticks_processed) : 0;
     adapter_.observe_terminal_receipts();
+    adapter_.on_bar_close_before_script(bar, context);
     scheduler_.bar(bar, context, *this);
     adapter_.on_bar_close(bar, context);
     if (context.is_terminal_sub_bar
@@ -1678,6 +1679,7 @@ void source::PineStrategyHost::scheduler_publish_source_bar(
                                               && adapter_.pending_relative_exits_.empty())) {
         adapter_.anchor_relative_exits();
     }
+    adapter_.order_same_point_entries();
     if (advance_source_index) {
         scheduler_mark_report_point(bar.timestamp);
         prev_bar_timestamp_ = bar.timestamp;

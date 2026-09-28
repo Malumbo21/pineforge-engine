@@ -56,6 +56,9 @@ void hash_placement(BrokerStateHashSink& f, const source::PlacementSnapshot& val
     f.d(value.qty_percent); f.b(value.is_long); f.b(value.immediately);
     f.b(value.opening); f.b(value.deferred_cohort);
     f.b(value.reservation_deferred_to_pending_entry);
+    // Folded only when set, so a run that never issues a void exit keeps
+    // its digest (lane W3B-ENG-GRID).
+    if (value.void_issue) f.b(true);
     f.b(value.fixed_exit_reservation);
     f.b(value.frozen_market_instruction);
     f.d(value.frozen_market_own_units); f.d(value.frozen_market_transaction_units);
@@ -346,6 +349,10 @@ void source::PineExecutionAdapter::hash_state(BrokerStateHashSink& f) const {
     for (const auto& command : pending_same_bar_commands_) {
         hash_native_request(f, command.request); hash_placement(f, command.snapshot);
         f.s(command.replacement_key); f.b(command.opening);
+        // Folded only when set, so a batch without an R1 reissue keeps its digest.
+        if (command.staged_reversal) {
+            f.b(command.staged_reversal); f.d(command.staged_reversal_held_units);
+        }
     }
     f.u(source_shadow_pending_.size());
     for (const auto& shadow : source_shadow_pending_) {
@@ -443,31 +450,24 @@ void source::PineExecutionAdapter::hash_state(BrokerStateHashSink& f) const {
         const auto& token = named_entry_cancel_tokens_.at(key);
         f.s(key); f.u(token.entry_incarnation); f.u(token.surviving_exit_incarnation);
     }
-    const auto hash_close_units = [&](const auto& values) {
-        f.u(values.size());
-        for (const auto& row : values) { f.s(row.first); f.d(row.second); }
-    };
-    hash_close_units(close_logical_units_);
-    hash_close_units(close_reserved_units_);
-    hash_close_units(close_first_units_);
-    const auto hash_close_owners = [&](const auto& owners) {
-        f.u(owners.size());
-        for (const auto& owner : owners) {
-            f.u(owner.first); hash_close_units(owner.second);
-        }
-    };
-    hash_close_owners(close_callsite_reserved_units_);
-    hash_close_owners(close_callsite_first_units_);
+    f.u(close_logical_units_.size());
+    for (const auto& row : close_logical_units_) { f.s(row.first); f.d(row.second); }
+    // The ledger's records fold only when there are two or more: a single
+    // record is the one id close_logical_units_ holds, and none is none, so a
+    // position of one id folds what it folded before the records existed.
+    if (close_ledger_records_.size() > 1) {
+        f.u(close_ledger_records_.size());
+        for (const auto& record : close_ledger_records_) { f.s(record.id); f.d(record.units); }
+    }
+    // The retired reservation model's two maps and two per-site maps fold as
+    // the empty maps they always were outside a multi-call close site.
+    f.u(0); f.u(0); f.u(0); f.u(0);
     f.u(close_batch_callsites_.size());
     for (const auto& row : close_batch_callsites_) {
         const auto& site = row.second;
         f.u(row.first); f.b(site.active); f.u(site.token); f.i(site.calls);
-        f.s(site.first_id); f.d(site.first_target);
-        f.b(site.first_ledger_consumed); f.b(site.first_carry_valid);
-        f.d(site.first_carry_qty); f.s(site.id); f.s(site.comment);
-        f.d(site.target); f.b(site.retire_ledger_whole);
-        f.u(site.queue_sequence); f.u(site.deferred_cleanup_ids.size());
-        for (const auto& id : site.deferred_cleanup_ids) f.s(id);
+        f.s(site.first_id); f.s(site.id); f.s(site.comment);
+        f.d(site.target); f.u(site.queue_sequence);
     }
     f.i(close_batch_bar_); f.u(close_batch_queue_sequence_);
     f.d(close_batch_pending_debt_); f.d(close_batch_admitted_total_);
@@ -556,6 +556,9 @@ void source::PineExecutionAdapter::hash_state(BrokerStateHashSink& f) const {
     f.i(day_ledger_.current_day); f.i(day_ledger_.last_loss_day); f.i(day_ledger_.consecutive_loss_days);
     f.i(day_ledger_.intraday_loss_day); f.d(day_ledger_.intraday_start_equity);
     f.d(day_ledger_.intraday_realized); f.u(day_ledger_.observed_applied_ordinal);
+    // Decision state only under an intraday loss rule (lane W8A-SIGSTATE-1
+    // R4); folded only then, so every run without one keeps its digest.
+    if (risk_.max_intraday_loss > 0.0) f.i(day_ledger_.intraday_start_script_bar);
     f.i(risk_.direction); f.i(risk_.max_cons_loss_days); f.d(risk_.max_drawdown);
     f.b(risk_.max_drawdown_percent); f.d(risk_.max_intraday_loss);
     f.b(risk_.max_intraday_loss_percent); f.d(risk_.max_position_size); f.b(risk_.halted);
