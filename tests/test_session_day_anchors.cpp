@@ -83,11 +83,12 @@ static void test_forex_daily_open_is_17et() {
     // Winter (EST): 17:00 ET == 22:00Z.
     CHECK_EQ_MS(session_period_open_ms(utc_ms(2025, 1, 15, 12, 0), NY, FX, CalendarPeriod::DAY),
                 utc_ms(2025, 1, 14, 22, 0));
-    // Daily close == next session open (exclusive); time_close reports the last ms.
+    // Daily close == next session open (exclusive); time_close reports that
+    // boundary exactly (lane W12-ENG-TIME: the exact boundary, lab tv w12-tclose-*, tests/fixtures/time_close_function).
     CHECK_EQ_MS(session_period_close_ms(bar, NY, FX, CalendarPeriod::DAY),
                 utc_ms(2025, 6, 10, 21, 0));
     CHECK_EQ_MS(pine_time_close(bar, "D", "", "", "15", NY, FX),
-                utc_ms(2025, 6, 10, 21, 0) - 1);
+                utc_ms(2025, 6, 10, 21, 0));
 }
 
 static void test_forex_dst_step() {
@@ -169,14 +170,17 @@ static void test_forex_pine_time_symbol_clock() {
     // Two-arg time("D", "<tz>") — a timezone in the session slot is not a
     // session: filter dropped, open still the symbol's daily bar.
     CHECK_EQ_MS(pine_time(bar, "D", "Europe/Prague", "", "15", NY, FX), utc_ms(2025, 6, 9, 21, 0));
-    // A VALID session argument defines the day in ITS timezone (TV keys
-    // `time("D", "0000-2359", "America/New_York")` on New York midnight —
-    // measured on lukeborgerding-orb-avwap-retest, 100% vs 18%): the
-    // tz-only calendar floor of the 5-arg forms, na outside the window.
+    // A VALID session argument's D bar is the session's own, in ITS timezone
+    // (TV keys `time("D", "0000-2359", "America/New_York")` on New York
+    // midnight — measured on lukeborgerding-orb-avwap-retest, 100% vs 18% —
+    // and opens `time("D", "0930-1600", "America/New_York")` at 09:30 New
+    // York, lab tv w12-tfd-xau15 field d, tests/fixtures/session_period): the
+    // same bar in the 5-arg forms, na outside the window. Lane W12-ENG-TIME
+    // moved the open from New York's midnight (04:00Z) to 09:30 (13:30Z).
     CHECK_EQ_MS(pine_time(utc_ms(2025, 6, 10, 14, 0), "D", RTH, NY, "15", NY, FX),
                 pine_time(utc_ms(2025, 6, 10, 14, 0), "D", RTH, NY, "15"));
     CHECK_EQ_MS(pine_time(utc_ms(2025, 6, 10, 14, 0), "D", RTH, NY, "15", NY, FX),
-                utc_ms(2025, 6, 10, 4, 0));
+                utc_ms(2025, 6, 10, 13, 30));
     CHECK(is_na(pine_time(bar, "D", RTH, NY, "15", NY, FX)));
     // Same on a UTC/24x7 symbol: the session's tz rolls the day, not UTC.
     CHECK_EQ_MS(pine_time(utc_ms(2025, 6, 10, 1, 0), "D", "0000-2359", NY, "15", UTC, "24x7"),
@@ -210,7 +214,7 @@ static void test_equity_daily_open_is_0930et() {
     CHECK_EQ_MS(pine_time(bar, "D", "", "", "15", NY, RTH), utc_ms(2025, 6, 10, 13, 30));
     // Close == 16:00 ET, not the next session open.
     CHECK_EQ_MS(session_period_close_ms(bar, NY, RTH, CalendarPeriod::DAY), utc_ms(2025, 6, 10, 20, 0));
-    CHECK_EQ_MS(pine_time_close(bar, "D", "", "", "15", NY, RTH), utc_ms(2025, 6, 10, 20, 0) - 1);
+    CHECK_EQ_MS(pine_time_close(bar, "D", "", "", "15", NY, RTH), utc_ms(2025, 6, 10, 20, 0));
     // Winter: 09:30 EST == 14:30Z.
     CHECK_EQ_MS(session_period_open_ms(utc_ms(2025, 1, 15, 15, 0), NY, RTH, CalendarPeriod::DAY),
                 utc_ms(2025, 1, 15, 14, 30));

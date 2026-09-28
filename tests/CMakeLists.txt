@@ -957,6 +957,10 @@ list(APPEND TEST_SOURCES test_run_harness_window_tapes)
 # INT28: two wave-J lanes' rules acting in one run, and at one fill
 # (tests/fixtures/int28_compositions), on TradingView's tapes.
 list(APPEND TEST_SOURCES test_int28_rule_compositions)
+# INT29: lane W10-DIAG-UNKNOWN's COQ and SAMEOPEN-REV beside lane
+# W5B-ENG-MARGIN-RESIDUAL's SB and PA at one open
+# (tests/fixtures/int29_compositions), on TradingView's tape.
+list(APPEND TEST_SOURCES test_int29_rule_compositions)
 
 # Lane INT28-FIX (CA): a strategy.close_all() placed after the same bar's
 # all-in reversal entry belongs to that reversal
@@ -968,10 +972,35 @@ list(APPEND TEST_SOURCES test_margin_residual_tapes)
 # Lane INT28-FIX: a slipped all-in short's admission and its one-unit margin
 # calls (tests/fixtures/slipped_short), on TradingView's tapes.
 list(APPEND TEST_SOURCES test_slipped_short_tapes)
+# Lane W13-ENG-MARGIN-OPP: a margin call at a bar's close after the script,
+# and orders sized at placement that cross zero (tests/fixtures/margin_opposite
+# and tests/fixtures/slipped_short), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_margin_opposite_tapes)
 # Lane INT28-FIX (RC): a calc_on_order_fills recalculation reads the whole
 # bar's finer request.security values (tests/fixtures/coof_recalc_security),
 # on TradingView's tape.
 list(APPEND TEST_SOURCES test_coof_recalc_security_tapes)
+# Lane W10-DIAG-UNKNOWN rule COQ: each MARKET entry filled at an open is judged
+# against the position held when it was placed, not a same-open sibling's fill
+# (tests/fixtures/coqueued_open_margin), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_coqueued_open_margin_tapes)
+
+# Lane W10-DIAG-UNKNOWN rules CAP-ORDER and CAP-ON: TradingView's
+# strategy.risk.max_intraday_filled_orders count (tests/fixtures/
+# intraday_cap_tv), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_intraday_cap_tv_tapes)
+
+# Lane W10-DIAG-UNKNOWN rule GAPSTOP: under process_orders_on_close a default
+# percent stop entry the next open gaps through is refused when that open costs
+# more than its sizing equity (tests/fixtures/pooc_gap_stop), on TradingView's
+# tapes.
+list(APPEND TEST_SOURCES test_pooc_gap_stop_tapes)
+
+# Lane W10-DIAG-UNKNOWN rule SAMEOPEN-REV: a default-size entry placed flat or
+# on its own side that reverses the position a same-bar entry opened at the
+# same open must fit with that position still margined
+# (tests/fixtures/same_open_reversal), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_same_open_reversal_tapes)
 
 # R5 F3: the contracts the kernel documents for every host, witnessed on bare
 # hosts. Source-free, so it also runs in the kernel-only profile.
@@ -1010,6 +1039,11 @@ list(APPEND TEST_SOURCES test_native_session_day_zoned)
 # there, and a bar that traded nothing at one price is one point. Source-free,
 # so it also runs in the kernel-only profile.
 list(APPEND TEST_SOURCES test_native_intrabar_turning_points)
+# Lane W11-ENG-TIME-COLOR: colors as TradingView reads them back -- the named
+# constants, color.new / color.rgb over a transparency sweep, every alpha
+# byte (tests/fixtures/color_tv). Source-free, so it also runs in the
+# kernel-only profile.
+list(APPEND TEST_SOURCES test_color_tapes)
 
 # R5 F5: the Pine adapter selects those facts instead of computing its own:
 # the same tapes flag for flag through the adapter, its live-probe tail
@@ -2539,6 +2573,12 @@ if(TARGET test_int28_rule_compositions)
         PINEFORGE_OPEN_FILL_ORDER_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/open_fill_order")
 endif()
 
+# INT29 reads its TradingView tape from the fixture tree; source-bound.
+if(TARGET test_int29_rule_compositions)
+    target_compile_definitions(test_int29_rule_compositions PRIVATE
+        PINEFORGE_INT29_COMPOSITIONS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/int29_compositions")
+endif()
+
 # Lane INT28-FIX (CA) reads its TradingView tapes from the fixture tree and
 # the 15m bars of tests/fixtures/margin_v6; source-bound.
 if(TARGET test_reversal_close_all_tapes)
@@ -2560,11 +2600,47 @@ if(TARGET test_slipped_short_tapes)
         PINEFORGE_SLIPPED_SHORT_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/slipped_short")
 endif()
 
+# Lane W13-ENG-MARGIN-OPP reads its TradingView tapes from the fixture tree;
+# source-bound.
+if(TARGET test_margin_opposite_tapes)
+    target_compile_definitions(test_margin_opposite_tapes PRIVATE
+        PINEFORGE_MARGIN_OPPOSITE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/margin_opposite"
+        PINEFORGE_SLIPPED_SHORT_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/slipped_short")
+endif()
+
 # Lane INT28-FIX (RC) reads its TradingView tape from the fixture tree;
 # source-bound.
 if(TARGET test_coof_recalc_security_tapes)
     target_compile_definitions(test_coof_recalc_security_tapes PRIVATE
         PINEFORGE_COOF_RECALC_SECURITY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_recalc_security")
+endif()
+
+# Lane W10-DIAG-UNKNOWN (COQ) reads its TradingView tapes from the fixture tree;
+# source-bound.
+if(TARGET test_coqueued_open_margin_tapes)
+    target_compile_definitions(test_coqueued_open_margin_tapes PRIVATE
+        PINEFORGE_COQ_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coqueued_open_margin")
+endif()
+
+# Lane W10-DIAG-UNKNOWN (CAP) reads its TradingView tapes from the fixture tree;
+# source-bound.
+if(TARGET test_intraday_cap_tv_tapes)
+    target_compile_definitions(test_intraday_cap_tv_tapes PRIVATE
+        PINEFORGE_CAP_TV_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/intraday_cap_tv")
+endif()
+
+# Lane W10-DIAG-UNKNOWN (GAPSTOP) reads its TradingView tapes from the fixture
+# tree; source-bound.
+if(TARGET test_pooc_gap_stop_tapes)
+    target_compile_definitions(test_pooc_gap_stop_tapes PRIVATE
+        PINEFORGE_GAPSTOP_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pooc_gap_stop")
+endif()
+
+# Lane W10-DIAG-UNKNOWN (SAMEOPEN-REV) reads its TradingView tapes from the
+# fixture tree; source-bound.
+if(TARGET test_same_open_reversal_tapes)
+    target_compile_definitions(test_same_open_reversal_tapes PRIVATE
+        PINEFORGE_SAMEOPEN_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/same_open_reversal")
 endif()
 
 # K-DRAWSNAP replays TradingView's calc_on_order_fills drawing-rollback tape
@@ -2584,6 +2660,40 @@ if(TARGET test_session_day_facts_adapter)
     target_compile_definitions(test_session_day_facts_adapter PRIVATE
         PINEFORGE_F5_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/session_islastbar")
 endif()
+
+# Lane W11-ENG-TIME-COLOR: the rows that read TradingView tapes from the
+# fixture tree.
+foreach(_pf_w11_row IN ITEMS
+        "test_session_predicates|PINEFORGE_SESSION_CLOCK_FIXTURE_DIR|session_clock"
+        "test_color_tapes|PINEFORGE_COLOR_TV_FIXTURE_DIR|color_tv"
+        "test_ta_voltrend_edge|PINEFORGE_SUPERTREND_WARMUP_FIXTURE_DIR|supertrend_warmup"
+        "test_engine_trade_accessors|PINEFORGE_DAILY_BREAK_CLOSE_FIXTURE_DIR|daily_break_close")
+    string(REPLACE "|" ";" _pf_w11_fields "${_pf_w11_row}")
+    list(GET _pf_w11_fields 0 _pf_w11_target)
+    list(GET _pf_w11_fields 1 _pf_w11_macro)
+    list(GET _pf_w11_fields 2 _pf_w11_dir)
+    if(TARGET ${_pf_w11_target})
+        target_compile_definitions(${_pf_w11_target} PRIVATE
+            ${_pf_w11_macro}="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_pf_w11_dir}")
+    endif()
+endforeach()
+
+# Lane W12-ENG-TIME: the rows that read its TradingView tapes.
+foreach(_pf_w12_row IN ITEMS
+        "test_session_predicates|PINEFORGE_SESSION_PERIOD_FIXTURE_DIR|session_period"
+        "test_session_predicates|PINEFORGE_TIME_CLOSE_FUNCTION_FIXTURE_DIR|time_close_function"
+        "test_session_predicates|PINEFORGE_DST_DAY_CLOSE_FIXTURE_DIR|dst_day_close"
+        "test_engine_trade_accessors|PINEFORGE_DST_DAY_CLOSE_FIXTURE_DIR|dst_day_close"
+        "test_engine_trade_accessors|PINEFORGE_SESSION_PERIOD_FIXTURE_DIR|session_period")
+    string(REPLACE "|" ";" _pf_w12_fields "${_pf_w12_row}")
+    list(GET _pf_w12_fields 0 _pf_w12_target)
+    list(GET _pf_w12_fields 1 _pf_w12_macro)
+    list(GET _pf_w12_fields 2 _pf_w12_dir)
+    if(TARGET ${_pf_w12_target})
+        target_compile_definitions(${_pf_w12_target} PRIVATE
+            ${_pf_w12_macro}="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_pf_w12_dir}")
+    endif()
+endforeach()
 
 # std::thread needs an explicit pthread link on some toolchains.
 target_link_libraries(test_timezone_concurrency PRIVATE Threads::Threads)

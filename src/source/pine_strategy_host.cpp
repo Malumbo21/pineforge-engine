@@ -628,6 +628,7 @@ void source::PineStrategyHost::set_pine_risk_max_intraday_loss(double value, boo
 }
 
 void source::PineStrategyHost::set_pine_risk_max_intraday_filled_orders(int limit) {
+    if (limit > 0) adapter_.cap.adopt_script_count();
     adapter_.cap = limit;
 }
 
@@ -1726,6 +1727,22 @@ void source::PineStrategyHost::scheduler_record_broker_hash() {
 
 bool source::PineStrategyHost::adapter_core_sizes_default_opening(bool is_long) const {
     return adapter_.core_sizes_default_opening(is_long);
+}
+
+// The chart's time_close. A D/W/M chart bar closes at its period's last
+// traded close, to the millisecond, whatever time of day its stamp reads, as
+// time_close(timeframe.period) reads it on that chart (chart_period_close_ms,
+// src/session_time.cpp, where the rule and its tapes are stated): OANDA
+// stamps its XAUUSD daily bars at 17:00 ET, inside the 1800-1700 session's
+// break, and the time-of-day session filter the intraday path applies read
+// that stamp as out of session, so the D chart answered na.
+int64_t source::PineStrategyHost::chart_time_close() const {
+    if (calendar_period_for(script_tf_) != CalendarPeriod::NONE) {
+        return pine_time_close(current_bar_.timestamp, script_tf_, "", "", script_tf_,
+                               syminfo_.timezone, syminfo_.session);
+    }
+    return pine_time_close(current_bar_.timestamp, script_tf_, syminfo_.session,
+                           syminfo_.timezone, script_tf_);
 }
 
 } // namespace pineforge

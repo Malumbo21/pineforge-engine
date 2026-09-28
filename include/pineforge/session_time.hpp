@@ -20,10 +20,11 @@ std::string normalize_timezone_for_posix(const std::string& tz);
 // `syminfo_tz` is the symbol's exchange timezone (Pine `syminfo.timezone`;
 // codegen passes `syminfo_.timezone`). It is the DEFAULT zone the `session`
 // window is interpreted in when `tz` is empty — Pine reads a tz-less session
-// in the exchange timezone, not UTC. An explicit `tz` always wins. It does
-// NOT influence the timeframe open/close computation (explicit `tz`, else
-// UTC, exactly as before); an empty `syminfo_tz` reproduces the historical
-// UTC session default byte-for-byte.
+// in the exchange timezone, not UTC. An explicit `tz` always wins. Under a
+// D/W/M `tf` a valid `session` is its own bar, in that zone (see the
+// symbol-clock forms below); without one the D/W/M open/close is the
+// explicit `tz`'s calendar, else UTC's, exactly as before. An empty
+// `syminfo_tz` reproduces the historical UTC session default byte-for-byte.
 //
 // Feature macro: generated code tests this to decide whether the trailing
 // `syminfo_tz` argument exists, so one transpiler output compiles against
@@ -52,18 +53,26 @@ int64_t timeframe_time_close(int64_t bar_ms,
 // called WITHOUT a valid session argument the returned open / close is the
 // SYMBOL's daily/weekly/monthly bar (17:00 ET on OANDA forex, 09:30 ET RTH
 // on NASDAQ equities, 00:00 UTC on a 24x7 UTC symbol — see
-// session_period_open_ms in timeframe.hpp). A valid `session` argument
-// defines the day in its own `tz` exactly as the forms above do
-// (TradingView rolls `time("D", "0000-2359", "America/New_York")` at New
-// York midnight on a UTC symbol — measured), and its window is read in the
-// explicit `tz`, else `sym_tz` (the syminfo default above), else UTC.
-// An intraday `tf` (with or without a session argument, which only
-// filters) is the symbol's day-stamp-anchored HTF grid bucket
-// (session_intraday_bucket_open_ms in timeframe.hpp — the grid
-// request.security aggregates on): time("60") on NYSE:F is 09:30 / 10:30 /
-// .. / 15:30 ET, time("240") on NSE:NIFTY 09:15 / 13:15 IST and on
-// OANDA:XAUUSD the 17:00-ET-anchored 4h grid (pin-time-hours tapes,
-// 2025-04-01..07-01); the five-argument forms stay on the epoch grid.
+// session_period_open_ms in timeframe.hpp). A valid `session` argument is
+// the bar TradingView builds on that session, in the explicit `tz`, else
+// `sym_tz`, else UTC, on every chart (lab tv tapes w12-tfd*,
+// tests/fixtures/session_period): each session day is one D bar from its
+// first window's open to its last window's close (`time("D", "1700-2400",
+// "America/New_York")` opens at 17:00 New York, `time("D", "0000-2359",
+// "America/New_York")` at New York's midnight), na where no day bar holds the
+// bar; a W / M bar opens at its week's or month's first session day and is
+// never na; time_close of a W / M is the next period's open on an intraday
+// chart and its last session day's close on a daily-or-higher one.
+// An intraday `tf` without a session argument is the symbol's
+// day-stamp-anchored HTF grid bucket (session_intraday_bucket_open_ms in
+// timeframe.hpp — the grid request.security aggregates on): time("60") on
+// NYSE:F is 09:30 / 10:30 / .. / 15:30 ET, time("240") on NSE:NIFTY 09:15 /
+// 13:15 IST and on OANDA:XAUUSD the 17:00-ET-anchored 4h grid (pin-time-hours
+// tapes, 2025-04-01..07-01); the five-argument forms stay on the epoch grid.
+// With a session argument it is the session's own grid: tf bars from each
+// window's open, the last cut at its close (time("240", "1800-1700") on
+// OANDA:XAUUSD opens at 18:00 ET, time(timeframe.period, "0930-1600") on
+// BINANCE:BTCUSDT 60 at 09:30), na outside every window.
 // With sym_tz="UTC" and an empty / "24x7" sym_session these are
 // bit-identical to the five-argument forms above.
 //

@@ -59,6 +59,10 @@ void hash_placement(BrokerStateHashSink& f, const source::PlacementSnapshot& val
     // Folded only when set, so a run that never issues a void exit keeps
     // its digest (lane W3B-ENG-GRID).
     if (value.void_issue) f.b(true);
+    // Folded only when set, like void_issue (lane W13-ENG-MARGIN-OPP).
+    if (value.crosses_zero) f.u(0x7a65726fULL);
+    if (!std::isnan(value.follow_up_fill)) f.d(value.follow_up_fill);
+    if (value.waypoint_margin_call) f.u(0x77617970ULL);
     f.b(value.fixed_exit_reservation);
     f.b(value.frozen_market_instruction);
     f.d(value.frozen_market_own_units); f.d(value.frozen_market_transaction_units);
@@ -519,6 +523,10 @@ void source::PineExecutionAdapter::hash_state(BrokerStateHashSink& f) const {
     f.u(static_cast<std::uint64_t>(position_open_phase_));
     f.b(position_open_priced_);
     f.i(last_margin_call_script_bar_); f.i(pooc_close_checkpoint_deferred_ms_);
+    // Live only from a close to the next open; folded only then (lane
+    // W13-ENG-MARGIN-OPP), so every other run keeps its digest.
+    if (close_margin_open_bar_ != std::numeric_limits<std::int64_t>::min())
+        f.i(close_margin_open_bar_);
     f.u(last_margin_call_event_ordinal_);
     f.u(last_margin_call_entry_incarnation_); f.i(last_margin_call_position_cycle_);
     f.b(last_margin_call_at_script_close_);
@@ -573,6 +581,9 @@ void source::PineExecutionAdapter::hash_state(BrokerStateHashSink& f) const {
     f.i(static_cast<std::int64_t>(cap.attachment())); f.i(cap.configuration().limit);
     f.b(cap.configuration().skip_noop_market); f.b(cap.configuration().defer_pooc_close);
     f.b(cap.configuration().count_pooc_full_close);
+    // Which switches the host declared (rule CAP-ON) decides only an active
+    // cap's count, so it folds only while one is active.
+    if (cap.active()) f.u(cap.declared());
     const auto& cap_budget = cap.budget();
     f.b(cap_budget.day().has_value());
     if (cap_budget.day()) f.i(cap_budget.day()->key);

@@ -16,12 +16,20 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <string>
 
 #include <pineforge/engine.hpp>
 #include <pineforge/source/pine_strategy_host.hpp>
 #include <pineforge/bar.hpp>
 #include <pineforge/na.hpp>
+
+#include "exit_comment_tape.hpp"
+
+#ifndef PINEFORGE_DAILY_BREAK_CLOSE_FIXTURE_DIR
+#error "PINEFORGE_DAILY_BREAK_CLOSE_FIXTURE_DIR must name tests/fixtures/daily_break_close"
+#endif
 
 using namespace pineforge;
 
@@ -350,11 +358,309 @@ static void test_engine_core_helpers() {
     CHECK(p.pub_position_entry_name() == "Z");
 }
 
+
+// The chart's time_close on a D / W / M chart, as TradingView reads it: the
+// chart bar's period closes at its last traded close, to the millisecond,
+// whatever time of day the bar's stamp reads (lane W11-ENG-TIME-COLOR,
+// tests/fixtures/daily_break_close/README.md). Each w11-tclose3 tape spells
+// "time_close - time" in milliseconds first; every reading is replayed on the
+// lane's symbol facts. Exchange holidays and early closes are not modelled:
+// AAPL's 2025-07-03 (13:00 ET) and the XAUUSD week and month that ended on
+// 2024-11-29 (14:45 ET; the daily bars keep 17:00) are pinned as the
+// readings TradingView closes early.
+static void test_chart_time_close_tapes() {
+    std::printf("test_chart_time_close_tapes\n");
+    struct Chart {
+        const char* slug;
+        const char* tf;
+        const char* session;
+        const char* timezone;
+        int early_closes;  // readings TradingView closes before the session's close
+    };
+    static const Chart charts[] = {
+        {"w11-tclose3-xau1d", "1D", "1800-1700", "America/New_York", 0},
+        {"w11-tclose3-btc1d", "1D", "24x7", "UTC", 0},
+        {"w11-tclose3-eur1d", "1D", "1700-1700", "America/New_York", 0},
+        {"w11-tclose3-aapl1d", "1D", "0930-1600", "America/New_York", 1},
+        {"w11-tclose3-xauw", "1W", "1800-1700", "America/New_York", 1},
+        {"w11-tclose3-xaum", "1M", "1800-1700", "America/New_York", 1},
+    };
+    for (const Chart& chart : charts) {
+        bool ok = true;
+        const auto readings =
+            exit_comment_tape::read(PINEFORGE_DAILY_BREAK_CLOSE_FIXTURE_DIR, chart.slug, ok);
+        CHECK(ok);
+        ZeroPriceProbe p;
+        p.set_script_tf(chart.tf);
+        p.set_syminfo_session(chart.session);
+        p.set_syminfo_timezone(chart.timezone);
+        int wrong = 0;
+        int early = 0;
+        for (const auto& reading : readings) {
+            const auto spelled = exit_comment_tape::split(reading.signal, ',');
+            if (spelled.empty() || spelled[0] == "n") { ++wrong; continue; }
+            const long long tv = std::atoll(spelled[0].c_str());
+            p.set_current_bar_timestamp(reading.bar_ms);
+            const int64_t tc = p.pub_time_close();
+            const long long engine = is_na(tc) ? -1 : static_cast<long long>(tc - reading.bar_ms);
+            if (engine == tv) continue;
+            if (!is_na(tc) && engine > tv) { ++early; continue; }
+            if (++wrong <= 5) {
+                std::printf("  %s bar %lld: tv %lld engine %lld\n", chart.slug,
+                            static_cast<long long>(reading.bar_ms), tv, engine);
+            }
+        }
+        std::printf("  %s: %zu bars, %d early closes, %d differ\n", chart.slug, readings.size(),
+                    early, wrong);
+        CHECK(!readings.empty());
+        CHECK(early == chart.early_closes);
+        CHECK(wrong == 0);
+    }
+}
+
+// A D / W chart bar stamped outside its session -- before the open or after
+// the close, as some feeds stamp a daily bar at midnight -- is the bar of the
+// session it opens, as a stamp in OANDA's 17:00 ET break is: its time_close
+// is that session's close, never an instant before the bar. TradingView
+// stamps its own equity bars at the 09:30 ET open, so no tape reaches this;
+// session_covered_instant_ms is the engine's rule for such a stamp.
+static void test_chart_time_close_gap_stamps() {
+    std::printf("test_chart_time_close_gap_stamps\n");
+    struct Case {
+        const char* tf;
+        int64_t bar;
+        int64_t close;
+    };
+    // New York on standard time: 09:30 ET is 14:30Z, 16:00 ET 21:00Z.
+    const Case cases[] = {
+        {"1D", 1741064400000LL, 1741122000000LL},  // Tue 03-04 00:00 ET -> Tue 16:00 ET
+        {"1D", 1741046400000LL, 1741122000000LL},  // Tue 03-04 00:00Z (Mon 19:00 ET) -> Tue 16:00 ET
+        {"1D", 1741039200000LL, 1741122000000LL},  // Mon 03-03 22:00Z (17:00 ET, after the close)
+        {"1D", 1741098600000LL, 1741122000000LL},  // Tue 09:30 ET, in session: unchanged
+        {"1W", 1740978000000LL, 1741381200000LL},  // Mon 03-03 00:00 ET -> Fri 03-07 16:00 ET
+        // A week or month dated on a weekend the session does not trade is the
+        // next period's (Sunday-dated): its close is that period's last one.
+        {"1W", 1740891600000LL, 1741381200000LL},  // Sun 03-02 00:00 ET -> Fri 03-07 16:00 ET
+        {"1M", 1756612800000LL, 1759262400000LL},  // Sun 08-31 00:00 ET -> Tue 09-30 16:00 ET
+    };
+    ZeroPriceProbe p;
+    p.set_syminfo_session("0930-1600");
+    p.set_syminfo_timezone("America/New_York");
+    for (const Case& c : cases) {
+        p.set_script_tf(c.tf);
+        p.set_current_bar_timestamp(c.bar);
+        const int64_t tc = p.pub_time_close();
+        if (tc != c.close) {
+            std::printf("  %s bar %lld: time_close %lld, want %lld\n", c.tf,
+                        static_cast<long long>(c.bar), static_cast<long long>(tc),
+                        static_cast<long long>(c.close));
+        }
+        CHECK(tc == c.close);
+        CHECK(tc > c.bar);
+    }
+}
+
+// The chart's time_close on an intraday chart whose session opens off the
+// hour: TradingView builds the chart's bars on the session's own grid, so a
+// bar closes one timeframe after its open, the last one at the session's
+// close (lab tv w12-ctclose-*, tests/fixtures/session_period): NASDAQ:AAPL 60
+// opens 09:30 .. 15:30 ET and its 15:30 bar closes at 16:00; AAPL 45 the
+// same from 09:30 in 45-minute steps; NSE:NIFTY 60 from 09:15 IST, its 15:15
+// bar closing at 15:30. The accessor reads time_close(timeframe.period,
+// syminfo.session), whose intraday bars are the session's (lane
+// W12-ENG-TIME item 2); the epoch grid it read before closed AAPL's 09:30
+// bar at 10:00.
+#ifndef PINEFORGE_SESSION_PERIOD_FIXTURE_DIR
+#error "PINEFORGE_SESSION_PERIOD_FIXTURE_DIR must name tests/fixtures/session_period"
+#endif
+
+static void test_chart_time_close_intraday_session_grid() {
+    std::printf("test_chart_time_close_intraday_session_grid\n");
+    struct Chart {
+        const char* slug;
+        const char* tf;
+        const char* session;
+        const char* timezone;
+    };
+    static const Chart charts[] = {
+        {"w12-ctclose-aapl60", "60", "0930-1600", "America/New_York"},
+        {"w12-ctclose-aapl45", "45", "0930-1600", "America/New_York"},
+        {"w12-ctclose-nifty60", "60", "0915-1530", "Asia/Kolkata"},
+    };
+    for (const Chart& chart : charts) {
+        bool ok = true;
+        const auto readings =
+            exit_comment_tape::read(PINEFORGE_SESSION_PERIOD_FIXTURE_DIR, chart.slug, ok);
+        CHECK(ok);
+        ZeroPriceProbe p;
+        p.set_script_tf(chart.tf);
+        p.set_syminfo_session(chart.session);
+        p.set_syminfo_timezone(chart.timezone);
+        int wrong = 0;
+        for (const auto& reading : readings) {
+            const auto spelled = exit_comment_tape::split(reading.signal, ',');
+            if (spelled.empty()) { ++wrong; continue; }
+            const long long tv = std::atoll(spelled[0].c_str()) * 60000LL;
+            p.set_current_bar_timestamp(reading.bar_ms);
+            const int64_t tc = p.pub_time_close();
+            const long long engine = is_na(tc) ? -1 : static_cast<long long>(tc - reading.bar_ms);
+            if (engine == tv) continue;
+            if (++wrong <= 5) {
+                std::printf("  %s bar %lld: tv %lld engine %lld\n", chart.slug,
+                            static_cast<long long>(reading.bar_ms), tv, engine);
+            }
+        }
+        std::printf("  %s: %zu bars, %d differ\n", chart.slug, readings.size(), wrong);
+        CHECK(!readings.empty());
+        CHECK(wrong == 0);
+    }
+}
+
+// A D / W bar a feed stamps at its session's close -- 16:00 ET on an equity,
+// 16:00 CT on CME's 1700-1600 -- is the bar of the session that closes there
+// (lane W12-ENG-TIME; W11-ENG-TIME-COLOR's reviewer): its time_close is its
+// own stamp, as the kernel reads a raw label (the calendar interval that
+// holds it), not the next session's close. A stamp that is also where a
+// session day opens (OANDA's 17:00 ET under 1800-1700 and 1700-1700, CME's
+// 17:00 CT) opens that session, and one past the close, in the break, is the
+// next session's (test_chart_time_close_gap_stamps). TradingView stamps its
+// own bars at the open, so no tape reaches this.
+static void test_chart_time_close_close_stamps() {
+    std::printf("test_chart_time_close_close_stamps\n");
+    struct Case {
+        const char* tf;
+        const char* session;
+        const char* timezone;
+        int64_t bar;
+        int64_t close;
+    };
+    const Case cases[] = {
+        // Mon 2025-03-03 16:00 ET: Monday's session.
+        {"1D", "0930-1600", "America/New_York", 1741035600000LL, 1741035600000LL},
+        // Fri 2025-03-07 16:00 ET: the week that closes there.
+        {"1W", "0930-1600", "America/New_York", 1741381200000LL, 1741381200000LL},
+        // Mon 16:00 CT under 1700-1600: Monday's CME session.
+        {"1D", "1700-1600", "America/Chicago", 1741039200000LL, 1741039200000LL},
+        // Controls: Mon 17:00 CT opens Tuesday's CME session.
+        {"1D", "1700-1600", "America/Chicago", 1741042800000LL, 1741125600000LL},
+        // OANDA's 17:00 ET stamps open the session after the break.
+        {"1D", "1800-1700", "America/New_York", 1741039200000LL, 1741125600000LL},
+        {"1D", "1700-1700", "America/New_York", 1741039200000LL, 1741125600000LL},
+        // 17:00 ET on an equity, past the close: the next session's.
+        {"1D", "0930-1600", "America/New_York", 1741039200000LL, 1741122000000LL},
+        // OANDA's week stamped Fri 2025-03-07 17:00 EST, where its week's
+        // last session closes and the next session opens: the next week's,
+        // closing Fri 03-14 17:00 EDT.
+        {"1W", "1800-1700", "America/New_York", 1741384800000LL, 1741986000000LL},
+        {"1W", "1700-1700", "America/New_York", 1741384800000LL, 1741986000000LL},
+    };
+    ZeroPriceProbe p;
+    int wrong = 0;
+    for (const Case& c : cases) {
+        p.set_script_tf(c.tf);
+        p.set_syminfo_session(c.session);
+        p.set_syminfo_timezone(c.timezone);
+        p.set_current_bar_timestamp(c.bar);
+        const int64_t tc = p.pub_time_close();
+        if (tc != c.close && ++wrong <= 8) {
+            std::printf("  %s %s bar %lld: time_close %lld, want %lld\n", c.tf, c.session,
+                        static_cast<long long>(c.bar), static_cast<long long>(tc),
+                        static_cast<long long>(c.close));
+        }
+        CHECK(tc == c.close);
+        CHECK(tc >= c.bar);
+    }
+}
+
+// A 24-hour session that trades through a daylight-saving switch closes its
+// D bar at the next day's same wall-clock time, 23 or 25 hours on, not at
+// its open plus 24 hours (lane W12-ENG-TIME, tests/fixtures/dst_day_close):
+// CAPITALCOM:BTCUSD (1700-1700 America/New_York, every day) closes its
+// Saturday 2025-03-08 17:00 EST bar at Sunday 17:00 EDT, and
+// ACTIVTRADES:BTCUSD (Europe/Amsterdam) its Sunday 2025-03-30 00:00 CET bar
+// at Monday 00:00 CEST. ACTIVTRADES closes Friday at 23:00 and opens
+// Saturday at 09:00, a venue schedule no session string here spells, so its
+// Friday and Saturday bars are not read.
+#ifndef PINEFORGE_DST_DAY_CLOSE_FIXTURE_DIR
+#error "PINEFORGE_DST_DAY_CLOSE_FIXTURE_DIR must name tests/fixtures/dst_day_close"
+#endif
+
+static void test_chart_time_close_dst_tapes() {
+    std::printf("test_chart_time_close_dst_tapes\n");
+    struct Chart {
+        const char* slug;
+        const char* session;
+        const char* timezone;
+        std::size_t field;     // the comma field holding time_close - time
+        bool skip_fri_sat;     // the venue's own Friday / Saturday schedule
+        int dst_days;          // readings 23 or 25 hours long
+    };
+    static const Chart charts[] = {
+        {"w12-tclose-cap1d", "1700-1700", "America/New_York", 0, false, 1},
+        {"w12-tzscan-capitalcom-btcusd", "1700-1700", "America/New_York", 1, false, 1},
+        {"w12-tzscan-activtrades-btcusd", "24x7", "Europe/Amsterdam", 1, true, 1},
+    };
+    for (const Chart& chart : charts) {
+        bool ok = true;
+        const auto readings =
+            exit_comment_tape::read(PINEFORGE_DST_DAY_CLOSE_FIXTURE_DIR, chart.slug, ok);
+        CHECK(ok);
+        ZeroPriceProbe p;
+        p.set_script_tf("1D");
+        p.set_syminfo_session(chart.session);
+        p.set_syminfo_timezone(chart.timezone);
+        int compared = 0;
+        int wrong = 0;
+        int dst = 0;
+        for (const auto& reading : readings) {
+            const auto spelled = exit_comment_tape::split(reading.signal, ',');
+            if (spelled.size() <= chart.field) { ++wrong; continue; }
+            if (chart.skip_fri_sat && spelled.size() > 2
+                && (spelled[2] == "6" || spelled[2] == "7")) {
+                continue;
+            }
+            const long long tv = std::atoll(spelled[chart.field].c_str());
+            p.set_current_bar_timestamp(reading.bar_ms);
+            const int64_t tc = p.pub_time_close();
+            const long long engine = is_na(tc) ? -1 : static_cast<long long>(tc - reading.bar_ms);
+            ++compared;
+            if (tv != 86400000LL) ++dst;
+            if (engine == tv) continue;
+            if (++wrong <= 5) {
+                std::printf("  %s bar %lld: tv %lld engine %lld\n", chart.slug,
+                            static_cast<long long>(reading.bar_ms), tv, engine);
+            }
+        }
+        std::printf("  %s: %d bars, %d across a switch, %d differ\n", chart.slug, compared, dst,
+                    wrong);
+        CHECK(compared > 0);
+        CHECK(dst == chart.dst_days);
+        CHECK(wrong == 0);
+    }
+    // 24x7 in New York, the rule where no TradingView symbol reaches (lane
+    // W11-ENG-TIME-COLOR's reviewer): the 2025-03-09 day opens at its 00:00
+    // EST (05:00Z) and closes at Monday's 00:00 EDT (04:00Z), 23 hours on;
+    // the day before keeps 24.
+    ZeroPriceProbe ny;
+    ny.set_script_tf("1D");
+    ny.set_syminfo_session("24x7");
+    ny.set_syminfo_timezone("America/New_York");
+    ny.set_current_bar_timestamp(1741496400000LL);   // 2025-03-09 05:00Z
+    CHECK(ny.pub_time_close() == 1741579200000LL);    // 2025-03-10 04:00Z
+    ny.set_current_bar_timestamp(1741410000000LL);   // 2025-03-08 05:00Z
+    CHECK(ny.pub_time_close() == 1741496400000LL);    // 2025-03-09 05:00Z
+}
+
 int main() {
     test_open_trade_accessors_flat_then_pyramid();
     test_open_trade_short_path();
     test_open_trade_zero_price_guard();
     test_engine_core_helpers();
+    test_chart_time_close_tapes();
+    test_chart_time_close_gap_stamps();
+    test_chart_time_close_dst_tapes();
+    test_chart_time_close_close_stamps();
+    test_chart_time_close_intraday_session_grid();
 
     std::printf("\nengine_trade_accessors: %d passed, %d failed\n",
                 tests_passed, tests_failed);
