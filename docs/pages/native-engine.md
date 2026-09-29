@@ -2560,11 +2560,18 @@ TradingView-calibrated, and a host that supplies them inherits its rules:
   and a data hole inside a stamped period is not a close.
 - A period the supplied bars only partly cover yields a partial bucket,
   exactly as a partly covered chart would.
+- The installed **daily** bars also date where each day opened. A daily
+  stamp later than its session-day's day stamp and before its scheduled
+  close, with no input bar of that day before it, is a day that traded late,
+  and an intraday series lays that day's grid from the stamp: NSE's Muhurat
+  session of 2025-10-21 opens 13:45 IST, so its `"60"` bucket is one bar
+  stamped 13:45, not 13:15 and 14:15 from the 09:15 day stamp. Every other
+  day keeps the day-stamp grid.
 
 Declare no `authoritative_bars` and the buckets are a plain aggregation of the
 run's own input, with no calibration to inherit. That is the whole policy
 knob, and it is a ruling of record (ADR-0001, "What the kernel-only archive
-still names"): the three rules above follow from "the supplied
+still names"): the rules above follow from "the supplied
 bars are the venue's own bars of that timeframe", so the kernel gates them on
 the feed's presence rather than on a separate partition field.
 
@@ -2575,6 +2582,16 @@ classes (`"stock"`, `"futures"`, `"index"`, `"fund"`), and does **not** for
 the continuous-session classes `"forex"`, `"cfd"` and `"crypto"`, whose period
 completes on the next session's first bar instead. The vocabulary is the one
 the C ABI's `strategy_set_syminfo_type` fixes.
+
+Every calendar series also closes each bucket **once**, and not while the next
+input bar the run holds still belongs to its period. A session template that
+knows Monday to Friday ends a week at Friday's close; an exchange that trades a
+weekend session inside that week (NSE's Budget-day Sunday of 2026-02-01) keeps
+the week open until that session's last bar, where the series advances one
+bucket. A bar with no known successor -- a stream, the feed's last bar --
+keeps the template's rule, and a later bar of an already closed period merges
+into it without completing it again. Pinned by
+`tests/test_calendar_bucket_closes_once.cpp`.
 
 **Declaring at begin.** A host whose series are known only to its own
 begin-time registration calls
@@ -3010,7 +3027,7 @@ each feed's key, sha256 and bar count in the run provenance.
 
 A host that wants only the running aggregate — no series instance, no
 `gaps`/`lookahead` rule, nothing folded into the continuation identity —
-aggregates the input itself. `TimeframeAggregator` (`timeframe.hpp:288`) is
+aggregates the input itself. `TimeframeAggregator` (`timeframe.hpp:321`) is
 public and engine-free; feed it from `on_native_input`, which runs once per
 accepted confirmed input bar before that bar is aggregated or matched
 (`on_native_input` `native_host.hpp:875`). Include
@@ -3052,7 +3069,7 @@ and not a way to register a series: registration is
 `NativeRunSpec::subscriptions` or `declare_timeframe_subscriptions`. In-run the
 setter is a source mutation and **throws**, latching `Failed`
 (`UnsupportedSource`) through `guard_native_mutation`
-(`engine_aux_security.cpp:78`, `guard_native_mutation` `engine_consumer.cpp:42`).
+(`engine_aux_security.cpp:82`, `guard_native_mutation` `engine_consumer.cpp:42`).
 
 ## Batch OHLCV vs ticks vs quiet
 
