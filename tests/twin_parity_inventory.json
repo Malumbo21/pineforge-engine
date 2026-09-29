@@ -188,9 +188,9 @@
   "observableRewrites": {
     "test_calc_on_order_fills": {
       "baseAssertions": 242,
-      "reason": "the chart-path endpoint row follows the R5 PAR-ORDERS-3 TradingView tapes (pa3-f4-stop-w1-mkt-*): a market add placed by the recalculation on a stop entry's fill exactly at a bar's first extreme fills at that extreme, not at the next waypoint; the entry-bar through-stop rows follow the R5 W4-ENG-POOC-SAMEPASS TradingView tapes (w4-f19c-{long,short}-plain-coof cells LA and SA): a stop already through the open fill that recalculated executes at that fill, not on the next bar",
+      "reason": "the chart-path endpoint row follows the R5 PAR-ORDERS-3 TradingView tapes (pa3-f4-stop-w1-mkt-*): a market add placed by the recalculation on a stop entry's fill exactly at a bar's first extreme fills at that extreme, not at the next waypoint; the entry-bar through-stop rows follow the R5 W4-ENG-POOC-SAMEPASS TradingView tapes (w4-f19c-{long,short}-plain-coof cells LA and SA): a stop already through the open fill that recalculated executes at that fill, not on the next bar; the entry-bar through-limit rows follow the R5 TAIL-D TradingView tape (tests/fixtures/coof_open_limit td-fp17-coof-open cells LA and LE): a limit at or through the open print the recalculation of the open fill places fills at that print on the entry bar, ahead of a valid stop sibling, not on the next bar",
       "twin": "test_calc_on_order_fills_l4c.cpp",
-      "twinAssertionSha256": "51cc42a4424fe7a6b0fa998544551fbd818d3e6c72dd9c567f2ac98d30215cef",
+      "twinAssertionSha256": "4767402d33f2f566c28d9ec4f38d586f79444f1e75b163c8b66bf6ed9463562c",
       "twinAssertions": 242
     },
     "test_carried_pooc_short_margin_state": {
@@ -199,6 +199,13 @@
       "twin": "test_carried_pooc_short_margin_state_l4a.cpp",
       "twinAssertionSha256": "02c5f820b47d00e8967c4272de6c3302663357fbb280b605f55d85aa18f7206c",
       "twinAssertions": 43
+    },
+    "test_cascade_exit_gapjump": {
+      "baseAssertions": 73,
+      "reason": "the second-same-open marketable stop row follows the R5 TAIL-C TradingView tapes (tailc-1856-open-newborn cells A/B/C, tests/fixtures/coof_open_newborn_exit): an exit stop the recalculation of a later fill at the bar's open places already through is live from the bar's first extreme, filled there when still through, otherwise at its own level from there -- here the short's buy stop 97, not through at the low 95, fills at its level on the entry bar, not at the next open",
+      "twin": "test_cascade_exit_gapjump_l4c.cpp",
+      "twinAssertionSha256": "690c6add3257508433d225bb4db5242df83e4a7e60cc60d86f0851bda1f89534",
+      "twinAssertions": 73
     },
     "test_declined_reversal_close_leg": {
       "baseAssertions": 39,

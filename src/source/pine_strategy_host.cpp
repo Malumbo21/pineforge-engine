@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <ctime>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -325,11 +326,16 @@ void source::PineStrategyHost::on_native_tick(
 void source::PineStrategyHost::on_native_bar_open(
         const Bar& bar, const NativeDecisionContext& context) {
     if (source_prepare_failed_) return;
-    // A gaps_on foreign site the kernel handed nothing on this input reads
-    // na: cleared here, after the input's deliveries and before the bar's
+    // Foreign sites, after the input's deliveries and before the bar's
     // calc_on_order_fills checkpoint (PineScheduler::bar_open), so every
-    // calculation of the bar reads the cleared value.
-    if (!foreign_security_sites_.empty()) clear_gapped_foreign_security_sites();
+    // calculation of the bar reads the same values: on a calendar chart the
+    // bars TradingView's merge rule makes visible at this bar that the kernel
+    // has not handed over yet run first; then a gaps_on site that ran on no
+    // new bar reads na.
+    if (!foreign_security_sites_.empty()) {
+        read_ahead_foreign_security_sites(bar);
+        clear_gapped_foreign_security_sites();
+    }
     bar_magnifier_enabled_ = scheduler_.bar_magnifier_enabled();
     diag_magnifier_sub_bars_processed_ = bar_magnifier_enabled_
         ? static_cast<std::int64_t>(context.driver_statistics.sub_bars_processed) : 0;
@@ -742,6 +748,15 @@ int source::PineStrategyHost::last_bar_dual_entry_path() const {
     return adapter_.pending_intent_view().last_bar_dual_entry_path();
 }
 
+double source::PineStrategyHost::open_entry_fees_paid() const {
+    if (position_side_ == PositionSide::FLAT) return 0.0;
+    double paid = 0.0;
+    for (const auto& lot : pyramid_entries_) {
+        if (lot.qty > internal::kQtyEpsilon) paid += open_entry_commission(lot);
+    }
+    return paid;
+}
+
 double source::PineStrategyHost::signed_position_size() const {
     return scheduler_.script_position_view(bar_index_, position_side_, position_qty_);
 }
@@ -1148,6 +1163,105 @@ bool source::PineStrategyHost::scheduler_uses_aux_security_feed() const noexcept
 #endif
 }
 
+namespace {
+
+// N of an N-day timeframe ("2D", "8D"), 0 for any other.
+int multi_day_count(const std::string& tf) {
+    const auto parsed = native_calendar::parse_timeframe(tf);
+    if (!parsed || parsed->unit() != native_calendar::TimeframeUnit::Day) return 0;
+    return parsed->count() >= 2 ? parsed->count() : 0;
+}
+
+// TradingView's N-day bars (lane TAIL-A, lab tv pf-taila-ndgrid-*, tests/
+// fixtures/multi_day_buckets): N consecutive trading dates of the symbol,
+// counted from the first trading date of each calendar year, the year's last
+// bar cut at its end. The trading dates are the session calendar's: every
+// day on a 24x7 symbol, every weekday on OANDA's (a holiday included: the
+// 8D bar of EURUSD opens on 2025-12-25, a date its chart has no bar of), the
+// exchange's sessions on a stock, an index or a future (NYSE:F's 8D bars skip
+// Good Friday). The run knows an exchange's sessions from the bars it holds,
+// the chart's and the auxiliary feed's; a date outside them counts when it is
+// a weekday. Returns each bar's open -- its first trading date's daily bar on
+// a daily chart (NSE's Muhurat session opens its 8D bar at 13:45 IST), that
+// date's day stamp otherwise -- from the bar holding the first held date
+// through the year after the last; empty when the session does not parse or
+// nothing is held.
+std::vector<std::int64_t> tradingview_multi_day_stamps(
+        int days, const Bar* chart, int n_chart, bool daily_chart, const std::vector<Bar>& aux,
+        const std::string& tz, const std::string& session, bool exchange_calendar) {
+    namespace cal = native_calendar;
+    const auto calendar = cal::parse_session(session, tz);
+    if (!calendar || days < 2) return {};
+    // Trading date (days since 1970-01-01) -> its bar's open.
+    std::map<std::int64_t, std::int64_t> held;
+    std::optional<cal::NativeSessionDay> cycle;
+    const auto hold = [&](std::int64_t ts, bool own_open) {
+        cycle = cal::session_day_at(*calendar, session_covered_instant_ms(ts, tz, session));
+        if (cycle && held.find(cycle->ordinal) == held.end()) {
+            held.emplace(cycle->ordinal,
+                         own_open ? ts : session_period_open_ms(ts, tz, session, CalendarPeriod::DAY));
+        }
+    };
+    // An intraday bar trades inside its session day: one inside the day the
+    // bar before it resolved is not resolved again.
+    for (int i = 0; i < n_chart; ++i) {
+        if (daily_chart || !cycle || !cycle->holds(chart[i].timestamp))
+            hold(chart[i].timestamp, daily_chart);
+    }
+    cycle.reset();
+    for (const Bar& bar : aux) {
+        if (!cycle || !cycle->holds(bar.timestamp)) hold(bar.timestamp, false);
+    }
+    if (held.empty()) return {};
+    const std::int64_t first = held.begin()->first;
+    const std::int64_t last = held.rbegin()->first;
+    const bool every_day = session.empty() || session == "24x7";
+    const auto trades = [&](std::int64_t d) {
+        if (exchange_calendar && d >= first && d <= last) return held.count(d) > 0;
+        const std::int64_t weekday = ((d % 7) + 7 + 4) % 7;  // 0 Sunday; 1970-01-01 a Thursday
+        return every_day || (weekday >= 1 && weekday <= 5);
+    };
+    // The bar-opening dates of every year from the first held date's through
+    // the year after the last's, whose first trading date opens a bar.
+    std::vector<std::int64_t> opens;
+    const std::int64_t first_year = cal::native_civil_date(first).year;
+    const std::int64_t last_year = cal::native_civil_date(last).year + 1;
+    for (std::int64_t year = first_year; year <= last_year; ++year) {
+        const std::int64_t end = cal::native_civil_days(year + 1, 1, 1);
+        std::int64_t count = 0;
+        for (std::int64_t d = cal::native_civil_days(year, 1, 1); d < end; ++d) {
+            if (!trades(d)) continue;
+            if (count++ % days == 0) opens.push_back(d);
+        }
+    }
+    auto begin = std::upper_bound(opens.begin(), opens.end(), first);
+    if (begin == opens.begin()) return {};
+    --begin;
+    // Through the next year's bars too, on the weekday rule: a stream's bars
+    // after the held ones.
+    std::vector<std::int64_t> stamps;
+    for (auto it = begin; it != opens.end(); ++it) {
+        const auto found = held.find(*it);
+        if (found != held.end()) {
+            stamps.push_back(found->second);
+            continue;
+        }
+        // A trading date no bar holds: the stamp of the session day holding
+        // its local noon.
+        const cal::NativeCivilDate date = cal::native_civil_date(*it);
+        const auto noon = cal::resolve_civil(tz.empty() ? "UTC" : tz, static_cast<int>(date.year),
+                                             date.month, date.day, 12, 0);
+        if (!noon) return {};
+        stamps.push_back(session_period_open_ms(noon->epoch_ms, tz, session, CalendarPeriod::DAY));
+    }
+    for (std::size_t k = 1; k < stamps.size(); ++k) {
+        if (stamps[k] <= stamps[k - 1]) return {};
+    }
+    return stamps;
+}
+
+}  // namespace
+
 void source::PineStrategyHost::scheduler_prepare_security_sequence(
         const std::vector<Bar>& bars) {
     security_input_tf_ = input_tf_;
@@ -1170,6 +1284,32 @@ void source::PineStrategyHost::scheduler_prepare_security_sequence(
     init_security_eval_states_for_run(security_input_tf_);
     prepare_native_security_feeds(
         bars.empty() ? nullptr : bars.data(), static_cast<int>(bars.size()));
+    // An N-day request's bars are TradingView's (tradingview_multi_day_stamps),
+    // its aggregator's period partition: the calendar aggregator split them
+    // into single days.
+    std::map<int, std::vector<std::int64_t>> multi_day;
+    for (auto& state : security_eval_states_) {
+        const int days = multi_day_count(state.tf);
+        if (days == 0 || state.aggregator.calendar_period() != CalendarPeriod::DAY
+            || state.aggregator.has_native_periods()) {
+            continue;
+        }
+        auto found = multi_day.find(days);
+        if (found == multi_day.end()) {
+            static const std::vector<Bar> kNoAux;
+            const std::vector<Bar>* aux = &kNoAux;
+#ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
+            if (aux_security_feed_enabled()) aux = &aux_security_bars_;
+#endif
+            found = multi_day.emplace(days, tradingview_multi_day_stamps(
+                days, bars.data(), static_cast<int>(bars.size()),
+                tf_to_seconds(input_tf_) == 86400, *aux,
+                syminfo_.timezone, syminfo_.session,
+                session_template_knows_early_close())).first;
+        }
+        if (!found->second.empty())
+            state.aggregator.set_native_periods(found->second, found->second, CalendarPeriod::DAY);
+    }
 #ifdef PINEFORGE_HAS_AUX_SECURITY_FEED_V1
     if (aux_security_feed_enabled()) {
         prepare_aux_security_chart_ranges(
@@ -1279,6 +1419,10 @@ bool source::PineStrategyHost::same_symbol_sites_routable(
             return false;
         }
         if (otc_daily_pins && (state.tf == "D" || state.tf == "1D")) return false;
+        // TradingView's N-day bars restart every year and count the symbol's
+        // trading dates (tradingview_multi_day_stamps); the kernel's are a
+        // fixed grid of calendar days.
+        if (multi_day_count(state.tf) != 0) return false;
         NativeTimeframeSubscription subscription;
         subscription.tf = state.tf;
         subscription.gaps = pine.gaps_on;
@@ -1737,12 +1881,225 @@ bool source::PineStrategyHost::adapter_core_sizes_default_opening(bool is_long) 
 // break, and the time-of-day session filter the intraday path applies read
 // that stamp as out of session, so the D chart answered na.
 int64_t source::PineStrategyHost::chart_time_close() const {
+    return chart_bar_close_ms(current_bar_.timestamp);
+}
+
+int64_t source::PineStrategyHost::chart_bar_close_ms(int64_t stamp) const {
     if (calendar_period_for(script_tf_) != CalendarPeriod::NONE) {
-        return pine_time_close(current_bar_.timestamp, script_tf_, "", "", script_tf_,
+        return pine_time_close(stamp, script_tf_, "", "", script_tf_,
                                syminfo_.timezone, syminfo_.session);
     }
-    return pine_time_close(current_bar_.timestamp, script_tf_, syminfo_.session,
-                           syminfo_.timezone, script_tf_);
+    return pine_time_close(stamp, script_tf_, syminfo_.session, syminfo_.timezone, script_tf_);
+}
+
+// TradingView's time(tf, session, tz, bars_back, timeframe_bars_back) (lab tv
+// tapes te_time_bb_chart and te_time_bb_tf, tests/fixtures/time_bars_back):
+// the chart bar bars_back names -- a past one from the chart's history, na
+// before its first -- then the tf bar holding it, stepped timeframe_bars_back
+// of its own bars. TradingView steps forward, and steps tf bars, on its
+// symbol calendar, closed days included: NASDAQ:AAPL's Thursday 2025-04-17
+// 15:45 bar reads its next bar at Monday 04-21 09:30 over Good Friday, its
+// daily bar of 01-08 the next at 01-10 over the 01-09 closure, time("D", 0,
+// -1) on 04-17 reads 04-21 and time("60", 0, 1) on Monday's 09:30 bar
+// Thursday's 15:30. The host holds no calendar of closed days; the chart's
+// history holds exactly the calendar's bars on every tape but one, whose
+// history lacks bars TradingView's calendar holds (OANDA:XAUUSD's 17:00-18:00
+// ET slot and Good Friday, the test's no-bar slots). So the host reads the
+// bars from the input it retains (a batch's, or a stream's warmup); past its
+// edges it walks the symbol's session calendar (session_trades_at): a batch's
+// final bar asks the calendar for the bar after it, as a live bar does.
+namespace {
+
+constexpr std::int64_t kTimeOffsetMinuteMs = 60'000;
+// The farthest the calendar walk looks for a traded minute: past any
+// weekend and any run of closed days.
+constexpr int kTimeOffsetCalendarMinutes = 16 * 24 * 60;
+// The most chart bars a step inside a tf bar may pass before it leaves it.
+constexpr int kTimeOffsetBarsPerStep = 100'000;
+
+}  // namespace
+
+int64_t source::PineStrategyHost::pine_time_offset(int64_t bar_open_ms, int bars_back,
+                                                   const std::string& tf,
+                                                   const std::string& session,
+                                                   const std::string& tz,
+                                                   int timeframe_bars_back,
+                                                   bool close) const {
+    if (is_na(bar_open_ms) || is_na(bars_back) || is_na(timeframe_bars_back))
+        return na<int64_t>();
+    const std::string& sym_tz = syminfo_.timezone;
+    const std::string& sym_session = syminfo_.session;
+    const std::vector<Bar>& input = scheduler_.retained_input();
+    const bool input_is_chart = scheduler_.retained_input_is_chart();
+    const bool daily_chart = calendar_period_for(script_tf_) != CalendarPeriod::NONE;
+    // A chart bar's own open (the input's stamp) and close, as the chart's
+    // time and time_close read them (chart_time_close).
+    const auto chart_open_of = [&](std::int64_t input_ms) -> std::int64_t {
+        return input_is_chart ? input_ms
+                              : pine_time(input_ms, script_tf_, "", "", script_tf_, sym_tz,
+                                          sym_session);
+    };
+    const auto chart_close_of = [&](std::int64_t open_ms) -> std::int64_t {
+        return daily_chart ? pine_time_close(open_ms, script_tf_, "", "", script_tf_, sym_tz,
+                                             sym_session)
+                           : pine_time_close(open_ms, script_tf_, sym_session, sym_tz,
+                                             script_tf_);
+    };
+    const auto chart_slot_of = [&](std::int64_t ms) -> std::int64_t {
+        return pine_time(ms, script_tf_, "", "", script_tf_, sym_tz, sym_session);
+    };
+    // The first chart bar opening at or after `at`: the retained input's, else
+    // the calendar's first traded chart slot.
+    const auto chart_open_from = [&](std::int64_t at) -> std::int64_t {
+        auto it = std::lower_bound(input.begin(), input.end(), at,
+                                   [](const Bar& bar, std::int64_t value) {
+                                       return bar.timestamp < value;
+                                   });
+        while (!input_is_chart && it != input.end() && chart_open_of(it->timestamp) < at)
+            ++it;
+        if (it != input.end()) return chart_open_of(it->timestamp);
+        std::int64_t t = at;
+        for (int k = 0; k < kTimeOffsetCalendarMinutes; ++k, t += kTimeOffsetMinuteMs) {
+            if (session_trades_at(sym_session, sym_tz, t)) {
+                const std::int64_t slot = chart_slot_of(t);
+                return is_na(slot) || slot < at ? t : slot;
+            }
+        }
+        return na<int64_t>();
+    };
+    // The last chart bar opening before `before`: the retained input's while
+    // it holds the instant (a stream's warmup ends where its live bars
+    // begin), else the calendar's last traded chart slot.
+    const auto chart_open_before = [&](std::int64_t before) -> std::int64_t {
+        auto it = std::lower_bound(input.begin(), input.end(), before,
+                                   [](const Bar& bar, std::int64_t value) {
+                                       return bar.timestamp < value;
+                                   });
+        const bool held = !scheduler_.retains_stream() || it != input.end();
+        if (held && it != input.begin()) return chart_open_of(std::prev(it)->timestamp);
+        std::int64_t t = before - kTimeOffsetMinuteMs;
+        for (int k = 0; k < kTimeOffsetCalendarMinutes; ++k, t -= kTimeOffsetMinuteMs) {
+            if (session_trades_at(sym_session, sym_tz, t)) {
+                const std::int64_t slot = chart_slot_of(t);
+                return is_na(slot) || slot >= before ? t : slot;
+            }
+        }
+        return na<int64_t>();
+    };
+    // The chart bar after the one opening at `open_ms`: the retained input's
+    // next bar, else the calendar's first traded slot past its close.
+    const auto next_chart_open = [&](std::int64_t open_ms) -> std::int64_t {
+        auto it = std::upper_bound(input.begin(), input.end(), open_ms,
+                                   [](std::int64_t value, const Bar& bar) {
+                                       return value < bar.timestamp;
+                                   });
+        while (!input_is_chart && it != input.end() && chart_open_of(it->timestamp) <= open_ms)
+            ++it;
+        if (it != input.end()) return chart_open_of(it->timestamp);
+        const std::int64_t end = chart_close_of(open_ms);
+        return chart_open_from(is_na(end) || end <= open_ms ? open_ms + 1 : end);
+    };
+
+    // A chart bar before the current one is one the run has had: the
+    // retained input's, na before its first (time[bars_back]). A stream's
+    // live bars are past its warmup: the calendar's.
+    const auto prior_chart_open = [&](std::int64_t open_ms) -> std::int64_t {
+        auto it = std::lower_bound(input.begin(), input.end(), open_ms,
+                                   [](const Bar& bar, std::int64_t value) {
+                                       return bar.timestamp < value;
+                                   });
+        if (scheduler_.retains_stream() && it == input.end())
+            return chart_open_before(open_ms);
+        while (it != input.begin()) {
+            --it;
+            const std::int64_t prior = chart_open_of(it->timestamp);
+            if (prior < open_ms) return prior;
+        }
+        return na<int64_t>();
+    };
+
+    std::int64_t chart_open = bar_open_ms;
+    for (int k = 0; k < -bars_back && !is_na(chart_open); ++k)
+        chart_open = next_chart_open(chart_open);
+    for (int k = 0; k < bars_back && !is_na(chart_open); ++k)
+        chart_open = prior_chart_open(chart_open);
+    if (is_na(chart_open)) return na<int64_t>();
+
+    // The chart's own timeframe without a session: the chart bars themselves.
+    if ((tf.empty() || tf == script_tf_) && session.empty()) {
+        for (int k = 0; k < -timeframe_bars_back && !is_na(chart_open); ++k)
+            chart_open = next_chart_open(chart_open);
+        for (int k = 0; k < timeframe_bars_back && !is_na(chart_open); ++k)
+            chart_open = chart_open_before(chart_open);
+        if (is_na(chart_open)) return na<int64_t>();
+        return close ? chart_close_of(chart_open) : chart_open;
+    }
+
+    // A week or a month opens at its first traded day: the week of Martin
+    // Luther King Day 2025 at Tuesday 01-21 on NASDAQ:AAPL, where the
+    // calendar reads Monday (te-time-bb-tf-aapl1d). The day the chart's
+    // history first trades in the period, when it trades later than the
+    // calendar's first session day.
+    const CalendarPeriod tf_period = calendar_period_for(tf.empty() ? script_tf_ : tf);
+    const auto calendar_open_of = [&](std::int64_t ms) -> std::int64_t {
+        return pine_time(ms, tf, session, tz, script_tf_, sym_tz, sym_session);
+    };
+    const auto tf_open_of = [&](std::int64_t ms) -> std::int64_t {
+        const std::int64_t open = calendar_open_of(ms);
+        if (is_na(open) || !session.empty()
+            || (tf_period != CalendarPeriod::WEEK && tf_period != CalendarPeriod::MONTH)) {
+            return open;
+        }
+        const std::int64_t first = chart_open_from(open);
+        if (is_na(first) || calendar_open_of(first) != open) return open;
+        const std::int64_t day = pine_time(first, "D", "", "", script_tf_, sym_tz, sym_session);
+        return !is_na(day) && day > open ? day : open;
+    };
+    std::int64_t open = tf_open_of(chart_open);
+    if (is_na(open)) return na<int64_t>();
+    // A timeframe finer than the chart's steps by its own length and reads
+    // the chart bar holding the instant it reaches: time("60", 0, -1) on a
+    // daily bar is that bar, time("60", 0, 1) the bar before
+    // (te-time-bb-tf-aapl1d / -btc1d / -eurusd1d).
+    const int tf_seconds = tf_to_seconds(tf.empty() ? script_tf_ : tf);
+    const int chart_seconds = tf_to_seconds(script_tf_);
+    if (timeframe_bars_back != 0 && tf_seconds > 0 && chart_seconds > 0
+        && tf_seconds < chart_seconds) {
+        const std::int64_t at = open - static_cast<std::int64_t>(timeframe_bars_back)
+                                           * tf_seconds * 1000;
+        const std::int64_t held = chart_open_before(at + 1);
+        if (is_na(held)) return na<int64_t>();
+        return close ? chart_close_of(held) : held;
+    }
+    for (int k = 0; k < -timeframe_bars_back && !is_na(open); ++k) {
+        // The first chart bar past this tf bar's end that a tf bar holds.
+        const std::int64_t end = pine_time_close(open, tf, session, tz, script_tf_, sym_tz,
+                                                 sym_session);
+        std::int64_t at = chart_open_from(is_na(end) || end <= open ? open + 1 : end);
+        std::int64_t next = na<int64_t>();
+        for (int guard = 0; guard < kTimeOffsetBarsPerStep && !is_na(at); ++guard) {
+            next = tf_open_of(at);
+            if (!is_na(next) && next > open) break;
+            next = na<int64_t>();
+            at = next_chart_open(at);
+        }
+        open = next;
+    }
+    for (int k = 0; k < timeframe_bars_back && !is_na(open); ++k) {
+        // The last chart bar before this tf bar's open that a tf bar holds.
+        std::int64_t at = chart_open_before(open);
+        std::int64_t prev = na<int64_t>();
+        for (int guard = 0; guard < kTimeOffsetBarsPerStep && !is_na(at); ++guard) {
+            prev = tf_open_of(at);
+            if (!is_na(prev) && prev < open) break;
+            prev = na<int64_t>();
+            at = chart_open_before(at);
+        }
+        open = prev;
+    }
+    if (is_na(open)) return na<int64_t>();
+    return close ? pine_time_close(open, tf, session, tz, script_tf_, sym_tz, sym_session)
+                 : open;
 }
 
 } // namespace pineforge

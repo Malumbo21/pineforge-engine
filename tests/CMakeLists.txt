@@ -889,10 +889,30 @@ list(APPEND TEST_SOURCES test_same_point_entries_tapes)
 # (tests/fixtures/ltf_lookahead_calling_open), on TradingView's tapes.
 list(APPEND TEST_SOURCES test_ltf_lookahead_calling_open_tapes)
 
+# Lane TAIL-A: an N-day request.security bar groups the symbol's trading dates
+# N at a time from each year's first (tests/fixtures/multi_day_buckets), on
+# TradingView's tapes.
+list(APPEND TEST_SOURCES test_security_multi_day_buckets_tapes)
+
 # Lane W8D-NOTRADES: an entry a mid-leg calc_on_order_fills recalculation places
 # is live from the leg's end (tests/fixtures/coof_refill_waypoint), on
 # TradingView's tapes.
 list(APPEND TEST_SOURCES test_coof_refill_waypoint_tapes)
+
+# Lane TAIL-C: a refill the recalculation of a fill forced onto a leg's end
+# places is live from the next bar's open (second extreme) or rests from the
+# second extreme (first extreme) (tests/fixtures/coof_w2_refill), on
+# TradingView's tapes.
+list(APPEND TEST_SOURCES test_coof_w2_refill_tapes)
+# ... and an exit stop the recalculation of a later open fill places already
+# through is live from the bar's first extreme
+# (tests/fixtures/coof_open_newborn_exit), on TradingView's tape.
+list(APPEND TEST_SOURCES test_coof_open_newborn_exit_tape)
+# ... and, with the bar magnifier on, an entry the recalculation of a fill
+# places is live from the next point of TradingView's intrabar path, the next
+# bar's open after the chart bar's last one
+# (tests/fixtures/magnified_coof_refill), on TradingView's tape.
+list(APPEND TEST_SOURCES test_magnified_coof_refill_tape)
 
 # Lane W8E-EXITS: the KI-62 cover takes only a same-id pyramid add
 # (tests/fixtures/ki62_same_id_cover), on TradingView's tapes.
@@ -902,6 +922,10 @@ list(APPEND TEST_SOURCES test_ki62_same_id_cover)
 # decides the calculation's exits after its market orders
 # (tests/fixtures/pooc_samepass), on TradingView's tapes.
 list(APPEND TEST_SOURCES test_pooc_samepass_tapes)
+# Lanes W10-DIAG-UNKNOWN (diag-w5r) and TAIL-C: the close pass also fills
+# limit/stop adds and reversing limits the close reaches, then decides the
+# exits after them (tests/fixtures/pooc_add_close), on TradingView's tape.
+list(APPEND TEST_SOURCES test_pooc_add_close_tape)
 # ... and a from_entry "" exit without a quantity closes its share of the
 # position it fills against, a market add's lot included
 # (tests/fixtures/global_exit_fill_size), on TradingView's tapes.
@@ -920,6 +944,47 @@ list(APPEND TEST_SOURCES test_pooc_margin_call_sizing_tapes)
 # ... and a slipped default percent short opens only while its margin at the
 # close fits (tests/fixtures/pooc_short_slip_admission), on TradingView's tapes.
 list(APPEND TEST_SOURCES test_pooc_short_slip_admission_tapes)
+# Lane TAIL-D: under calc_on_order_fills a close the recalculation of a
+# mid-leg fill places, `immediately` or not, fills at the end of that leg,
+# where an off-grid extreme is touched at its raw print
+# (tests/fixtures/coof_immediate_close), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_coof_immediate_close_tapes)
+# ... and every exit of one entry the same path point triggers fills there
+# before that point recalculates (tests/fixtures/coof_same_point_exits), on
+# TradingView's tapes.
+list(APPEND TEST_SOURCES test_coof_same_point_exits_tapes)
+# ... and what that recalculation cancels or closes is applied at the leg's
+# end, so an exit the rest of the leg reaches still fills at its level
+# (tests/fixtures/coof_inflight_cancel), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_coof_inflight_cancel_tapes)
+# ... and a pending entry's bracket the recalculation of its mid-leg fill
+# re-issues keeps its stop live at its level on the rest of the leg
+# (tests/fixtures/coof_resting_bracket), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_coof_resting_bracket_tapes)
+# ... and timeframe.change() compares every calculation of a bar a fill
+# recalculated with the bar before it (tests/fixtures/coof_timeframe_change),
+# on TradingView's tape.
+list(APPEND TEST_SOURCES test_coof_timeframe_change_tapes)
+# ... and a qty= exit of an entry a reversal holds in the adapter waits for
+# that entry, so a FIFO close of its lot by another id's exit leaves its own
+# reservation (tests/fixtures/exit_fifo_cross), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_exit_fifo_cross_tapes)
+# ... and under calc_on_order_fills an exit limit the recalculation of an
+# entry's open fill places at or through the open print fills there at once
+# (tests/fixtures/coof_open_limit), on TradingView's tape.
+list(APPEND TEST_SOURCES test_coof_open_limit_tapes)
+# ... and a strategy.exit call that names a level replaces the whole order:
+# the price leg it leaves na is withdrawn (tests/fixtures/exit_reissue_na),
+# on TradingView's tape.
+list(APPEND TEST_SOURCES test_exit_reissue_na_tapes)
+# ... and a flat pair of opposite fixed-quantity market entries whose gross is
+# over the equity keeps only its earlier call under process_orders_on_close
+# and with costs (tests/fixtures/pooc_pair_gross), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_pooc_pair_gross_tapes)
+# ... and a default 100 % entry whose whole lots tie the signal's rounded
+# equity is dropped flat and keeps only its closing leg as a reversal
+# (tests/fixtures/whole_lot_tie), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_whole_lot_tie_tapes)
 
 # Lane W8A-SIGSTATE-1 R4: a fill at the day's first tick does not trip
 # strategy.risk.max_intraday_loss (tests/fixtures/intraday_loss_open_fill), on
@@ -978,6 +1043,34 @@ list(APPEND TEST_SOURCES test_slipped_short_tapes)
 # and orders sized at placement that cross zero (tests/fixtures/margin_opposite
 # and tests/fixtures/slipped_short), on TradingView's tapes.
 list(APPEND TEST_SOURCES test_margin_opposite_tapes)
+# Lane TAIL-B: several MARKET adds one bar places on a held position, their
+# admission and the grown book's margin calls (tests/fixtures/add_sibling_margin),
+# on TradingView's tapes.
+list(APPEND TEST_SOURCES test_add_sibling_margin_tapes)
+# INT30: lane TAIL-B's calls for a bar's adds (AS, AC, LF) beside lane TAIL-H's
+# rule PK, which re-reserves the exits a call shrank
+# (tests/fixtures/int30_compositions), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_int30_rule_compositions)
+# Lane TAIL-G: requests of other symbols on a daily chart stamped in its
+# session's break read the chart bar's own period (tests/fixtures/
+# daily_break_close), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_foreign_break_stamp_tapes)
+# Lane TAIL-H: a percentage exit's share keeps one quantity step and holds
+# what it reserved when margin calls shrink the position
+# (tests/fixtures/exit_reservation), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_exit_reservation_tapes)
+# Lane TAIL-C: an explicit-quantity market buy from flat is admitted at its
+# signal close's tick plus the slippage ticks its fill carries
+# (tests/fixtures/explicit_market_admission), on TradingView's tapes.
+list(APPEND TEST_SOURCES test_explicit_market_admission_tapes)
+# Lane TAIL-I: an all-in commissioned and slipped explicit short is margin-
+# called on its bar's path from the opening print, and under a percent
+# commission a call of any size is followed (tests/fixtures/margin_open_print),
+# on TradingView's tapes.
+list(APPEND TEST_SOURCES test_margin_open_print_tapes)
+# ... and an infinite strategy.entry quantity trades the default quantity, as
+# na does (tests/fixtures/nonfinite_entry_qty), on TradingView's tape.
+list(APPEND TEST_SOURCES test_nonfinite_entry_qty_tape)
 # Lane INT28-FIX (RC): a calc_on_order_fills recalculation reads the whole
 # bar's finer request.security values (tests/fixtures/coof_recalc_security),
 # on TradingView's tape.
@@ -1003,6 +1096,10 @@ list(APPEND TEST_SOURCES test_pooc_gap_stop_tapes)
 # same open must fit with that position still margined
 # (tests/fixtures/same_open_reversal), on TradingView's tapes.
 list(APPEND TEST_SOURCES test_same_open_reversal_tapes)
+# Lane W8E-EXITS: strategy.netprofit and strategy.equity charge the open lots'
+# paid entry fees (tests/fixtures/open_entry_fee_charged), on TradingView's
+# tapes.
+list(APPEND TEST_SOURCES test_open_entry_fee_charged)
 
 # R5 F3: the contracts the kernel documents for every host, witnessed on bare
 # hosts. Source-free, so it also runs in the kernel-only profile.
@@ -1551,6 +1648,11 @@ list(APPEND TEST_SOURCES test_session_prepost_windows_tape)
 list(APPEND TEST_SOURCES test_native_session_day_bar_open)
 #   K-SESSION-WINDOWS F2: the chart's session day and the regular one.
 list(APPEND TEST_SOURCES test_session_extended_day_tape)
+#   TAIL-E: time() / time_close() reading another bar (bars_back,
+#   timeframe_bars_back) against TradingView's tapes.
+list(APPEND TEST_SOURCES test_time_bars_back_tapes)
+#   TAIL-E: a close the bar's own calculation executes is final for the bar.
+list(APPEND TEST_SOURCES test_coof_immediate_close_final_tapes)
 #   K-SESSION-WINDOWS F7: an aggregated bar opening inside a session break.
 list(APPEND TEST_SOURCES test_session_break_open_bar_tape)
 #   F1(e) an aggregated process_orders_on_close script reading entry_bar_index.
@@ -2481,10 +2583,35 @@ if(TARGET test_ltf_lookahead_calling_open_tapes)
         PINEFORGE_LTF_CALLING_OPEN_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ltf_lookahead_calling_open")
 endif()
 
+# Lane TAIL-A reads its TradingView tapes from the fixture tree; source-bound.
+if(TARGET test_security_multi_day_buckets_tapes)
+    target_compile_definitions(test_security_multi_day_buckets_tapes PRIVATE
+        PINEFORGE_MULTI_DAY_BUCKETS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/multi_day_buckets")
+endif()
+
 # Lane W8D-NOTRADES reads its TradingView tapes from the fixture tree; source-bound.
 if(TARGET test_coof_refill_waypoint_tapes)
     target_compile_definitions(test_coof_refill_waypoint_tapes PRIVATE
         PINEFORGE_COOF_REFILL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_refill_waypoint")
+endif()
+
+# Lane TAIL-C reads its TradingView tapes from the fixture tree; source-bound.
+if(TARGET test_coof_w2_refill_tapes)
+    target_compile_definitions(test_coof_w2_refill_tapes PRIVATE
+        PINEFORGE_COOF_W2_REFILL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_w2_refill")
+endif()
+if(TARGET test_coof_open_newborn_exit_tape)
+    target_compile_definitions(test_coof_open_newborn_exit_tape PRIVATE
+        PINEFORGE_COOF_OPEN_NEWBORN_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_open_newborn_exit")
+endif()
+if(TARGET test_magnified_coof_refill_tape)
+    target_compile_definitions(test_magnified_coof_refill_tape PRIVATE
+        PINEFORGE_MAGNIFIED_REFILL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/magnified_coof_refill")
+endif()
+
+if(TARGET test_pooc_add_close_tape)
+    target_compile_definitions(test_pooc_add_close_tape PRIVATE
+        PINEFORGE_POOC_ADD_CLOSE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pooc_add_close")
 endif()
 
 # Lane W8E-EXITS reads its TradingView tapes from the fixture tree; source-bound.
@@ -2502,6 +2629,46 @@ endif()
 if(TARGET test_global_exit_fill_size_tapes)
     target_compile_definitions(test_global_exit_fill_size_tapes PRIVATE
         PINEFORGE_W4_GLOBAL_EXIT_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/global_exit_fill_size")
+endif()
+if(TARGET test_coof_immediate_close_tapes)
+    target_compile_definitions(test_coof_immediate_close_tapes PRIVATE
+        PINEFORGE_TAIL_D_IMMEDIATE_CLOSE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_immediate_close")
+endif()
+if(TARGET test_coof_same_point_exits_tapes)
+    target_compile_definitions(test_coof_same_point_exits_tapes PRIVATE
+        PINEFORGE_TAIL_D_SAME_POINT_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_same_point_exits")
+endif()
+if(TARGET test_coof_inflight_cancel_tapes)
+    target_compile_definitions(test_coof_inflight_cancel_tapes PRIVATE
+        PINEFORGE_TAIL_D_INFLIGHT_CANCEL_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_inflight_cancel")
+endif()
+if(TARGET test_coof_resting_bracket_tapes)
+    target_compile_definitions(test_coof_resting_bracket_tapes PRIVATE
+        PINEFORGE_TAIL_D_RESTING_BRACKET_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_resting_bracket")
+endif()
+if(TARGET test_coof_timeframe_change_tapes)
+    target_compile_definitions(test_coof_timeframe_change_tapes PRIVATE
+        PINEFORGE_TAIL_D_TF_CHANGE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_timeframe_change")
+endif()
+if(TARGET test_exit_fifo_cross_tapes)
+    target_compile_definitions(test_exit_fifo_cross_tapes PRIVATE
+        PINEFORGE_TAIL_D_FIFO_CROSS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/exit_fifo_cross")
+endif()
+if(TARGET test_coof_open_limit_tapes)
+    target_compile_definitions(test_coof_open_limit_tapes PRIVATE
+        PINEFORGE_TAIL_D_OPEN_LIMIT_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_open_limit")
+endif()
+if(TARGET test_exit_reissue_na_tapes)
+    target_compile_definitions(test_exit_reissue_na_tapes PRIVATE
+        PINEFORGE_TAIL_D_REISSUE_NA_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/exit_reissue_na")
+endif()
+if(TARGET test_pooc_pair_gross_tapes)
+    target_compile_definitions(test_pooc_pair_gross_tapes PRIVATE
+        PINEFORGE_TAIL_D_PAIR_GROSS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pooc_pair_gross")
+endif()
+if(TARGET test_whole_lot_tie_tapes)
+    target_compile_definitions(test_whole_lot_tie_tapes PRIVATE
+        PINEFORGE_TAIL_D_WHOLE_LOT_TIE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/whole_lot_tie")
 endif()
 if(TARGET test_coof_reissued_exit_tapes)
     target_compile_definitions(test_coof_reissued_exit_tapes PRIVATE
@@ -2609,6 +2776,31 @@ if(TARGET test_margin_opposite_tapes)
         PINEFORGE_MARGIN_OPPOSITE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/margin_opposite"
         PINEFORGE_SLIPPED_SHORT_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/slipped_short")
 endif()
+if(TARGET test_explicit_market_admission_tapes)
+    target_compile_definitions(test_explicit_market_admission_tapes PRIVATE
+        PINEFORGE_EXPLICIT_ADMISSION_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/explicit_market_admission")
+endif()
+if(TARGET test_margin_open_print_tapes)
+    target_compile_definitions(test_margin_open_print_tapes PRIVATE
+        PINEFORGE_MARGIN_OPEN_PRINT_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/margin_open_print")
+endif()
+if(TARGET test_nonfinite_entry_qty_tape)
+    target_compile_definitions(test_nonfinite_entry_qty_tape PRIVATE
+        PINEFORGE_NONFINITE_QTY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nonfinite_entry_qty")
+endif()
+
+# Lane TAIL-B reads its TradingView tapes from the fixture tree; source-bound.
+if(TARGET test_add_sibling_margin_tapes)
+    target_compile_definitions(test_add_sibling_margin_tapes PRIVATE
+        PINEFORGE_ADD_SIBLING_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/add_sibling_margin")
+endif()
+
+# INT30 reads its TradingView tapes from the fixture tree and the 15m bars of
+# tests/fixtures/margin_v6; source-bound.
+if(TARGET test_int30_rule_compositions)
+    target_compile_definitions(test_int30_rule_compositions PRIVATE
+        PINEFORGE_INT30_COMPOSITIONS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/int30_compositions")
+endif()
 
 # Lane INT28-FIX (RC) reads its TradingView tape from the fixture tree;
 # source-bound.
@@ -2643,6 +2835,12 @@ endif()
 if(TARGET test_same_open_reversal_tapes)
     target_compile_definitions(test_same_open_reversal_tapes PRIVATE
         PINEFORGE_SAMEOPEN_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/same_open_reversal")
+endif()
+
+# Lane W8E-EXITS reads its TradingView tapes from the fixture tree; source-bound.
+if(TARGET test_open_entry_fee_charged)
+    target_compile_definitions(test_open_entry_fee_charged PRIVATE
+        PINEFORGE_OPEN_ENTRY_FEE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/open_entry_fee_charged")
 endif()
 
 # K-DRAWSNAP replays TradingView's calc_on_order_fills drawing-rollback tape
@@ -2680,6 +2878,16 @@ foreach(_pf_w11_row IN ITEMS
     endif()
 endforeach()
 
+# Lane TAIL-E: the time() bars_back tapes.
+if(TARGET test_time_bars_back_tapes)
+    target_compile_definitions(test_time_bars_back_tapes PRIVATE
+        PINEFORGE_TIME_BARS_BACK_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/time_bars_back")
+endif()
+if(TARGET test_coof_immediate_close_final_tapes)
+    target_compile_definitions(test_coof_immediate_close_final_tapes PRIVATE
+        PINEFORGE_COOF_IMMEDIATE_CLOSE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_immediate_close")
+endif()
+
 # Lane W12-ENG-TIME: the rows that read its TradingView tapes.
 foreach(_pf_w12_row IN ITEMS
         "test_session_predicates|PINEFORGE_SESSION_PERIOD_FIXTURE_DIR|session_period"
@@ -2696,6 +2904,22 @@ foreach(_pf_w12_row IN ITEMS
             ${_pf_w12_macro}="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/${_pf_w12_dir}")
     endif()
 endforeach()
+
+# Lane TAIL-G: the row that reads the daily-break request tapes.
+if(TARGET test_foreign_break_stamp_tapes)
+    target_compile_definitions(test_foreign_break_stamp_tapes PRIVATE
+        PINEFORGE_DAILY_BREAK_CLOSE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/daily_break_close")
+endif()
+
+# Lane TAIL-H: the rows that read its TradingView tapes.
+if(TARGET test_ta_indicators_extras)
+    target_compile_definitions(test_ta_indicators_extras PRIVATE
+        PINEFORGE_PERCENTILE_WINDOW_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/percentile_window")
+endif()
+if(TARGET test_exit_reservation_tapes)
+    target_compile_definitions(test_exit_reservation_tapes PRIVATE
+        PINEFORGE_EXIT_RESERVATION_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/exit_reservation")
+endif()
 
 # std::thread needs an explicit pthread link on some toolchains.
 target_link_libraries(test_timezone_concurrency PRIVATE Threads::Threads)

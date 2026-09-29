@@ -1492,7 +1492,7 @@ adapter answers `margin_check_allowed` with TradingView's scheduling — which
 includes the post-exit re-size: when a priced bracket leg of the script bar
 fills, the slice resting at that bar's adverse extreme was sized on the
 pre-exit book, and the legacy broker cancelled and re-scheduled it there
-(`margin_check_allowed` `pine_adapter.cpp:14792-14825`), so the adapter admits
+(`margin_check_allowed` `pine_adapter.cpp:15286-15319`), so the adapter admits
 the kernel's own point for that driver point while (and only while) a slice
 rests —
 `resolve_margin_requirement` with its ten-significant-digit money and
@@ -3002,7 +3002,15 @@ begin-time hook, after its same-symbol sites, which keep their own route. The
 kernel merges; the adapter runs the site's payload on every bar handed over, in
 the requested context: history offsets and TA state over the context's own
 bars, `bar_index` the context's, `time_close` the bar's own close, `syminfo.*`
-the symbol's facts (`syminfo.tickerid` is the string the script passed).
+the symbol's facts (`syminfo.tickerid` is the string the script passed). On a
+D, W or M chart the adapter judges TradingView's merge against the chart bar's
+own period: after the input's deliveries it runs the bars closed by the chart
+bar's `time_close` (lookahead off), or opened by its `time` (lookahead on, an
+intraday requested timeframe), that the kernel has not handed over yet, and a
+bar the kernel hands over later is not run again. The two agree wherever the
+chart bar's stamp opens its own session; OANDA stamps its XAUUSD daily bars at
+17:00 ET inside the 1800-1700 session's break, and the kernel reads such a
+label as the session that closes at it (`tests/test_foreign_break_stamp_tapes.cpp`).
 `barmerge.gaps_on` reads na on a chart bar that received no new bar (through
 the generated `clear_security()`, which also clears the payload's own history
 series, as for a same-symbol site). A symbol whose facts say it is invalid
@@ -3120,7 +3128,7 @@ These are existing refusals, not implied future features:
 - In-session gaps on stream/warmup
 - Source `calc_on_every_tick` / `calc_on_order_fills` enabled (the runner
   rejects an explicit true override, and the Pine host refuses a stream begin
-  with `calc_on_order_fills`, `pine_strategy_host.cpp:211-214`). This is a
+  with `calc_on_order_fills`, `pine_strategy_host.cpp:212-215`). This is a
   **source-route** refusal, not a limit on the native hooks: `on_native_tick`
   and `on_native_applied` are delivered on a stream, and a native host's own
   `NativeRunSpec::calculation` is accepted there, where `EveryModeledPoint`

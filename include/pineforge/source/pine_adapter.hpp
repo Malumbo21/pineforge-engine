@@ -1398,6 +1398,9 @@ public:
     SourceMarginMoney source_margin_money(double mark_price,
                                           std::int64_t sub_bar_open_ms) const;
     double source_margin_units(const SourceMarginMoney&, bool opening_checkpoint) const;
+    double lagged_margin_follow_up_units(const std::vector<NativeOpenLot>& lots,
+                                         const SourceMarginMoney& money, double called,
+                                         double fill, std::int64_t sub_bar_open_ms) const;
     double source_margin_fill_price(double fire, bool close_is_buy) const;
 
     bool source_margin_rounded_tie_veto() const;
@@ -1519,6 +1522,11 @@ public:
                            std::uint64_t source_fill_sequence);
     void end_coof_recalc() noexcept;
     bool suppress_grouped_stop_recalc(
+        const native_order::ExecutionAppliedEvent&,
+        const NativeDecisionContext&) const noexcept;
+    // The event fills a strategy.close / close_all sent with immediately =
+    // true, executed by the bar's own calculation.
+    bool immediate_calculation_close(
         const native_order::ExecutionAppliedEvent&,
         const NativeDecisionContext&) const noexcept;
 
@@ -1749,6 +1757,7 @@ private:
                                   double& reserved_qty) const;
     void reconcile_deferred_exit_reservations(const SourceId& from_entry,
                                                double live_basis);
+    void reconcile_exit_reservations_after_margin();
     double active_staged_fx(std::int64_t) const noexcept;
     void apply_fx_open_margin_slice(const Bar&, const NativeDecisionContext&);
     void apply_fx_opening_margin_slice(const native_order::ExecutionAppliedEvent&,
@@ -1775,19 +1784,24 @@ private:
                            NativePathPhase phase) const;
     bool flat_sibling_fill_follows(const PlacementSnapshot&,
                                    const native_order::RequestHandle&) const;
+    bool add_sibling_fill_follows(const PlacementSnapshot&,
+                                  const native_order::RequestHandle&) const;
+    std::size_t add_sibling_lots(std::int64_t placed) const;
     bool whole_unit_follow_up_due(double called_units, double mark) const;
-    void follow_one_unit_margin_call(double called_units, double fill, double current,
-                                     const NativeDecisionContext&);
+    bool margin_follow_up_scope() const noexcept;
+    double margin_follow_up_units(double called_units, double fill,
+                                  std::int64_t sub_bar_open_ms) const;
+    void follow_margin_call(double called_units, double fill, double current,
+                            const NativeDecisionContext&);
     bool declined_reversal_at_open(const Bar&) const;
     bool schedule_margin_call_path(const Bar&, const NativeDecisionContext&);
     bool close_point_margin_scope() const noexcept;
     void withdraw_waypoint_margin_calls();
     bool rest_waypoint_margin_call(const Bar&, int from, int to, const NativeDecisionContext&);
-    bool commissioned_explicit_short_opened(const NativeDecisionContext&) const;
     bool close_point_margin_call(const Bar&, const NativeDecisionContext&, bool cancelled);
     bool book_close_point_call(double mark, double units, const NativeDecisionContext&,
                                bool queued, double reference_mark = 0.0);
-    void close_point_follow_up(double mark, const NativeDecisionContext&);
+    void close_point_follow_up(double mark, double called_units, const NativeDecisionContext&);
     std::vector<std::pair<native_order::RequestHandle, PlacementSnapshot>>
     same_bar_close_alls(const NativeDecisionContext&) const;
     void size_close_alls_at_placement(
@@ -1900,6 +1914,7 @@ private:
     bool coof_current_fill_was_forced_waypoint() const noexcept;
     double coof_next_waypoint(int* path_index = nullptr) const noexcept;
     bool coof_remaining_recrosses(double level, bool long_position) const noexcept;
+    bool coof_leg_reaches_exit(const PlacementSnapshot&) const noexcept;
     void flush_coof_tail(bool openings_only = false,
                          bool include_next_open = false);
     native_order::Owner owner_for_close(const SourceId&, bool dynamic) const;
@@ -2022,6 +2037,8 @@ private:
     // still has an order the close fills at any price.
     void fill_pooc_close_exits(double raw_close, const NativeDecisionContext&);
     bool pooc_close_market_pending(const NativeDecisionContext&) const;
+    bool pooc_close_entry_immediate_pending(const NativeDecisionContext&,
+                                            const native_order::RequestHandle* except) const;
     // A from_entry "" exit without a quantity that is the book's only exit:
     // it closes its percentage of the position it fills against.
     bool fill_time_global_exit(const PlacementSnapshot&) const;
@@ -2183,10 +2200,11 @@ private:
     // is dead once that bar's close has been checked.
     std::uint64_t close_margin_point_ = std::numeric_limits<std::uint64_t>::max();
     std::int64_t close_margin_cancelled_bar_ = std::numeric_limits<std::int64_t>::min();
-    // The script bar whose close owes a one-unit follow-up
-    // (follow_one_unit_margin_call), booked there after the script. Same
-    // hash argument: set on the bar's path, dead once its close is checked.
+    // The script bar whose close owes a follow-up (follow_margin_call), booked
+    // there after the script, and the units it owes. Same hash argument: set
+    // on the bar's path, dead once its close is checked.
     std::int64_t close_margin_follow_up_bar_ = std::numeric_limits<std::int64_t>::min();
+    double close_margin_follow_up_units_ = 0.0;
     // The script bar whose path checks the adapter rests itself, point by
     // point, after a call at a point before the bar's adverse extreme
     // (rest_waypoint_margin_call). Same hash argument: set on the bar's path,

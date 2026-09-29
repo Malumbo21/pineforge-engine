@@ -634,6 +634,21 @@ protected:
     SourceIdLedgerView source_id_ledger_view() const noexcept {
         return SourceIdLedgerView(this);
     }
+    // strategy.netprofit and, through current_equity(), strategy.equity and
+    // the netprofit/openprofit percentages. TradingView charges an entry's
+    // commission when the entry fills, so the entry fees the open lots have
+    // paid (the share still on each lot) are already out of net profit;
+    // strategy.openprofit (open_profit) stays gross of them
+    // (tests/fixtures/open_entry_fee_charged). The engine's own accessors
+    // keep the closed trades' figures.
+    double net_profit() const { return BacktestEngine::net_profit() - open_entry_fees_paid(); }
+    double current_equity() const {
+        return BacktestEngine::current_equity() - open_entry_fees_paid();
+    }
+    // Initial capital plus the closed trades' net profit: current_equity()
+    // before the open lots' paid entry fees are charged.
+    double closed_trade_equity() const { return BacktestEngine::current_equity(); }
+    double open_entry_fees_paid() const;
     double signed_position_size() const;
     void freeze_script_position_view();
     void clear_script_position_view();
@@ -658,6 +673,18 @@ protected:
         return chart_time_close();
     }
     int64_t chart_time_close() const;  // the chart bar's own (pine_strategy_host.cpp)
+    // The close of the chart bar stamped `stamp`, as chart_time_close reads it.
+    int64_t chart_bar_close_ms(int64_t stamp) const;
+    // Pine v6 time() / time_close() reading another bar: bars_back and
+    // timeframe_bars_back (pine_strategy_host.cpp). From the chart bar opening
+    // at `bar_open_ms` (the current one), `bars_back` chart bars back -- na
+    // before the first -- or, when negative, forward; then the `tf` bar (on
+    // `session` / `tz`, as time() reads them) holding that chart bar, stepped
+    // `timeframe_bars_back` of its own bars: back when positive, forward when
+    // negative. Returns its open, or its close with `close`.
+    int64_t pine_time_offset(int64_t bar_open_ms, int bars_back, const std::string& tf,
+                             const std::string& session, const std::string& tz,
+                             int timeframe_bars_back, bool close) const;
     // ab9714be pine_strategy_host.hpp:348-358: generated three-argument
     // session predicates are class-scope calls whose chart timeframe changes
     // the D/W/M meaning.  Keep that Pine policy in the source host; the
@@ -754,8 +781,10 @@ private:
     // One request.security site of ANOTHER symbol (register_security_eval with a
     // symbol key). Its payload runs in the requested context: on every bar of the
     // symbol's feed, in order, as the kernel hands the bars over through the
-    // site's NativeSeriesSource::InstrumentFeed series. The registration fields
-    // are the site's; the rest is per run.
+    // site's NativeSeriesSource::InstrumentFeed series -- or, on a calendar
+    // chart, as soon as TradingView's merge rule makes a bar visible
+    // (read_ahead_foreign_security_sites). The registration fields are the
+    // site's; the rest is per run.
     struct ForeignSecuritySite {
         std::string symbol;         // the run-time key, exactly as the script passes it
         std::string requested_tf;   // the literal as registered ("" = the chart's)
@@ -765,19 +794,25 @@ private:
         // Per run: the feed key's timeframe (canonical spelling), whether the
         // symbol is invalid (the site then reads na throughout), the kernel
         // series the site reads (-1 when none), the feed the kernel serves it
-        // from (an index into the installed feeds), the context bars handed over
-        // so far (the next one's bar_index), and the close of the bar most
-        // recently handed over. `eval` carries the requested-context bar index
-        // into the payload's TA members; `syminfo` is the context's SymInfo.
+        // from (an index into the installed feeds), the context bars the
+        // payload has run on so far (the next one's bar_index and feed index),
+        // and the close of the bar it ran on last. `eval` carries the
+        // requested-context bar index into the payload's TA members; `syminfo`
+        // is the context's SymInfo.
         std::string tf;
         bool invalid = false;
         std::int64_t subscription = -1;
         std::size_t feed = 0;
         std::int64_t delivered = 0;
         std::int64_t close_ms = 0;
-        // The input the last bar was handed over on (-1: none yet): a gaps_on
-        // site that received nothing on the current input reads na.
+        // The input the payload last ran on (-1: none yet): a gaps_on site
+        // that received nothing on the current input reads na.
         std::int64_t last_input = -1;
+        // The bars the kernel's series has handed over so far, the next one's
+        // feed index. A bar the payload already ran on, because the merge
+        // rule made it visible on an earlier chart bar, is handed over below
+        // `delivered` and is not run again.
+        std::int64_t handed = 0;
         SecurityEvalState eval{};
         SymInfo syminfo{};
     };
@@ -818,8 +853,15 @@ private:
     // for every site that reads one, and a site that can read nothing fails
     // the run closed (thrown, naming the symbol and timeframe).
     void prepare_foreign_security_sites(std::vector<NativeTimeframeSubscription>& declared);
-    // gaps_on foreign sites read na on an input the kernel hands them nothing
-    // on: cleared at every input, before the kernel's deliveries for it.
+    // The site's payload on the next bar of its feed, in the requested
+    // context: `bar` and `close_ms` are that bar's own.
+    void run_foreign_site_bar(ForeignSecuritySite& site, const Bar& bar, std::int64_t close_ms);
+    // On a calendar chart, every foreign bar TradingView's merge rule makes
+    // visible at `chart_bar` that the kernel has not handed over yet, run in
+    // feed order after the input's deliveries (pine_security_eval.cpp).
+    void read_ahead_foreign_security_sites(const Bar& chart_bar);
+    // gaps_on foreign sites read na on an input that ran their payload on no
+    // new bar: cleared at every chart bar, after the input's deliveries.
     void clear_gapped_foreign_security_sites();
     std::int64_t find_symbol_feed(const std::string& key, const std::string& tf) const;
     void refresh_symbol_data_digest() noexcept;

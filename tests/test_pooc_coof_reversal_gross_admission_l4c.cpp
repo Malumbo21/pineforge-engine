@@ -13,6 +13,10 @@
  * the second source call.  The scratch row is the buy's: TradingView fills
  * the buy first at the close whichever call came first (lab tv
  * w6-f10d-pooc-pair, w6-f10e-pooc-coof-pair; lane W6-ENG-FILL-ORDER).
+ * The decline holds without calc_on_order_fills and with slippage or a
+ * commission too (lab tv tests/fixtures/pooc_pair_gross
+ * hel-h1-pooc-pair-gross-slip and hel-h2-pooc-pair-gross-zero; R5 lane
+ * TAIL-D).
  *
  * Clean-room TV anchors:
  *   pf-probe-coof-pooc-opposite-market-ordering
@@ -194,7 +198,7 @@ public:
         CancelRearm,
         PriorRestingCancelRearm,
         RejectedExtra,
-        RejectedInfiniteExtra,
+        RejectedOverflowExtra,
         CancelAllThenPair,
         NextBarCleanPair,
     };
@@ -286,10 +290,10 @@ public:
             strategy_entry("RX-X", true, kNaN, kNaN, 101.0);
             strategy_entry("RX-A", true, kNaN, kNaN, 55.0);
             strategy_entry("RX-B", false, kNaN, kNaN, 55.0);
-        } else if (shape_ == Shape::RejectedInfiniteExtra) {
+        } else if (shape_ == Shape::RejectedOverflowExtra) {
             strategy_entry(
                 "RI-X", true, kNaN, kNaN,
-                std::numeric_limits<double>::infinity());
+                std::numeric_limits<double>::max());
             strategy_entry("RI-A", true, kNaN, kNaN, 55.0);
             strategy_entry("RI-B", false, kNaN, kNaN, 55.0);
         } else if (shape_ == Shape::CancelAllThenPair) {
@@ -348,8 +352,11 @@ static void test_green_mutated_two_order_books_fail_closed() {
         /*prior_bar=*/true);
     run("signal-rejected extra call stays on ordinary path",
         MutationProbe::Shape::RejectedExtra, -55.0);
-    run("infinite signal-rejected call stays on ordinary path",
-        MutationProbe::Shape::RejectedInfiniteExtra, -55.0);
+    // An infinite quantity is the default quantity (R5 lane TAIL-C,
+    // tests/fixtures/nonfinite_entry_qty), so the call the signal refuses is
+    // a finite quantity whose notional overflows.
+    run("overflowing signal-rejected call stays on ordinary path",
+        MutationProbe::Shape::RejectedOverflowExtra, -55.0);
     run("cancel-all then pair stays on ordinary path",
         MutationProbe::Shape::CancelAllThenPair, -55.0);
     run("prior-bar tombstone does not suppress a clean next-bar pair",
@@ -374,17 +381,23 @@ static void assert_excluded_pair_uses_legacy_result(
 }
 
 static void test_green_scope_exclusions() {
+    // Without calc_on_order_fills, with a commission and with slippage the
+    // later call is declined as well: one trade, the earlier call's (R5 lane
+    // TAIL-D, lab tv hel-h1-pooc-pair-gross-slip / -h2-...-zero).
     assert_excluded_pair_uses_legacy_result(
-        "exclude without COOF", false, true, 0.0, 100.0, 0);
+        "declined without COOF", false, true, 0.0, 100.0, 0,
+        /*expected_trades=*/1);
     assert_excluded_pair_uses_legacy_result(
         "exclude without POOC", true, false, 0.0, 100.0, 0,
         /*expected_trades=*/1);
     assert_excluded_pair_uses_legacy_result(
-        "exclude commissioned pair", true, true, 0.1, 100.0, 0);
+        "declined with a commission", true, true, 0.1, 100.0, 0,
+        /*expected_trades=*/1);
     assert_excluded_pair_uses_legacy_result(
         "exclude custom margin", true, true, 0.0, 50.0, 0);
     assert_excluded_pair_uses_legacy_result(
-        "exclude slippage", true, true, 0.0, 100.0, 1);
+        "declined with slippage", true, true, 0.0, 100.0, 1,
+        /*expected_trades=*/1);
 
     std::printf("exclude three-call book\n");
     Probe three(true, 30.0);

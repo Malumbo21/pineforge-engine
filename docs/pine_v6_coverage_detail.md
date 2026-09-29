@@ -249,7 +249,7 @@
 | `syminfo.target_price_median` | var | ⏭️ Parse-and-skip | `get_syminfo_metadata("target_price_median")` | Runtime metadata map |
 | `syminfo.ticker` | var | ✅ Runtime | `syminfo_.ticker` | |
 | `syminfo.tickerid` | var | ✅ Runtime | `syminfo_.tickerid` | |
-| `syminfo.timezone` | var | ✅ Runtime | `syminfo_.timezone` | |
+| `syminfo.timezone` | var | ✅ Runtime | `syminfo_.timezone` | The engine's "UTC" (and an empty zone) reads "Etc/UTC", TradingView's spelling (codegen) |
 | `syminfo.type` | var | ✅ Runtime | `syminfo_.type` | |
 | `syminfo.volumetype` | var | ✅ Runtime | `syminfo_.volumetype` | |
 
@@ -715,8 +715,8 @@ All **✅ Runtime** — backed by `PineMatrix` (`matrix.hpp` / `matrix.cpp`) for
 | `strategy()` | fn | ✅ Runtime | `BacktestEngine` constructor + `StrategyOverrides` | |
 | `strategy.cancel()` | fn | ✅ Runtime | `strategy_cancel()` | |
 | `strategy.cancel_all()` | fn | ✅ Runtime | `strategy_cancel_all()` | |
-| `strategy.close()` | fn | ✅ Runtime | `strategy_close()` | |
-| `strategy.close_all()` | fn | ✅ Runtime | `strategy_close_all()` | |
+| `strategy.close()` | fn | ✅ Runtime | `strategy_close()` | `immediately = true` fills at the bar's close, and no `calc_on_order_fills` recalculation follows it (`tests/test_coof_immediate_close_final_tapes.cpp`) |
+| `strategy.close_all()` | fn | ✅ Runtime | `strategy_close_all()` | As `strategy.close()` |
 | `strategy.closedtrades.commission()` | fn | ✅ Runtime | Trade accessor | |
 | `strategy.closedtrades.entry_bar_index()` | fn | ✅ Runtime | Trade accessor | |
 | `strategy.closedtrades.entry_comment()` | fn | ✅ Runtime | Trade accessor | |
@@ -854,8 +854,8 @@ All **⏭️ Parse-and-skip** — table drawing methods; no runtime backing.
 
 | Identifier | Kind | Status | Backing | Notes |
 |---|---|---|---|---|
-| `time()` | fn | ✅ Runtime | `pine_time(bar_ms, tf, session, tz, chart_tf)` in `session_time.hpp` | |
-| `time_close()` | fn | ✅ Runtime | `pine_time_close(...)` in `session_time.hpp` | |
+| `time()` | fn | ✅ Runtime | `pine_time(bar_ms, tf, session, tz, chart_tf)` in `session_time.hpp`; with `bars_back` / `timeframe_bars_back`, `PineStrategyHost::pine_time_offset` | Another bar's time reads the bars the chart's history holds, the session calendar past them (`tests/test_time_bars_back_tapes.cpp`) |
+| `time_close()` | fn | ✅ Runtime | `pine_time_close(...)` in `session_time.hpp`; with `bars_back` / `timeframe_bars_back`, `PineStrategyHost::pine_time_offset` | As `time()` |
 | `timeframe.change()` | fn | ✅ Runtime | `tf_change(prev_ms, curr_ms, tf)` in `timeframe.hpp` | |
 | `timeframe.from_seconds()` | fn | ❌ Unsupported | Hard-reject via `NOT_YET_FUNC` (`support_checker.py`) | Codegen would have emitted `false` → wrong TF strings |
 | `timeframe.in_seconds()` | fn | ✅ Runtime | `tf_to_seconds(tf)` | |
