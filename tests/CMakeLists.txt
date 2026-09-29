@@ -325,6 +325,8 @@ set(TEST_SOURCES
     test_calendar_wm_open_utc_fastpath
     test_calendar_bucket_closes_once
     test_intraday_grid_late_day_open
+    test_native_day_labels
+    test_daily_magnifier_tapes
     test_htf_session_close_completion
     test_chart_bar_bucket_label
     test_htf_bucket_real_end
@@ -1653,6 +1655,8 @@ list(APPEND TEST_SOURCES test_session_extended_day_tape)
 list(APPEND TEST_SOURCES test_time_bars_back_tapes)
 #   TAIL-E: a close the bar's own calculation executes is final for the bar.
 list(APPEND TEST_SOURCES test_coof_immediate_close_final_tapes)
+# Lane XAU-CAL: TradingView's symbol calendar against its tapes.
+list(APPEND TEST_SOURCES test_symbol_calendar_tapes)
 #   K-SESSION-WINDOWS F7: an aggregated bar opening inside a session break.
 list(APPEND TEST_SOURCES test_session_break_open_bar_tape)
 #   F1(e) an aggregated process_orders_on_close script reading entry_bar_index.
@@ -2063,6 +2067,14 @@ add_test(
             ${PROJECT_SOURCE_DIR}/scripts/test_run_strategy_mincontract.py
 )
 
+# Lane XAU-CAL: TradingView's symbol calendar as a run input (the tape
+# converter, the loader and the harness's syminfo-metadata transport).
+add_test(
+    NAME test_symbol_calendar
+    COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/scripts/test_symbol_calendar.py
+)
+
 # The live-flags lane's own pure bookkeeping (strip_open_at_end,
 # interior_diff, hash_diff_reason, fold_reasons) against synthetic
 # rows/hash arrays -- complements test_live_flags_lane_positive's engine-
@@ -2471,7 +2483,9 @@ foreach(_pf_hm_row IN ITEMS
         # R5 lane MAG-INTRABAR's tape row.
         "test_adapter_magnifier_intrabar_tapes|PINEFORGE_MI_FIXTURE_DIR|magnifier_intrabars"
         # R5 lane PAR-ORDERS-3's tape row.
-        "test_pooc_limit_close_tapes|PINEFORGE_PA3_POOC_LIMIT_FIXTURE_DIR|pooc_limit_close")
+        "test_pooc_limit_close_tapes|PINEFORGE_PA3_POOC_LIMIT_FIXTURE_DIR|pooc_limit_close"
+        # R5 lane XAU-CAL's tape row.
+        "test_daily_magnifier_tapes|PINEFORGE_DAILY_MAGNIFIER_FIXTURE_DIR|daily_magnifier")
     string(REPLACE "|" ";" _pf_hm_fields "${_pf_hm_row}")
     list(GET _pf_hm_fields 0 _pf_hm_target)
     list(GET _pf_hm_fields 1 _pf_hm_macro)
@@ -2886,6 +2900,13 @@ endif()
 if(TARGET test_coof_immediate_close_final_tapes)
     target_compile_definitions(test_coof_immediate_close_final_tapes PRIVATE
         PINEFORGE_COOF_IMMEDIATE_CLOSE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/coof_immediate_close")
+endif()
+# Lane XAU-CAL: TradingView's symbol calendar tapes, and lane TAIL-E's
+# bars_back tapes the same test replays with the calendar.
+if(TARGET test_symbol_calendar_tapes)
+    target_compile_definitions(test_symbol_calendar_tapes PRIVATE
+        PINEFORGE_SYMBOL_CALENDAR_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/symbol_calendar"
+        PINEFORGE_TIME_BARS_BACK_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/time_bars_back")
 endif()
 
 # Lane W12-ENG-TIME: the rows that read its TradingView tapes.
